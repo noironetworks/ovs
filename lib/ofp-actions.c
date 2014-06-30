@@ -1281,6 +1281,7 @@ ofpact_is_set_action(const struct ofpact *a)
     switch (a->type) {
     case OFPACT_SET_FIELD:
     case OFPACT_REG_LOAD:
+    case OFPACT_REG_MOVE:
     case OFPACT_SET_ETH_DST:
     case OFPACT_SET_ETH_SRC:
     case OFPACT_SET_IP_DSCP:
@@ -1318,7 +1319,6 @@ ofpact_is_set_action(const struct ofpact *a)
     case OFPACT_POP_QUEUE:
     case OFPACT_PUSH_MPLS:
     case OFPACT_PUSH_VLAN:
-    case OFPACT_REG_MOVE:
     case OFPACT_RESUBMIT:
     case OFPACT_SAMPLE:
     case OFPACT_STACK_POP:
