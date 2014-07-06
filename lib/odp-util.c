@@ -1153,7 +1153,7 @@ format_odp_key_attr(const struct nlattr *a, const struct nlattr *ma,
             */
             ds_put_char(ds, ')');
         } else {
-            ds_put_format(ds, "tun_id=0x%"PRIx64",ivxlan_sepg=0x%"PRIu16",src="IP_FMT",dst="IP_FMT","
+            ds_put_format(ds, "tun_id=0x%"PRIx64",ivxlan_sepg=0x%"PRIx16",src="IP_FMT",dst="IP_FMT","
                           "tos=0x%"PRIx8",ttl=%"PRIu8",flags(",
                           ntohll(tun_key.tun_id),
                           ntohs(tun_key.ivxlan_sepg),

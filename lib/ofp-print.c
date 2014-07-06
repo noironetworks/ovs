@@ -126,7 +126,7 @@ ofp_print_packet_in(struct ds *string, const struct ofp_header *oh,
     }
 
     if (pin.fmd.tun_ivxlan_sepg != htons(0)) {
-        ds_put_format(string, " tun_ivxlan_sepg=0x%"PRIu16, 
+        ds_put_format(string, " tun_ivxlan_sepg=0x%"PRIx16, 
                       ntohs(pin.fmd.tun_ivxlan_sepg));
     }
 
