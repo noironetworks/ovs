@@ -37,6 +37,7 @@ struct flow_tnl {
     ovs_be32 ip_src;
     ovs_be32 ip_dst;
     uint16_t flags;
+    uint16_t ivxlan_sepg;
     uint8_t ip_tos;
     uint8_t ip_ttl;
 };
@@ -63,7 +64,7 @@ struct pkt_metadata {
 };
 
 #define PKT_METADATA_INITIALIZER(PORT) \
-    (struct pkt_metadata){ 0, 0, { 0, 0, 0, 0, 0, 0}, 0, 0, {(PORT)} }
+    (struct pkt_metadata){ 0, 0, { 0, 0, 0, 0, 0, 0, 0}, 0, 0, {(PORT)} }
 
 bool dpid_from_string(const char *s, uint64_t *dpidp);
 

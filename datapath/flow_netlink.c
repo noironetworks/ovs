@@ -363,6 +363,7 @@ static int ipv4_tun_from_nlattr(const struct nlattr *attr,
 			[OVS_TUNNEL_KEY_ATTR_CSUM] = 0,
 			[OVS_TUNNEL_KEY_ATTR_OAM] = 0,
 			[OVS_TUNNEL_KEY_ATTR_GENEVE_OPTS] = -1,
+                        [OVS_TUNNEL_KEY_ATTR_IVXLAN_SEPG] = sizeof(u16),
 		};
 
 		if (type > OVS_TUNNEL_KEY_ATTR_MAX) {
@@ -461,6 +462,10 @@ static int ipv4_tun_from_nlattr(const struct nlattr *attr,
 							   nla_len(a)),
 				nla_data(a), nla_len(a), is_mask);
 			break;
+                case OVS_TUNNEL_KEY_ATTR_IVXLAN_SEPG:
+                        SW_FLOW_KEY_PUT(match, tun_key.ivxlan_sepg,
+                                        nla_get_be16(a), is_mask);
+                        break;
 		default:
 			return -EINVAL;
 		}
@@ -502,6 +507,9 @@ static int ipv4_tun_to_nlattr(struct sk_buff *skb,
 	if (output->tun_flags & TUNNEL_KEY &&
 	    nla_put_be64(skb, OVS_TUNNEL_KEY_ATTR_ID, output->tun_id))
 		return -EMSGSIZE;
+        if (output->ivxlan_sepg &&
+                nla_put_be16(skb, OVS_TUNNEL_KEY_ATTR_IVXLAN_SEPG, output->ivxlan_sepg))
+                return -EMSGSIZE;
 	if (output->ipv4_src &&
 		nla_put_be32(skb, OVS_TUNNEL_KEY_ATTR_IPV4_SRC, output->ipv4_src))
 		return -EMSGSIZE;

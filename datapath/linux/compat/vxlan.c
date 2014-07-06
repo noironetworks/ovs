@@ -69,11 +69,41 @@ struct vxlanhdr {
 	__be32 vx_vni;
 };
 
+struct ivxlanhdr_word1 {
+#ifdef __LITTLE_ENDIAN_BITFIELD
+        __u8 reserved_flags:3;
+        __u8 instance_id_present:1;
+        __u8 map_version_present:1;
+        __u8 solicit_echo_nonce:1;
+        __u8 locator_status_bits_present:1;
+        __u8 nonce_present:1;
+#else
+        __u8 nonce_present:1;
+        __u8 locator_status_bits_present:1;
+        __u8 solicit_echo_nonce:1;
+        __u8 map_version_present:1;
+        __u8 instance_id_present:1;
+        __u8 reserved_flags:3;
+#endif
+        __u8 unsupported;
+        __be16 src_group;
+};
+
+struct ivxlanhdr {
+        union {
+                struct ivxlanhdr_word1 word1;
+                __be32 vx_flags;
+        } u1;
+        __be32 vx_vni;
+};
+
 /* Callback from net/ipv4/udp.c to receive packets */
 static int vxlan_udp_encap_recv(struct sock *sk, struct sk_buff *skb)
 {
 	struct vxlan_sock *vs;
 	struct vxlanhdr *vxh;
+        struct ivxlanhdr *ivxh;
+        __be16 ivxlan_sepg = 0;
 
 	/* Need Vxlan and inner Ethernet header to be present */
 	if (!pskb_may_pull(skb, VXLAN_HLEN))
@@ -81,8 +111,11 @@ static int vxlan_udp_encap_recv(struct sock *sk, struct sk_buff *skb)
 
 	/* Return packets with reserved bits set */
 	vxh = (struct vxlanhdr *)(udp_hdr(skb) + 1);
-	if (vxh->vx_flags != htonl(VXLAN_FLAGS) ||
-	    (vxh->vx_vni & htonl(0xff))) {
+        ivxh = (struct ivxlanhdr *)(udp_hdr(skb) + 1);
+        if (ivxh->u1.word1.nonce_present) {
+            ivxlan_sepg = ivxh->u1.word1.src_group;
+	} else if (vxh->vx_flags != htonl(VXLAN_FLAGS) ||
+	        (vxh->vx_vni & htonl(0xff))) {
 		pr_warn("invalid vxlan flags=%#x vni=%#x\n",
 			ntohl(vxh->vx_flags), ntohl(vxh->vx_vni));
 		goto error;
@@ -95,7 +128,7 @@ static int vxlan_udp_encap_recv(struct sock *sk, struct sk_buff *skb)
 	if (!vs)
 		goto drop;
 
-	vs->rcv(vs, skb, vxh->vx_vni);
+	vs->rcv(vs, skb, vxh->vx_vni, ivxlan_sepg);
 	return 0;
 
 drop:
@@ -179,9 +212,10 @@ static int handle_offloads(struct sk_buff *skb)
 int vxlan_xmit_skb(struct vxlan_sock *vs,
 		   struct rtable *rt, struct sk_buff *skb,
 		   __be32 src, __be32 dst, __u8 tos, __u8 ttl, __be16 df,
-		   __be16 src_port, __be16 dst_port, __be32 vni)
+		   __be16 src_port, __be16 dst_port, __be32 vni, __be16 epg)
 {
 	struct vxlanhdr *vxh;
+        struct ivxlanhdr *ivxh;
 	struct udphdr *uh;
 	int min_headroom;
 	int err;
@@ -206,9 +240,17 @@ int vxlan_xmit_skb(struct vxlan_sock *vs,
 
 	skb_reset_inner_headers(skb);
 
-	vxh = (struct vxlanhdr *) __skb_push(skb, sizeof(*vxh));
-	vxh->vx_flags = htonl(VXLAN_FLAGS);
-	vxh->vx_vni = vni;
+        if (epg == 0) {
+                vxh = (struct vxlanhdr *) __skb_push(skb, sizeof(*vxh));
+                vxh->vx_flags = htonl(VXLAN_FLAGS);
+        	vxh->vx_vni = vni;
+        } else {
+                ivxh = (struct ivxlanhdr *) __skb_push(skb, sizeof(*ivxh));
+                ivxh->u1.vx_flags = htonl(VXLAN_FLAGS);
+                ivxh->vx_vni = vni;
+                ivxh->u1.word1.nonce_present = 1;
+                ivxh->u1.word1.src_group = epg;
+        }
 
 	__skb_push(skb, sizeof(*uh));
 	skb_reset_transport_header(skb);

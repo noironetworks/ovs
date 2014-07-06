@@ -1823,6 +1823,8 @@ static int ovs_vport_cmd_new(struct sk_buff *skb, struct genl_info *info)
 	parms.dp = dp;
 	parms.port_no = port_no;
 	parms.upcall_portids = a[OVS_VPORT_ATTR_UPCALL_PID];
+        printk(KERN_ERR "ovs_vport_cmd_new : name %s, type %d, port_no %x\n",
+               parms.name, parms.type, parms.port_no);
 
 	vport = new_vport(&parms);
 	err = PTR_ERR(vport);

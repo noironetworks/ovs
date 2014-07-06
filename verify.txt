@@ -1,0 +1,13 @@
+root@noiro-ucs06:~/noiro-ovs# ovs-ofctl dump-flows br0
+NXST_FLOW reply (xid=0x4):
+ cookie=0x0, duration=454.447s, table=0, n_packets=310, n_bytes=350610, idle_age=0, in_port=2 actions=set_tunnel:0x32,load:0xd010101->NXM_NX_TUN_IPV4_DST[],load:0x64->NXM_NX_TUN_IVXLAN_SEPG[],output:1
+
+ cookie=0x0, duration=74.976s, table=0, n_packets=55, n_bytes=5390, idle_age=1, tun_id=0x32,tun_src=13.1.1.1,tun_ivxlan_sepg=101,in_port=1 actions=output:2
+
+
+root@noiro-ucs06:~/noiro-ovs# ovs-dpctl dump-flows
+recirc_id(0),skb_priority(0),tunnel(tun_id=0x32/0xffffffffffffffff,ivxlan_sepg=0x65/0xffff,src=13.1.1.1/255.255.255.255,dst=13.1.1.2/255.255.255.255,tos=0/0xff,ttl=64/0xff,flags(key)),in_port(2),skb_mark(0),eth_type(0x0800),ipv4(src=14.1.1.1/0.0.0.0,dst=14.1.1.2/0.0.0.0,proto=1/0,tos=0/0,ttl=64/0,frag=no/0xff), packets:72, bytes:7056, used:0.874s, actions:3
+
+recirc_id(0),skb_priority(0),in_port(3),eth_type(0x0800),ipv4(src=192.168.1.108/0.0.0.0,dst=74.125.239.121/0.0.0.0,proto=6/0,tos=0/0x3,ttl=64/0,frag=no/0xff), packets:72, bytes:81432, used:0.233s, flags:P., actions:set(tunnel(tun_id=0x32,ivxlan_sepg=0x100,src=0.0.0.0,dst=13.1.1.1,tos=0x0,ttl=64,flags(df,key))),2
+root@noiro-ucs06:~/noiro-ovs#
+

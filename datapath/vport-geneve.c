@@ -195,7 +195,7 @@ static int geneve_rcv(struct sock *sk, struct sk_buff *skb)
 		(geneveh->critical ? TUNNEL_CRIT_OPT : 0);
 
 	key = vni_to_tunnel_id(geneveh->vni);
-	ovs_flow_tun_info_init(&tun_info, ip_hdr(skb), key, flags,
+	ovs_flow_tun_info_init(&tun_info, ip_hdr(skb), key, flags, 0,
 				geneveh->options, opts_len);
 
 	ovs_vport_receive(vport_from_priv(geneve_port), skb, &tun_info);

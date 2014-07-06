@@ -47,6 +47,7 @@ struct ovs_key_ipv4_tunnel {
 	__be32 ipv4_src;
 	__be32 ipv4_dst;
 	__be16 tun_flags;
+        __be16 ivxlan_sepg;
 	u8   ipv4_tos;
 	u8   ipv4_ttl;
 } __packed __aligned(4); /* Minimize padding. */
@@ -69,6 +70,7 @@ struct ovs_tunnel_info {
 static inline void ovs_flow_tun_info_init(struct ovs_tunnel_info *tun_info,
 					 const struct iphdr *iph, __be64 tun_id,
 					 __be16 tun_flags,
+                                         __be16 ivxlan_sepg,
 					 struct geneve_opt *opts,
 					 u8 opts_len)
 {
@@ -77,6 +79,7 @@ static inline void ovs_flow_tun_info_init(struct ovs_tunnel_info *tun_info,
 	tun_info->tunnel.ipv4_dst = iph->daddr;
 	tun_info->tunnel.ipv4_tos = iph->tos;
 	tun_info->tunnel.ipv4_ttl = iph->ttl;
+        tun_info->tunnel.ivxlan_sepg = ivxlan_sepg;
 	tun_info->tunnel.tun_flags = tun_flags;
 
 	/* clear struct padding. */

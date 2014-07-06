@@ -293,6 +293,21 @@ match_set_tun_flags_masked(struct match *match, uint16_t flags, uint16_t mask)
 }
 
 void
+match_set_tun_ivxlan_sepg_masked(struct match *match, 
+                                 uint16_t ivxlan_sepg, 
+                                 uint16_t mask)
+{
+    match->wc.masks.tunnel.ivxlan_sepg = mask;
+    match->flow.tunnel.ivxlan_sepg = ivxlan_sepg & mask;
+}
+
+void
+match_set_tun_ivxlan_sepg(struct match *match, uint16_t ivxlan_sepg)
+{
+    match_set_tun_ivxlan_sepg_masked(match, ivxlan_sepg, UINT16_MAX);
+}
+
+void
 match_set_in_port(struct match *match, ofp_port_t ofp_port)
 {
     match->wc.masks.in_port.ofp_port = u16_to_ofp(UINT16_MAX);
@@ -918,6 +933,7 @@ format_flow_tunnel(struct ds *s, const struct match *match)
     format_be64_masked(s, "tun_id", tnl->tun_id, wc->masks.tunnel.tun_id);
     format_ip_netmask(s, "tun_src", tnl->ip_src, wc->masks.tunnel.ip_src);
     format_ip_netmask(s, "tun_dst", tnl->ip_dst, wc->masks.tunnel.ip_dst);
+    format_be16_masked(s, "tun_ivxlan_sepg", tnl->ivxlan_sepg, wc->masks.tunnel.ivxlan_sepg);
 
     if (wc->masks.tunnel.ip_tos) {
         ds_put_format(s, "tun_tos=%"PRIx8",", tnl->ip_tos);

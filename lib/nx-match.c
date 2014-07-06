@@ -721,6 +721,8 @@ nx_put_raw(struct ofpbuf *b, enum ofp_version oxm, const struct match *match,
                 flow->tunnel.ip_src, match->wc.masks.tunnel.ip_src);
     nxm_put_32m(b, mf_oxm_header(MFF_TUN_DST, oxm),
                 flow->tunnel.ip_dst, match->wc.masks.tunnel.ip_dst);
+    nxm_put_16m(b, mf_oxm_header(MFF_TUN_IVXLAN_SEPG, oxm),
+                flow->tunnel.ivxlan_sepg, match->wc.masks.tunnel.ivxlan_sepg);
 
     /* Registers. */
     for (i = 0; i < FLOW_N_REGS; i++) {

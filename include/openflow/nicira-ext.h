@@ -1864,6 +1864,8 @@ OFP_ASSERT(sizeof(struct nx_action_output_reg) == 24);
  * Masking: not maskable. */
 #define NXM_NX_RECIRC_ID   NXM_HEADER  (0x0001, 36, 4)
 
+#define NXM_NX_TUN_IVXLAN_SEPG NXM_HEADER (0x0001, 37, 2)
+
 /* ## --------------------- ## */
 /* ## Requests and replies. ## */
 /* ## --------------------- ## */
