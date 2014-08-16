@@ -27,6 +27,7 @@
 #include "flow.h"
 #include "meta-flow.h"
 #include "netflow.h"
+#include "smap.h"
 #include "sset.h"
 #include "stp.h"
 
@@ -43,16 +44,14 @@ struct ofport;
 struct ofproto;
 struct shash;
 struct simap;
-struct smap;
+
+/* Needed for the lock annotations. */
+extern struct ovs_mutex ofproto_mutex;
 
 struct ofproto_controller_info {
     bool is_connected;
     enum ofp12_controller_role role;
-    struct {
-        const char *keys[4];
-        const char *values[4];
-        size_t n;
-    } pairs;
+    struct smap pairs;
 };
 
 struct ofproto_sflow_options {
@@ -433,24 +432,8 @@ int ofproto_port_set_realdev(struct ofproto *, ofp_port_t vlandev_ofp_port,
 
 /* Table configuration */
 
-enum ofproto_table_config {
-    /* Send to controller. */
-    OFPROTO_TABLE_MISS_CONTROLLER = OFPTC11_TABLE_MISS_CONTROLLER,
-
-    /* Continue to the next table in the pipeline (OpenFlow 1.0 behavior). */
-    OFPROTO_TABLE_MISS_CONTINUE   = OFPTC11_TABLE_MISS_CONTINUE,
-
-    /* Drop the packet. */
-    OFPROTO_TABLE_MISS_DROP       = OFPTC11_TABLE_MISS_DROP,
-
-    /* The default miss behaviour for the OpenFlow version of the controller a
-     * packet_in message would be sent to..  For pre-OF1.3 controllers, send
-     * packet_in to controller.  For OF1.3+ controllers, drop. */
-    OFPROTO_TABLE_MISS_DEFAULT    = 3,
-};
-
-enum ofproto_table_config ofproto_table_get_config(const struct ofproto *,
-                                                   uint8_t table_id);
+enum ofputil_table_miss ofproto_table_get_miss_config(const struct ofproto *,
+                                                      uint8_t table_id);
 
 #ifdef  __cplusplus
 }

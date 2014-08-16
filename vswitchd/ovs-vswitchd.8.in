@@ -83,6 +83,10 @@ only allow privileged users, such as the superuser, to use it.
 \fBovs\-vswitchd\fR emits a log message if \fBmlockall()\fR is
 unavailable or unsuccessful.
 .
+.SS "DPDK Options"
+.IP "\fB\-\-dpdk\fR"
+Initialize \fBovs\-vswitchd\fR DPDK datapath.  Refer to INSTALL.DPDK
+for details.
 .SS "Daemon Options"
 .ds DD \
 \fBovs\-vswitchd\fR detaches only after it has connected to the \
@@ -216,6 +220,21 @@ whether it is attached or detached, port id and priority, actor
 information, and partner information.  If \fIport\fR is not specified,
 then displays detailed information about all interfaces with CFM
 enabled.
+.SS "DPCTL DATAPATH DEBUGGING COMMANDS"
+The primary way to configure \fBovs\-vswitchd\fR is through the Open
+vSwitch database, e.g. using \fBovs\-vsctl\fR(8).  These commands
+provide a debugging interface for managing datapaths.  They implement
+the same features (and syntax) as \fBovs\-dpctl\fR(8).  Unlike
+\fBovs\-dpctl\fR(8), these commands work with datapaths that are
+integrated into \fBovs\-vswitchd\fR (e.g. the \fBnetdev\fR datapath
+type).
+.PP
+.
+.ds DX \fBdpctl/\fR
+.de DO
+\\$2 \\$1 \\$3
+..
+.so lib/dpctl.man
 .
 .so ofproto/ofproto-dpif-unixctl.man
 .so ofproto/ofproto-unixctl.man

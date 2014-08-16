@@ -195,8 +195,8 @@ struct connmgr {
     char *local_port_name;
 
     /* OpenFlow connections. */
-    struct hmap controllers;   /* Controller "struct ofconn"s. */
-    struct list all_conns;     /* Contains "struct ofconn"s. */
+    struct hmap controllers;   /* All OFCONN_PRIMARY controllers. */
+    struct list all_conns;     /* All controllers. */
     uint64_t master_election_id; /* monotonically increasing sequence number
                                   * for master election */
     bool master_election_id_defined;
@@ -414,7 +414,10 @@ connmgr_get_memory_usage(const struct connmgr *mgr, struct simap *usage)
 
         packets += rconn_count_txqlen(ofconn->rconn);
         for (i = 0; i < N_SCHEDULERS; i++) {
-            packets += pinsched_count_txqlen(ofconn->schedulers[i]);
+            struct pinsched_stats stats;
+
+            pinsched_get_stats(ofconn->schedulers[i], &stats);
+            packets += stats.n_queued;;
         }
         packets += pktbuf_count_packets(ofconn->pktbuf);
     }
@@ -471,34 +474,50 @@ connmgr_get_controller_info(struct connmgr *mgr, struct shash *info)
             time_t last_connection = rconn_get_last_connection(rconn);
             time_t last_disconnect = rconn_get_last_disconnect(rconn);
             int last_error = rconn_get_last_error(rconn);
+            int i;
 
             shash_add(info, target, cinfo);
 
             cinfo->is_connected = rconn_is_connected(rconn);
             cinfo->role = ofconn->role;
 
-            cinfo->pairs.n = 0;
-
+            smap_init(&cinfo->pairs);
             if (last_error) {
-                cinfo->pairs.keys[cinfo->pairs.n] = "last_error";
-                cinfo->pairs.values[cinfo->pairs.n++]
-                    = xstrdup(ovs_retval_to_string(last_error));
+                smap_add(&cinfo->pairs, "last_error",
+                         ovs_retval_to_string(last_error));
             }
 
-            cinfo->pairs.keys[cinfo->pairs.n] = "state";
-            cinfo->pairs.values[cinfo->pairs.n++]
-                = xstrdup(rconn_get_state(rconn));
+            smap_add(&cinfo->pairs, "state", rconn_get_state(rconn));
 
             if (last_connection != TIME_MIN) {
-                cinfo->pairs.keys[cinfo->pairs.n] = "sec_since_connect";
-                cinfo->pairs.values[cinfo->pairs.n++]
-                    = xasprintf("%ld", (long int) (now - last_connection));
+                smap_add_format(&cinfo->pairs, "sec_since_connect",
+                                "%ld", (long int) (now - last_connection));
             }
 
             if (last_disconnect != TIME_MIN) {
-                cinfo->pairs.keys[cinfo->pairs.n] = "sec_since_disconnect";
-                cinfo->pairs.values[cinfo->pairs.n++]
-                    = xasprintf("%ld", (long int) (now - last_disconnect));
+                smap_add_format(&cinfo->pairs, "sec_since_disconnect",
+                                "%ld", (long int) (now - last_disconnect));
+            }
+
+            for (i = 0; i < N_SCHEDULERS; i++) {
+                if (ofconn->schedulers[i]) {
+                    const char *name = i ? "miss" : "action";
+                    struct pinsched_stats stats;
+
+                    pinsched_get_stats(ofconn->schedulers[i], &stats);
+                    smap_add_nocopy(&cinfo->pairs,
+                                    xasprintf("packet-in-%s-backlog", name),
+                                    xasprintf("%u", stats.n_queued));
+                    smap_add_nocopy(&cinfo->pairs,
+                                    xasprintf("packet-in-%s-bypassed", name),
+                                    xasprintf("%llu", stats.n_normal));
+                    smap_add_nocopy(&cinfo->pairs,
+                                    xasprintf("packet-in-%s-queued", name),
+                                    xasprintf("%llu", stats.n_limited));
+                    smap_add_nocopy(&cinfo->pairs,
+                                    xasprintf("packet-in-%s-dropped", name),
+                                    xasprintf("%llu", stats.n_queue_dropped));
+                }
             }
         }
     }
@@ -511,9 +530,7 @@ connmgr_free_controller_info(struct shash *info)
 
     SHASH_FOR_EACH (node, info) {
         struct ofproto_controller_info *cinfo = node->data;
-        while (cinfo->pairs.n) {
-            free(CONST_CAST(char *, cinfo->pairs.values[--cinfo->pairs.n]));
-        }
+        smap_destroy(&cinfo->pairs);
         free(cinfo);
     }
     shash_destroy(info);
@@ -717,12 +734,16 @@ update_in_band_remotes(struct connmgr *mgr)
     /* Add all the remotes. */
     HMAP_FOR_EACH (ofconn, hmap_node, &mgr->controllers) {
         const char *target = rconn_get_target(ofconn->rconn);
-        struct sockaddr_storage ss;
+        union {
+            struct sockaddr_storage ss;
+            struct sockaddr_in in;
+        } sa;
 
         if (ofconn->band == OFPROTO_IN_BAND
-            && stream_parse_target_with_default_port(target, OFP_OLD_PORT, &ss)
-            && ss.ss_family == AF_INET) {
-            addrs[n_addrs++] = *(struct sockaddr_in *) &ss;
+            && stream_parse_target_with_default_port(target, OFP_OLD_PORT,
+                                                     &sa.ss)
+            && sa.ss.ss_family == AF_INET) {
+            addrs[n_addrs++] = sa.in;
         }
     }
     for (i = 0; i < mgr->n_extra_remotes; i++) {
@@ -903,8 +924,9 @@ ofconn_send_role_status(struct ofconn *ofconn, uint32_t role, uint8_t reason)
     ofconn_get_master_election_id(ofconn, &status.generation_id);
 
     buf = ofputil_encode_role_status(&status, ofconn_get_protocol(ofconn));
-
-    ofconn_send(ofconn, buf, NULL);
+    if (buf) {
+        ofconn_send(ofconn, buf, NULL);
+    }
 }
 
 /* Changes 'ofconn''s role to 'role'.  If 'role' is OFPCR12_ROLE_MASTER then
@@ -915,7 +937,7 @@ ofconn_set_role(struct ofconn *ofconn, enum ofp12_controller_role role)
     if (role != ofconn->role && role == OFPCR12_ROLE_MASTER) {
         struct ofconn *other;
 
-        HMAP_FOR_EACH (other, hmap_node, &ofconn->connmgr->controllers) {
+        LIST_FOR_EACH (other, node, &ofconn->connmgr->all_conns) {
             if (other->role == OFPCR12_ROLE_MASTER) {
                 other->role = OFPCR12_ROLE_SLAVE;
                 ofconn_send_role_status(other, OFPCR12_ROLE_SLAVE, OFPCRR_MASTER_REQUEST);
@@ -1462,14 +1484,11 @@ ofconn_wants_packet_in_on_miss(struct ofconn *ofconn,
         enum ofputil_protocol protocol = ofconn_get_protocol(ofconn);
 
         if (protocol != OFPUTIL_P_NONE
-            && ofputil_protocol_to_ofp_version(protocol) >= OFP13_VERSION) {
-            enum ofproto_table_config config;
-
-            config = ofproto_table_get_config(ofconn->connmgr->ofproto,
-                                              pin->up.table_id);
-            if (config == OFPROTO_TABLE_MISS_DEFAULT) {
-                return false;
-            }
+            && ofputil_protocol_to_ofp_version(protocol) >= OFP13_VERSION
+            && (ofproto_table_get_miss_config(ofconn->connmgr->ofproto,
+                                              pin->up.table_id)
+                == OFPUTIL_TABLE_MISS_DEFAULT)) {
+            return false;
         }
     }
     return true;
@@ -1478,7 +1497,7 @@ ofconn_wants_packet_in_on_miss(struct ofconn *ofconn,
 /* The default "table-miss" behaviour for OpenFlow1.3+ is to drop the
  * packet rather than to send the packet to the controller.
  *
- * This function returns false to indicate that a packet_in message
+ * This function returns true to indicate that a packet_in message
  * for a "table-miss" should be sent to at least one controller.
  * That is there is at least one controller with controller_id 0
  * which connected using an OpenFlow version earlier than OpenFlow1.3.
@@ -1488,19 +1507,23 @@ ofconn_wants_packet_in_on_miss(struct ofconn *ofconn,
  * This logic assumes that "table-miss" packet_in messages
  * are always sent to controller_id 0. */
 bool
-connmgr_wants_packet_in_on_miss(struct connmgr *mgr)
+connmgr_wants_packet_in_on_miss(struct connmgr *mgr) OVS_EXCLUDED(ofproto_mutex)
 {
     struct ofconn *ofconn;
 
+    ovs_mutex_lock(&ofproto_mutex);
     LIST_FOR_EACH (ofconn, node, &mgr->all_conns) {
         enum ofputil_protocol protocol = ofconn_get_protocol(ofconn);
 
         if (ofconn->controller_id == 0 &&
             (protocol == OFPUTIL_P_NONE ||
              ofputil_protocol_to_ofp_version(protocol) < OFP13_VERSION)) {
+            ovs_mutex_unlock(&ofproto_mutex);
             return true;
         }
     }
+    ovs_mutex_unlock(&ofproto_mutex);
+
     return false;
 }
 

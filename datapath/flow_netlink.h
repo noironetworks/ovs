@@ -37,13 +37,15 @@
 
 #include "flow.h"
 
+size_t ovs_key_attr_size(void);
+
 void ovs_match_init(struct sw_flow_match *match,
 		    struct sw_flow_key *key, struct sw_flow_mask *mask);
 
 int ovs_nla_put_flow(struct datapath *dp, const struct sw_flow_key *,
 		     const struct sw_flow_key *, struct sk_buff *);
-int ovs_nla_get_flow_metadata(struct sw_flow *flow,
-			      const struct nlattr *attr);
+int ovs_nla_get_flow_metadata(const struct nlattr *, struct sw_flow_key *);
+
 int ovs_nla_get_match(struct sw_flow_match *match,
 		      const struct nlattr *,
 		      const struct nlattr *);
@@ -54,7 +56,6 @@ int ovs_nla_copy_actions(const struct nlattr *attr,
 int ovs_nla_put_actions(const struct nlattr *attr,
 			int len, struct sk_buff *skb);
 
-struct sw_flow_actions *ovs_nla_alloc_flow_actions(int actions_len);
 void ovs_nla_free_flow_actions(struct sw_flow_actions *);
 
 #endif /* flow_netlink.h */

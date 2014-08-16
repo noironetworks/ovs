@@ -24,6 +24,7 @@
 #include <string.h>
 
 #include "coverage.h"
+#include "dpctl.h"
 #include "dynamic-string.h"
 #include "flow.h"
 #include "netdev.h"
@@ -97,6 +98,8 @@ static void log_flow_del_message(struct dpif *, const struct dpif_flow_del *,
                                  int error);
 static void log_execute_message(struct dpif *, const struct dpif_execute *,
                                 bool subexecute, int error);
+static void log_flow_get_message(const struct dpif *,
+                                 const struct dpif_flow_get *, int error);
 
 static void
 dp_initialize(void)
@@ -109,6 +112,7 @@ dp_initialize(void)
         for (i = 0; i < ARRAY_SIZE(base_dpif_classes); i++) {
             dp_register_provider(base_dpif_classes[i]);
         }
+        dpctl_unixctl_register();
         ovsthread_once_done(&once);
     }
 }
@@ -827,98 +831,30 @@ dpif_flow_flush(struct dpif *dpif)
     return error;
 }
 
-/* Queries 'dpif' for a flow entry.  The flow is specified by the Netlink
- * attributes with types OVS_KEY_ATTR_* in the 'key_len' bytes starting at
- * 'key'.
- *
- * Returns 0 if successful.  If no flow matches, returns ENOENT.  On other
- * failure, returns a positive errno value.
- *
- * If 'actionsp' is nonnull, then on success '*actionsp' will be set to an
- * ofpbuf owned by the caller that contains the Netlink attributes for the
- * flow's actions.  The caller must free the ofpbuf (with ofpbuf_delete()) when
- * it is no longer needed.
- *
- * If 'stats' is nonnull, then on success it will be updated with the flow's
- * statistics. */
+/* A dpif_operate() wrapper for performing a single DPIF_OP_FLOW_GET. */
 int
-dpif_flow_get(const struct dpif *dpif,
+dpif_flow_get(struct dpif *dpif,
               const struct nlattr *key, size_t key_len,
-              struct ofpbuf **actionsp, struct dpif_flow_stats *stats)
+              struct ofpbuf *buf, struct dpif_flow *flow)
 {
-    int error;
+    struct dpif_op *opp;
+    struct dpif_op op;
 
-    COVERAGE_INC(dpif_flow_get);
+    op.type = DPIF_OP_FLOW_GET;
+    op.u.flow_get.key = key;
+    op.u.flow_get.key_len = key_len;
+    op.u.flow_get.buffer = buf;
+    op.u.flow_get.flow = flow;
+    op.u.flow_get.flow->key = key;
+    op.u.flow_get.flow->key_len = key_len;
 
-    error = dpif->dpif_class->flow_get(dpif, key, key_len, actionsp, stats);
-    if (error) {
-        if (actionsp) {
-            *actionsp = NULL;
-        }
-        if (stats) {
-            memset(stats, 0, sizeof *stats);
-        }
-    }
-    if (should_log_flow_message(error)) {
-        const struct nlattr *actions;
-        size_t actions_len;
+    opp = &op;
+    dpif_operate(dpif, &opp, 1);
 
-        if (!error && actionsp) {
-            actions = ofpbuf_data(*actionsp);
-            actions_len = ofpbuf_size(*actionsp);
-        } else {
-            actions = NULL;
-            actions_len = 0;
-        }
-        log_flow_message(dpif, error, "flow_get", key, key_len,
-                         NULL, 0, stats, actions, actions_len);
-    }
-    return error;
+    return op.error;
 }
 
-static int
-dpif_flow_put__(struct dpif *dpif, const struct dpif_flow_put *put)
-{
-    int error;
-
-    COVERAGE_INC(dpif_flow_put);
-    ovs_assert(!(put->flags & ~(DPIF_FP_CREATE | DPIF_FP_MODIFY
-                                | DPIF_FP_ZERO_STATS)));
-
-    error = dpif->dpif_class->flow_put(dpif, put);
-    if (error && put->stats) {
-        memset(put->stats, 0, sizeof *put->stats);
-    }
-    log_flow_put_message(dpif, put, error);
-    return error;
-}
-
-/* Adds or modifies a flow in 'dpif'.  The flow is specified by the Netlink
- * attribute OVS_FLOW_ATTR_KEY with types OVS_KEY_ATTR_* in the 'key_len' bytes
- * starting at 'key', and OVS_FLOW_ATTR_MASK with types of OVS_KEY_ATTR_* in
- * the 'mask_len' bytes starting at 'mask'. The associated actions are
- * specified by the Netlink attributes with types OVS_ACTION_ATTR_* in the
- * 'actions_len' bytes starting at 'actions'.
- *
- * - If the flow's key does not exist in 'dpif', then the flow will be added if
- *   'flags' includes DPIF_FP_CREATE.  Otherwise the operation will fail with
- *   ENOENT.
- *
- *   The datapath may reject attempts to insert overlapping flows with EINVAL
- *   or EEXIST, but clients should not rely on this: avoiding overlapping flows
- *   is primarily the client's responsibility.
- *
- *   If the operation succeeds, then 'stats', if nonnull, will be zeroed.
- *
- * - If the flow's key does exist in 'dpif', then the flow's actions will be
- *   updated if 'flags' includes DPIF_FP_MODIFY.  Otherwise the operation will
- *   fail with EEXIST.  If the flow's actions are updated, then its statistics
- *   will be zeroed if 'flags' includes DPIF_FP_ZERO_STATS, and left as-is
- *   otherwise.
- *
- *   If the operation succeeds, then 'stats', if nonnull, will be set to the
- *   flow's statistics before the update.
- */
+/* A dpif_operate() wrapper for performing a single DPIF_OP_FLOW_PUT. */
 int
 dpif_flow_put(struct dpif *dpif, enum dpif_flow_put_flags flags,
               const struct nlattr *key, size_t key_len,
@@ -926,51 +862,43 @@ dpif_flow_put(struct dpif *dpif, enum dpif_flow_put_flags flags,
               const struct nlattr *actions, size_t actions_len,
               struct dpif_flow_stats *stats)
 {
-    struct dpif_flow_put put;
+    struct dpif_op *opp;
+    struct dpif_op op;
 
-    put.flags = flags;
-    put.key = key;
-    put.key_len = key_len;
-    put.mask = mask;
-    put.mask_len = mask_len;
-    put.actions = actions;
-    put.actions_len = actions_len;
-    put.stats = stats;
-    return dpif_flow_put__(dpif, &put);
+    op.type = DPIF_OP_FLOW_PUT;
+    op.u.flow_put.flags = flags;
+    op.u.flow_put.key = key;
+    op.u.flow_put.key_len = key_len;
+    op.u.flow_put.mask = mask;
+    op.u.flow_put.mask_len = mask_len;
+    op.u.flow_put.actions = actions;
+    op.u.flow_put.actions_len = actions_len;
+    op.u.flow_put.stats = stats;
+
+    opp = &op;
+    dpif_operate(dpif, &opp, 1);
+
+    return op.error;
 }
 
-static int
-dpif_flow_del__(struct dpif *dpif, struct dpif_flow_del *del)
-{
-    int error;
-
-    COVERAGE_INC(dpif_flow_del);
-
-    error = dpif->dpif_class->flow_del(dpif, del);
-    if (error && del->stats) {
-        memset(del->stats, 0, sizeof *del->stats);
-    }
-    log_flow_del_message(dpif, del, error);
-    return error;
-}
-
-/* Deletes a flow from 'dpif' and returns 0, or returns ENOENT if 'dpif' does
- * not contain such a flow.  The flow is specified by the Netlink attributes
- * with types OVS_KEY_ATTR_* in the 'key_len' bytes starting at 'key'.
- *
- * If the operation succeeds, then 'stats', if nonnull, will be set to the
- * flow's statistics before its deletion. */
+/* A dpif_operate() wrapper for performing a single DPIF_OP_FLOW_DEL. */
 int
 dpif_flow_del(struct dpif *dpif,
               const struct nlattr *key, size_t key_len,
               struct dpif_flow_stats *stats)
 {
-    struct dpif_flow_del del;
+    struct dpif_op *opp;
+    struct dpif_op op;
 
-    del.key = key;
-    del.key_len = key_len;
-    del.stats = stats;
-    return dpif_flow_del__(dpif, &del);
+    op.type = DPIF_OP_FLOW_DEL;
+    op.u.flow_del.key = key;
+    op.u.flow_del.key_len = key_len;
+    op.u.flow_del.stats = stats;
+
+    opp = &op;
+    dpif_operate(dpif, &opp, 1);
+
+    return op.error;
 }
 
 /* Creates and returns a new 'struct dpif_flow_dump' for iterating through the
@@ -1028,8 +956,9 @@ dpif_flow_dump_thread_destroy(struct dpif_flow_dump_thread *thread)
  *
  * All of the data stored into 'flows' is owned by the datapath, not by the
  * caller, and the caller must not modify or free it.  The datapath guarantees
- * that it remains accessible and unchanged until at least the next call to
- * dpif_flow_dump_next() for 'thread'. */
+ * that it remains accessible and unchanged until the first of:
+ *  - The next call to dpif_flow_dump_next() for 'thread', or
+ *  - The next rcu quiescent period. */
 int
 dpif_flow_dump_next(struct dpif_flow_dump_thread *thread,
                     struct dpif_flow *flows, int max_flows)
@@ -1097,8 +1026,7 @@ dpif_execute_helper_cb(void *aux_, struct dpif_packet **packets, int cnt,
         execute.packet = packet;
         execute.md = *md;
         execute.needs_help = false;
-        aux->error = aux->dpif->dpif_class->execute(aux->dpif, &execute);
-
+        aux->error = dpif_execute(aux->dpif, &execute);
         log_execute_message(aux->dpif, &execute, true, aux->error);
 
         if (md->tunnel.ip_dst) {
@@ -1154,125 +1082,111 @@ dpif_execute_needs_help(const struct dpif_execute *execute)
     return execute->needs_help || nl_attr_oversized(execute->actions_len);
 }
 
-/* Causes 'dpif' to perform the 'execute->actions_len' bytes of actions in
- * 'execute->actions' on the Ethernet frame in 'execute->packet' and on packet
- * metadata in 'execute->md'.  The implementation is allowed to modify both the
- * '*execute->packet' and 'execute->md'.
- *
- * Some dpif providers do not implement every action.  The Linux kernel
- * datapath, in particular, does not implement ARP field modification.  If
- * 'needs_help' is true, the dpif layer executes in userspace all of the
- * actions that it can, and for OVS_ACTION_ATTR_OUTPUT and
- * OVS_ACTION_ATTR_USERSPACE actions it passes the packet through to the dpif
- * implementation.
- *
- * This works even if 'execute->actions_len' is too long for a Netlink
- * attribute.
- *
- * Returns 0 if successful, otherwise a positive errno value. */
+/* A dpif_operate() wrapper for performing a single DPIF_OP_EXECUTE. */
 int
 dpif_execute(struct dpif *dpif, struct dpif_execute *execute)
 {
-    int error;
+    if (execute->actions_len) {
+        struct dpif_op *opp;
+        struct dpif_op op;
 
-    COVERAGE_INC(dpif_execute);
-    if (execute->actions_len > 0) {
-        error = (dpif_execute_needs_help(execute)
-                 ? dpif_execute_with_help(dpif, execute)
-                 : dpif->dpif_class->execute(dpif, execute));
+        op.type = DPIF_OP_EXECUTE;
+        op.u.execute = *execute;
+
+        opp = &op;
+        dpif_operate(dpif, &opp, 1);
+
+        return op.error;
     } else {
-        error = 0;
+        return 0;
     }
-
-    log_execute_message(dpif, execute, false, error);
-
-    return error;
 }
 
 /* Executes each of the 'n_ops' operations in 'ops' on 'dpif', in the order in
- * which they are specified, placing each operation's results in the "output"
- * members documented in comments.
- *
- * This function exists because some datapaths can perform batched operations
- * faster than individual operations. */
+ * which they are specified.  Places each operation's results in the "output"
+ * members documented in comments, and 0 in the 'error' member on success or a
+ * positive errno on failure. */
 void
 dpif_operate(struct dpif *dpif, struct dpif_op **ops, size_t n_ops)
 {
-    if (dpif->dpif_class->operate) {
-        while (n_ops > 0) {
-            size_t chunk;
+    while (n_ops > 0) {
+        size_t chunk;
 
-            /* Count 'chunk', the number of ops that can be executed without
-             * needing any help.  Ops that need help should be rare, so we
-             * expect this to ordinarily be 'n_ops', that is, all the ops. */
-            for (chunk = 0; chunk < n_ops; chunk++) {
-                struct dpif_op *op = ops[chunk];
+        /* Count 'chunk', the number of ops that can be executed without
+         * needing any help.  Ops that need help should be rare, so we
+         * expect this to ordinarily be 'n_ops', that is, all the ops. */
+        for (chunk = 0; chunk < n_ops; chunk++) {
+            struct dpif_op *op = ops[chunk];
 
-                if (op->type == DPIF_OP_EXECUTE
-                    && dpif_execute_needs_help(&op->u.execute)) {
+            if (op->type == DPIF_OP_EXECUTE
+                && dpif_execute_needs_help(&op->u.execute)) {
+                break;
+            }
+        }
+
+        if (chunk) {
+            /* Execute a chunk full of ops that the dpif provider can
+             * handle itself, without help. */
+            size_t i;
+
+            dpif->dpif_class->operate(dpif, ops, chunk);
+
+            for (i = 0; i < chunk; i++) {
+                struct dpif_op *op = ops[i];
+                int error = op->error;
+
+                switch (op->type) {
+                case DPIF_OP_FLOW_PUT: {
+                    struct dpif_flow_put *put = &op->u.flow_put;
+
+                    COVERAGE_INC(dpif_flow_put);
+                    log_flow_put_message(dpif, put, error);
+                    if (error && put->stats) {
+                        memset(put->stats, 0, sizeof *put->stats);
+                    }
+                    break;
+                }
+
+                case DPIF_OP_FLOW_GET: {
+                    struct dpif_flow_get *get = &op->u.flow_get;
+
+                    COVERAGE_INC(dpif_flow_get);
+                    log_flow_get_message(dpif, get, error);
+
+                    if (error) {
+                        memset(get->flow, 0, sizeof *get->flow);
+                    }
+                    break;
+                }
+
+                case DPIF_OP_FLOW_DEL: {
+                    struct dpif_flow_del *del = &op->u.flow_del;
+
+                    COVERAGE_INC(dpif_flow_del);
+                    log_flow_del_message(dpif, del, error);
+                    if (error && del->stats) {
+                        memset(del->stats, 0, sizeof *del->stats);
+                    }
+                    break;
+                }
+
+                case DPIF_OP_EXECUTE:
+                    COVERAGE_INC(dpif_execute);
+                    log_execute_message(dpif, &op->u.execute, false, error);
                     break;
                 }
             }
 
-            if (chunk) {
-                /* Execute a chunk full of ops that the dpif provider can
-                 * handle itself, without help. */
-                size_t i;
+            ops += chunk;
+            n_ops -= chunk;
+        } else {
+            /* Help the dpif provider to execute one op. */
+            struct dpif_op *op = ops[0];
 
-                dpif->dpif_class->operate(dpif, ops, chunk);
-
-                for (i = 0; i < chunk; i++) {
-                    struct dpif_op *op = ops[i];
-
-                    switch (op->type) {
-                    case DPIF_OP_FLOW_PUT:
-                        log_flow_put_message(dpif, &op->u.flow_put, op->error);
-                        break;
-
-                    case DPIF_OP_FLOW_DEL:
-                        log_flow_del_message(dpif, &op->u.flow_del, op->error);
-                        break;
-
-                    case DPIF_OP_EXECUTE:
-                        log_execute_message(dpif, &op->u.execute, false,
-                                            op->error);
-                        break;
-                    }
-                }
-
-                ops += chunk;
-                n_ops -= chunk;
-            } else {
-                /* Help the dpif provider to execute one op. */
-                struct dpif_op *op = ops[0];
-
-                op->error = dpif_execute(dpif, &op->u.execute);
-                ops++;
-                n_ops--;
-            }
-        }
-    } else {
-        size_t i;
-
-        for (i = 0; i < n_ops; i++) {
-            struct dpif_op *op = ops[i];
-
-            switch (op->type) {
-            case DPIF_OP_FLOW_PUT:
-                op->error = dpif_flow_put__(dpif, &op->u.flow_put);
-                break;
-
-            case DPIF_OP_FLOW_DEL:
-                op->error = dpif_flow_del__(dpif, &op->u.flow_del);
-                break;
-
-            case DPIF_OP_EXECUTE:
-                op->error = dpif_execute(dpif, &op->u.execute);
-                break;
-
-            default:
-                OVS_NOT_REACHED();
-            }
+            COVERAGE_INC(dpif_execute);
+            op->error = dpif_execute_with_help(dpif, &op->u.execute);
+            ops++;
+            n_ops--;
         }
     }
 }
@@ -1298,8 +1212,12 @@ dpif_upcall_type_to_string(enum dpif_upcall_type type)
 int
 dpif_recv_set(struct dpif *dpif, bool enable)
 {
-    int error = dpif->dpif_class->recv_set(dpif, enable);
-    log_operation(dpif, "recv_set", error);
+    int error = 0;
+
+    if (dpif->dpif_class->recv_set) {
+        error = dpif->dpif_class->recv_set(dpif, enable);
+        log_operation(dpif, "recv_set", error);
+    }
     return error;
 }
 
@@ -1326,9 +1244,59 @@ dpif_recv_set(struct dpif *dpif, bool enable)
 int
 dpif_handlers_set(struct dpif *dpif, uint32_t n_handlers)
 {
-    int error = dpif->dpif_class->handlers_set(dpif, n_handlers);
-    log_operation(dpif, "handlers_set", error);
+    int error = 0;
+
+    if (dpif->dpif_class->handlers_set) {
+        error = dpif->dpif_class->handlers_set(dpif, n_handlers);
+        log_operation(dpif, "handlers_set", error);
+    }
     return error;
+}
+
+void
+dpif_register_upcall_cb(struct dpif *dpif, upcall_callback *cb, void *aux)
+{
+    if (dpif->dpif_class->register_upcall_cb) {
+        dpif->dpif_class->register_upcall_cb(dpif, cb, aux);
+    }
+}
+
+void
+dpif_enable_upcall(struct dpif *dpif)
+{
+    if (dpif->dpif_class->enable_upcall) {
+        dpif->dpif_class->enable_upcall(dpif);
+    }
+}
+
+void
+dpif_disable_upcall(struct dpif *dpif)
+{
+    if (dpif->dpif_class->disable_upcall) {
+        dpif->dpif_class->disable_upcall(dpif);
+    }
+}
+
+void
+dpif_print_packet(struct dpif *dpif, struct dpif_upcall *upcall)
+{
+    if (!VLOG_DROP_DBG(&dpmsg_rl)) {
+        struct ds flow;
+        char *packet;
+
+        packet = ofp_packet_to_string(ofpbuf_data(&upcall->packet),
+                                      ofpbuf_size(&upcall->packet));
+
+        ds_init(&flow);
+        odp_flow_key_format(upcall->key, upcall->key_len, &flow);
+
+        VLOG_DBG("%s: %s upcall:\n%s\n%s",
+                 dpif_name(dpif), dpif_upcall_type_to_string(upcall->type),
+                 ds_cstr(&flow), packet);
+
+        ds_destroy(&flow);
+        free(packet);
+    }
 }
 
 /* Polls for an upcall from 'dpif' for an upcall handler.  Since there
@@ -1353,25 +1321,15 @@ int
 dpif_recv(struct dpif *dpif, uint32_t handler_id, struct dpif_upcall *upcall,
           struct ofpbuf *buf)
 {
-    int error = dpif->dpif_class->recv(dpif, handler_id, upcall, buf);
-    if (!error && !VLOG_DROP_DBG(&dpmsg_rl)) {
-        struct ds flow;
-        char *packet;
+    int error = EAGAIN;
 
-        packet = ofp_packet_to_string(ofpbuf_data(&upcall->packet),
-                                      ofpbuf_size(&upcall->packet));
-
-        ds_init(&flow);
-        odp_flow_key_format(upcall->key, upcall->key_len, &flow);
-
-        VLOG_DBG("%s: %s upcall:\n%s\n%s",
-                 dpif_name(dpif), dpif_upcall_type_to_string(upcall->type),
-                 ds_cstr(&flow), packet);
-
-        ds_destroy(&flow);
-        free(packet);
-    } else if (error && error != EAGAIN) {
-        log_operation(dpif, "recv", error);
+    if (dpif->dpif_class->recv) {
+        error = dpif->dpif_class->recv(dpif, handler_id, upcall, buf);
+        if (!error) {
+            dpif_print_packet(dpif, upcall);
+        } else if (error != EAGAIN) {
+            log_operation(dpif, "recv", error);
+        }
     }
     return error;
 }
@@ -1394,7 +1352,9 @@ dpif_recv_purge(struct dpif *dpif)
 void
 dpif_recv_wait(struct dpif *dpif, uint32_t handler_id)
 {
-    dpif->dpif_class->recv_wait(dpif, handler_id);
+    if (dpif->dpif_class->recv_wait) {
+        dpif->dpif_class->recv_wait(dpif, handler_id);
+    }
 }
 
 /* Obtains the NetFlow engine type and engine ID for 'dpif' into '*engine_type'
@@ -1594,5 +1554,18 @@ log_execute_message(struct dpif *dpif, const struct dpif_execute *execute,
         vlog(THIS_MODULE, error ? VLL_WARN : VLL_DBG, "%s", ds_cstr(&ds));
         ds_destroy(&ds);
         free(packet);
+    }
+}
+
+static void
+log_flow_get_message(const struct dpif *dpif, const struct dpif_flow_get *get,
+                     int error)
+{
+    if (should_log_flow_message(error)) {
+        log_flow_message(dpif, error, "flow_get",
+                         get->key, get->key_len,
+                         get->flow->mask, get->flow->mask_len,
+                         &get->flow->stats,
+                         get->flow->actions, get->flow->actions_len);
     }
 }

@@ -42,6 +42,7 @@
 #include "ofpbuf.h"
 #include "ofproto/bond.h"
 #include "ofproto/ofproto.h"
+#include "ovs-numa.h"
 #include "poll-loop.h"
 #include "seq.h"
 #include "sha1.h"
@@ -441,6 +442,7 @@ bridge_init(const char *remote)
     lacp_init();
     bond_init();
     cfm_init();
+    ovs_numa_init();
     stp_init();
 }
 
@@ -495,12 +497,15 @@ collect_in_band_managers(const struct ovsrec_open_vswitch *ovs_cfg,
 
         managers = xmalloc(sset_count(&targets) * sizeof *managers);
         SSET_FOR_EACH (target, &targets) {
-            struct sockaddr_storage ss;
+            union {
+                struct sockaddr_storage ss;
+                struct sockaddr_in in;
+            } sa;
 
             if (stream_parse_target_with_default_port(target, OVSDB_OLD_PORT,
-                                                      &ss)
-                && ss.ss_family == AF_INET) {
-                managers[n_managers++] = *(struct sockaddr_in *) &ss;
+                                                      &sa.ss)
+                && sa.ss.ss_family == AF_INET) {
+                managers[n_managers++] = sa.in;
             }
         }
     }
@@ -2269,20 +2274,10 @@ refresh_controller_status(void)
             shash_find_data(&info, cfg->target);
 
         if (cinfo) {
-            struct smap smap = SMAP_INITIALIZER(&smap);
-            const char **values = cinfo->pairs.values;
-            const char **keys = cinfo->pairs.keys;
-            size_t i;
-
-            for (i = 0; i < cinfo->pairs.n; i++) {
-                smap_add(&smap, keys[i], values[i]);
-            }
-
             ovsrec_controller_set_is_connected(cfg, cinfo->is_connected);
             ovsrec_controller_set_role(cfg, ofp12_controller_role_to_str(
                                            cinfo->role));
-            ovsrec_controller_set_status(cfg, &smap);
-            smap_destroy(&smap);
+            ovsrec_controller_set_status(cfg, &cinfo->pairs);
         } else {
             ovsrec_controller_set_is_connected(cfg, false);
             ovsrec_controller_set_role(cfg, NULL);
@@ -3144,6 +3139,7 @@ bridge_configure_tables(struct bridge *br)
     j = 0;
     for (i = 0; i < n_tables; i++) {
         struct ofproto_table_settings s;
+        bool use_default_prefixes = true;
 
         s.name = NULL;
         s.max_flows = UINT_MAX;
@@ -3154,7 +3150,6 @@ bridge_configure_tables(struct bridge *br)
 
         if (j < br->cfg->n_flow_tables && i == br->cfg->key_flow_tables[j]) {
             struct ovsrec_flow_table *cfg = br->cfg->value_flow_tables[j++];
-            bool no_prefixes;
 
             s.name = cfg->name;
             if (cfg->n_flow_limit && *cfg->flow_limit < UINT_MAX) {
@@ -3183,15 +3178,15 @@ bridge_configure_tables(struct bridge *br)
                 }
             }
             /* Prefix lookup fields. */
-            no_prefixes = false;
             s.n_prefix_fields = 0;
             for (k = 0; k < cfg->n_prefixes; k++) {
                 const char *name = cfg->prefixes[k];
                 const struct mf_field *mf;
 
                 if (strcmp(name, "none") == 0) {
-                    no_prefixes = true;
-                    continue;
+                    use_default_prefixes = false;
+                    s.n_prefix_fields = 0;
+                    break;
                 }
                 mf = mf_from_name(name);
                 if (!mf) {
@@ -3209,27 +3204,30 @@ bridge_configure_tables(struct bridge *br)
                               "field not used: %s", br->name, name);
                     continue;
                 }
+                use_default_prefixes = false;
                 s.prefix_fields[s.n_prefix_fields++] = mf->id;
             }
-            if (s.n_prefix_fields == 0 && !no_prefixes) {
-                /* Use default values. */
-                s.n_prefix_fields = ARRAY_SIZE(default_prefix_fields);
-                memcpy(s.prefix_fields, default_prefix_fields,
-                       sizeof default_prefix_fields);
-            }
-            if (s.n_prefix_fields > 0) {
-                int k;
-                struct ds ds = DS_EMPTY_INITIALIZER;
-                for (k = 0; k < s.n_prefix_fields; k++) {
-                    if (k) {
-                        ds_put_char(&ds, ',');
-                    }
-                    ds_put_cstr(&ds, mf_from_id(s.prefix_fields[k])->name);
+        }
+        if (use_default_prefixes) {
+            /* Use default values. */
+            s.n_prefix_fields = ARRAY_SIZE(default_prefix_fields);
+            memcpy(s.prefix_fields, default_prefix_fields,
+                   sizeof default_prefix_fields);
+        } else {
+            int k;
+            struct ds ds = DS_EMPTY_INITIALIZER;
+            for (k = 0; k < s.n_prefix_fields; k++) {
+                if (k) {
+                    ds_put_char(&ds, ',');
                 }
-                VLOG_INFO("bridge %s table %d: Prefix lookup with: %s.",
-                          br->name, i, ds_cstr(&ds));
-                ds_destroy(&ds);
+                ds_put_cstr(&ds, mf_from_id(s.prefix_fields[k])->name);
             }
+            if (s.n_prefix_fields == 0) {
+                ds_put_cstr(&ds, "none");
+            }
+            VLOG_INFO("bridge %s table %d: Prefix lookup with: %s.",
+                      br->name, i, ds_cstr(&ds));
+            ds_destroy(&ds);
         }
 
         ofproto_configure_table(br->ofproto, i, &s);

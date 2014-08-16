@@ -36,6 +36,8 @@
 
 VLOG_DEFINE_THIS_MODULE(stp);
 
+static struct vlog_rate_limit stp_rl = VLOG_RATE_LIMIT_INIT(60, 60);
+
 #define STP_PROTOCOL_ID 0x0000
 #define STP_PROTOCOL_VERSION 0x00
 #define STP_TYPE_CONFIG 0x00
@@ -82,6 +84,7 @@ struct stp_timer {
 
 struct stp_port {
     struct stp *stp;
+    char *port_name;                /* Human-readable name for log messages. */
     void *aux;                      /* Auxiliary data the user may retrieve. */
     int port_id;                    /* 8.5.5.1: Unique port identifier. */
     enum stp_state state;           /* 8.5.5.2: Current state. */
@@ -327,11 +330,17 @@ stp_ref(const struct stp *stp_)
 void
 stp_unref(struct stp *stp)
 {
-    if (stp && ovs_refcount_unref(&stp->ref_cnt) == 1) {
+    if (stp && ovs_refcount_unref_relaxed(&stp->ref_cnt) == 1) {
+        size_t i;
+
         ovs_mutex_lock(&mutex);
         list_remove(&stp->node);
         ovs_mutex_unlock(&mutex);
         free(stp->name);
+
+        for (i = 0; i < STP_MAX_PORTS; i++) {
+            free(stp->ports[i].port_name);
+        }
         free(stp);
     }
 }
@@ -684,13 +693,18 @@ stp_learn_in_state(enum stp_state state)
     return (state & (STP_DISABLED | STP_LEARNING | STP_FORWARDING)) != 0;
 }
 
-/* Returns true if 'state' is one in which rx&tx bpdu should be done on
- * on a port, false otherwise. */
+/* Returns true if 'state' is one in which bpdus should be forwarded on a
+ * port, false otherwise.
+ *
+ * Returns true if 'state' is STP_DISABLED, since in that case the port does
+ * not generate the bpdu and should just forward it (e.g. patch port on pif
+ * bridge). */
 bool
-stp_listen_in_state(enum stp_state state)
+stp_should_forward_bpdu(enum stp_state state)
 {
     return (state &
-            (STP_LISTENING | STP_LEARNING | STP_FORWARDING)) != 0;
+            ( STP_DISABLED | STP_LISTENING | STP_LEARNING
+              | STP_FORWARDING)) != 0;
 }
 
 /* Returns the name for the given 'role' (for use in debugging and log
@@ -788,6 +802,18 @@ stp_port_get_stp(struct stp_port *p)
     stp = p->stp;
     ovs_mutex_unlock(&mutex);
     return stp;
+}
+
+void
+stp_port_set_name(struct stp_port *p, const char *name)
+{
+    char *old;
+
+    ovs_mutex_lock(&mutex);
+    old = p->port_name;
+    p->port_name = xstrdup(name);
+    free(old);
+    ovs_mutex_unlock(&mutex);
 }
 
 /* Sets the 'aux' member of 'p'.
@@ -1014,6 +1040,8 @@ stp_transmit_config(struct stp_port *p) OVS_REQUIRES(mutex)
         return;
     }
     if (p->hold_timer.active) {
+        VLOG_DBG_RL(&stp_rl, "bridge: %s, port: %s, transmit config bpdu pending",
+                    stp->name, p->port_name);
         p->config_pending = true;
     } else {
         struct stp_config_bpdu config;
@@ -1044,6 +1072,8 @@ stp_transmit_config(struct stp_port *p) OVS_REQUIRES(mutex)
         if (ntohs(config.message_age) < stp->max_age) {
             p->topology_change_ack = false;
             p->config_pending = false;
+            VLOG_DBG_RL(&stp_rl, "bridge: %s, port: %s, transmit config bpdu",
+                        stp->name, p->port_name);
             stp_send_bpdu(p, &config, sizeof config);
             stp_start_timer(&p->hold_timer, 0);
         }
@@ -1114,9 +1144,12 @@ stp_transmit_tcn(struct stp *stp) OVS_REQUIRES(mutex)
 {
     struct stp_port *p = stp->root_port;
     struct stp_tcn_bpdu tcn_bpdu;
+
     if (!p) {
         return;
     }
+    VLOG_DBG_RL(&stp_rl, "bridge: %s, root port: %s, transmit tcn", stp->name,
+                p->port_name);
     tcn_bpdu.header.protocol_id = htons(STP_PROTOCOL_ID);
     tcn_bpdu.header.protocol_version = STP_PROTOCOL_VERSION;
     tcn_bpdu.header.bpdu_type = STP_TYPE_TCN;
@@ -1362,6 +1395,9 @@ stp_message_age_timer_expiry(struct stp_port *p) OVS_REQUIRES(mutex)
 {
     struct stp *stp = p->stp;
     bool root = stp_is_root_bridge(stp);
+
+    VLOG_DBG_RL(&stp_rl, "bridge: %s, port: %s, message age timer expired",
+                stp->name, p->port_name);
     stp_become_designated_port(p);
     stp_configuration_update(stp);
     stp_port_state_selection(stp);

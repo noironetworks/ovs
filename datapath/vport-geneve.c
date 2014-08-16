@@ -134,7 +134,7 @@ static void geneve_build_header(const struct vport *vport,
 	struct geneve_port *geneve_port = geneve_vport(vport);
 	struct udphdr *udph = udp_hdr(skb);
 	struct genevehdr *geneveh = (struct genevehdr *)(udph + 1);
-	const struct ovs_tunnel_info *tun_info = OVS_CB(skb)->tun_info;
+	const struct ovs_tunnel_info *tun_info = OVS_CB(skb)->egress_tun_info;
 
 	udph->dest = inet_sport(geneve_port->sock->sk);
 	udph->source = vxlan_src_port(1, USHRT_MAX, skb);
@@ -189,7 +189,7 @@ static int geneve_rcv(struct sock *sk, struct sk_buff *skb)
 
 	geneveh = geneve_hdr(skb);
 
-	flags = TUNNEL_KEY |
+	flags = TUNNEL_KEY | TUNNEL_OPTIONS_PRESENT |
 		(udp_hdr(skb)->check != 0 ? TUNNEL_CSUM : 0) |
 		(geneveh->oam ? TUNNEL_OAM : 0) |
 		(geneveh->critical ? TUNNEL_CRIT_OPT : 0);
@@ -333,6 +333,11 @@ static int handle_offloads(struct sk_buff *skb)
 #else
 static int handle_offloads(struct sk_buff *skb)
 {
+	if (skb->encapsulation && skb_is_gso(skb)) {
+		kfree_skb(skb);
+		return -ENOSYS;
+	}
+
 	if (skb_is_gso(skb)) {
 		int err = skb_unclone(skb, GFP_ATOMIC);
 		if (unlikely(err))
@@ -358,10 +363,10 @@ static int geneve_send(struct vport *vport, struct sk_buff *skb)
 	int sent_len;
 	int err;
 
-	if (unlikely(!OVS_CB(skb)->tun_info))
+	if (unlikely(!OVS_CB(skb)->egress_tun_info))
 		return -EINVAL;
 
-	tun_key = &OVS_CB(skb)->tun_info->tunnel;
+	tun_key = &OVS_CB(skb)->egress_tun_info->tunnel;
 
 	/* Route lookup */
 	saddr = tun_key->ipv4_src;
@@ -375,7 +380,8 @@ static int geneve_send(struct vport *vport, struct sk_buff *skb)
 	}
 
 	min_headroom = LL_RESERVED_SPACE(rt_dst(rt).dev) + rt_dst(rt).header_len
-			+ GENEVE_BASE_HLEN + OVS_CB(skb)->tun_info->options_len
+			+ GENEVE_BASE_HLEN
+			+ OVS_CB(skb)->egress_tun_info->options_len
 			+ sizeof(struct iphdr)
 			+ (vlan_tx_tag_present(skb) ? VLAN_HLEN : 0);
 
@@ -402,7 +408,8 @@ static int geneve_send(struct vport *vport, struct sk_buff *skb)
 
 	skb_reset_inner_headers(skb);
 
-	__skb_push(skb, GENEVE_BASE_HLEN + OVS_CB(skb)->tun_info->options_len);
+	__skb_push(skb, GENEVE_BASE_HLEN +
+			OVS_CB(skb)->egress_tun_info->options_len);
 	skb_reset_transport_header(skb);
 
 	geneve_build_header(vport, skb);

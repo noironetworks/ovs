@@ -142,8 +142,10 @@ struct vport *ovs_vport_alloc(int priv_size, const struct vport_ops *ops,
 	vport->ops = ops;
 	INIT_HLIST_NODE(&vport->dp_hash_node);
 
-	if (ovs_vport_set_upcall_portids(vport, parms->upcall_portids))
+	if (ovs_vport_set_upcall_portids(vport, parms->upcall_portids)) {
+		kfree(vport);
 		return ERR_PTR(-EINVAL);
+	}
 
 	vport->percpu_stats = alloc_percpu(struct pcpu_sw_netstats);
 	if (!vport->percpu_stats) {
@@ -312,9 +314,9 @@ void ovs_vport_get_stats(struct vport *vport, struct ovs_vport_stats *stats)
 		percpu_stats = per_cpu_ptr(vport->percpu_stats, i);
 
 		do {
-			start = u64_stats_fetch_begin_bh(&percpu_stats->syncp);
+			start = u64_stats_fetch_begin_irq(&percpu_stats->syncp);
 			local_stats = *percpu_stats;
-		} while (u64_stats_fetch_retry_bh(&percpu_stats->syncp, start));
+		} while (u64_stats_fetch_retry_irq(&percpu_stats->syncp, start));
 
 		stats->rx_bytes		+= local_stats.rx_bytes;
 		stats->rx_packets	+= local_stats.rx_packets;
@@ -393,6 +395,9 @@ int ovs_vport_set_upcall_portids(struct vport *vport,  struct nlattr *ids)
 
 	vport_portids = kmalloc(sizeof *vport_portids + nla_len(ids),
 				GFP_KERNEL);
+	if (!vport_portids)
+		return -ENOMEM;
+
 	vport_portids->n_ids = nla_len(ids) / sizeof(u32);
 	vport_portids->rn_ids = reciprocal_value(vport_portids->n_ids);
 	nla_memcpy(vport_portids->ids, ids, nla_len(ids));
@@ -473,6 +478,8 @@ void ovs_vport_receive(struct vport *vport, struct sk_buff *skb,
 		       struct ovs_tunnel_info *tun_info)
 {
 	struct pcpu_sw_netstats *stats;
+	struct sw_flow_key key;
+	int error;
 
 	stats = this_cpu_ptr(vport->percpu_stats);
 	u64_stats_update_begin(&stats->syncp);
@@ -481,9 +488,15 @@ void ovs_vport_receive(struct vport *vport, struct sk_buff *skb,
 	u64_stats_update_end(&stats->syncp);
 
 	ovs_skb_init_inner_protocol(skb);
-	OVS_CB(skb)->tun_info = tun_info;
 	OVS_CB(skb)->input_vport = vport;
-	ovs_dp_process_received_packet(skb);
+	OVS_CB(skb)->egress_tun_info = NULL;
+	error = ovs_flow_key_extract(tun_info, skb, &key);
+	if (unlikely(error)) {
+		kfree_skb(skb);
+		return;
+	}
+
+	ovs_dp_process_packet(skb, false);
 }
 
 /**

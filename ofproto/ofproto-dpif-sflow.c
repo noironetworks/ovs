@@ -253,13 +253,15 @@ sflow_choose_agent_address(const char *agent_device,
     }
 
     SSET_FOR_EACH (target, targets) {
-        struct sockaddr_storage ss;
+        union {
+            struct sockaddr_storage ss;
+            struct sockaddr_in sin;
+        } sa;
         char name[IFNAMSIZ];
 
-        if (inet_parse_active(target, SFL_DEFAULT_COLLECTOR_PORT, &ss)
-            && ss.ss_family == AF_INET) {
-            struct sockaddr_in *sin = (struct sockaddr_in *) &ss;
-            if (route_table_get_name(sin->sin_addr.s_addr, name)
+        if (inet_parse_active(target, SFL_DEFAULT_COLLECTOR_PORT, &sa.ss)
+            && sa.ss.ss_family == AF_INET) {
+            if (route_table_get_name(sa.sin.sin_addr.s_addr, name)
                 && !netdev_get_in4_by_name(name, &in4)) {
                 goto success;
             }
@@ -361,7 +363,7 @@ dpif_sflow_get_probability(const struct dpif_sflow *ds) OVS_EXCLUDED(mutex)
 void
 dpif_sflow_unref(struct dpif_sflow *ds) OVS_EXCLUDED(mutex)
 {
-    if (ds && ovs_refcount_unref(&ds->ref_cnt) == 1) {
+    if (ds && ovs_refcount_unref_relaxed(&ds->ref_cnt) == 1) {
         struct dpif_sflow_port *dsp, *next;
 
         route_table_unregister();
@@ -561,7 +563,7 @@ dpif_sflow_odp_port_to_ifindex(const struct dpif_sflow *ds,
 }
 
 void
-dpif_sflow_received(struct dpif_sflow *ds, struct ofpbuf *packet,
+dpif_sflow_received(struct dpif_sflow *ds, const struct ofpbuf *packet,
                     const struct flow *flow, odp_port_t odp_in_port,
                     const union user_action_cookie *cookie)
     OVS_EXCLUDED(mutex)

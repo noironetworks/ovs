@@ -2081,22 +2081,37 @@
           tunnel key.
 	</column>
 
-	<column name="bfd" key="bfd_dst_mac">
+	<column name="bfd" key="bfd_local_src_mac">
 	  Set to an Ethernet address in the form
 	  <var>xx</var>:<var>xx</var>:<var>xx</var>:<var>xx</var>:<var>xx</var>:<var>xx</var>
-	  to set the MAC used as destination for transmitted BFD packets and
-	  expected as destination for received BFD packets.  The default is
-	  <code>00:23:20:00:00:01</code>.
+	  to set the MAC used as source for transmitted BFD packets.  The
+	  default is the mac address of the BFD enabled interface.
+	</column>
+
+	<column name="bfd" key="bfd_local_dst_mac">
+	  Set to an Ethernet address in the form
+	  <var>xx</var>:<var>xx</var>:<var>xx</var>:<var>xx</var>:<var>xx</var>:<var>xx</var>
+	  to set the MAC used as destination for transmitted BFD packets.  The
+	  default is <code>00:23:20:00:00:01</code>.
+	</column>
+
+	<column name="bfd" key="bfd_remoe_dst_mac">
+	  Set to an Ethernet address in the form
+	  <var>xx</var>:<var>xx</var>:<var>xx</var>:<var>xx</var>:<var>xx</var>:<var>xx</var>
+	  to set the MAC used for checking the destination of received BFD packets.
+	  Packets with different destination MAC will not be considered as BFD packets.
+	  If not specified the destination MAC address of received BFD packets
+	  are not checked.
 	</column>
 
 	<column name="bfd" key="bfd_src_ip">
           Set to an IPv4 address to set the IP address used as source for
-          transmitted BFD packets.  The default is <code>169.254.1.0</code>.
+          transmitted BFD packets.  The default is <code>169.254.1.1</code>.
 	</column>
 
 	<column name="bfd" key="bfd_dst_ip">
           Set to an IPv4 address to set the IP address used as destination
-          for transmitted BFD packets.  The default is <code>169.254.1.1</code>.
+          for transmitted BFD packets.  The default is <code>169.254.1.0</code>.
 	</column>
       </group>
 
@@ -2123,8 +2138,9 @@
 	</column>
 
 	<column name="bfd_status" key="diagnostic">
-	  In case of a problem, set to a short message that reports what the
-	  local BFD session thinks is wrong.
+	  In case of a problem, set to an error message that reports what the
+	  local BFD session thinks is wrong.  The error messages are defined
+	  in section 4.1 of [RFC 5880].
 	</column>
 
 	<column name="bfd_status" key="remote_state"
@@ -2134,8 +2150,9 @@
 	</column>
 
 	<column name="bfd_status" key="remote_diagnostic">
-	  In case of a problem, set to a short message that reports what the
-	  remote endpoint's BFD session thinks is wrong.
+	  In case of a problem, set to an error message that reports what the
+	  remote endpoint's BFD session thinks is wrong.  The error messages
+	  are defined in section 4.1 of [RFC 5880].
 	</column>
 
         <column name="bfd_status" key="flap_count"
@@ -3223,7 +3240,7 @@
       </column>
     </group>
 
-    <group title="Asynchronous Message Configuration">
+    <group title="Asynchronous Messages">
       <p>
         OpenFlow switches send certain messages to controllers spontanenously,
         that is, not in response to any request from the controller.  These
@@ -3243,38 +3260,102 @@
         on any messages that it does want to receive, if any.
       </column>
 
-      <column name="controller_rate_limit">
+      <group title="Controller Rate Limiting">
         <p>
-          The maximum rate at which the switch will forward packets to the
-          OpenFlow controller, in packets per second.  This feature prevents a
-          single bridge from overwhelming the controller.  If not specified,
-          the default is implementation-specific.
+          A switch can forward packets to a controller over the OpenFlow
+          protocol.  Forwarding packets this way at too high a rate can
+          overwhelm a controller, frustrate use of the OpenFlow connection for
+          other purposes, increase the latency of flow setup, and use an
+          unreasonable amount of bandwidth.  Therefore, Open vSwitch supports
+          limiting the rate of packet forwarding to a controller.
         </p>
 
         <p>
-          In addition, when a high rate triggers rate-limiting, Open vSwitch
-          queues controller packets for each port and transmits them to the
-          controller at the configured rate.  The <ref
-          column="controller_burst_limit"/> value limits the number of queued
-          packets.  Ports on a bridge share the packet queue fairly.
+          There are two main reasons in OpenFlow for a packet to be sent to a
+          controller: either the packet ``misses'' in the flow table, that is,
+          there is no matching flow, or a flow table action says to send the
+          packet to the controller.  Open vSwitch limits the rate of each kind
+          of packet separately at the configured rate.  Therefore, the actual
+          rate that packets are sent to the controller can be up to twice the
+          configured rate, when packets are sent for both reasons.
         </p>
 
         <p>
-          Open vSwitch maintains two such packet rate-limiters per bridge: one
-          for packets sent up to the controller because they do not correspond
-          to any flow, and the other for packets sent up to the controller by
-          request through flow actions. When both rate-limiters are filled with
-          packets, the actual rate that packets are sent to the controller is
-          up to twice the specified rate.
+          This feature is specific to forwarding packets over an OpenFlow
+          connection.  It is not general-purpose QoS.  See the <ref
+          table="QoS"/> table for quality of service configuration, and <ref
+          column="ingress_policing_rate" table="Interface"/> in the <ref
+          table="Interface"/> table for ingress policing configuration.
         </p>
-      </column>
 
-      <column name="controller_burst_limit">
-        In conjunction with <ref column="controller_rate_limit"/>,
-        the maximum number of unused packet credits that the bridge will
-        allow to accumulate, in packets.  If not specified, the default
-        is implementation-specific.
-      </column>
+        <column name="controller_rate_limit">
+          <p>
+            The maximum rate at which the switch will forward packets to the
+            OpenFlow controller, in packets per second.  If no value is
+            specified, rate limiting is disabled.
+          </p>
+        </column>
+
+        <column name="controller_burst_limit">
+          <p>
+            When a high rate triggers rate-limiting, Open vSwitch queues
+            packets to the controller for each port and transmits them to the
+            controller at the configured rate.  This value limits the number of
+            queued packets.  Ports on a bridge share the packet queue fairly.
+          </p>
+
+          <p>
+            This value has no effect unless <ref
+            column="controller_rate_limit"/> is configured.  The current
+            default when this value is not specified is one-quarter of <ref
+            column="controller_rate_limit"/>, meaning that queuing can delay
+            forwarding a packet to the controller by up to 250 ms.
+          </p>
+        </column>
+
+        <group title="Controller Rate Limiting Statistics">
+          <p>
+            These values report the effects of rate limiting.  Their values are
+            relative to establishment of the most recent OpenFlow connection,
+            or since rate limiting was enabled, whichever happened more
+            recently.  Each consists of two values, one with <code>TYPE</code>
+            replaced by <code>miss</code> for rate limiting flow table misses,
+            and the other with <code>TYPE</code> replaced by
+            <code>action</code> for rate limiting packets sent by OpenFlow
+            actions.
+          </p>
+
+          <p>
+            These statistics are reported only when controller rate limiting is
+            enabled.
+          </p>
+
+          <column name="status" key="packet-in-TYPE-bypassed"
+                  type='{"type": "integer", "minInteger": 0}'>
+            Number of packets sent directly to the controller, without queuing,
+            because the rate did not exceed the configured maximum.
+          </column>
+
+          <column name="status" key="packet-in-TYPE-queued"
+                  type='{"type": "integer", "minInteger": 0}'>
+            Number of packets added to the queue to send later.
+          </column>
+
+          <column name="status" key="packet-in-TYPE-dropped"
+                  type='{"type": "integer", "minInteger": 0}'>
+            Number of packets added to the queue that were later dropped due to
+            overflow.  This value is less than or equal to <ref column="status"
+            key="packet-in-TYPE-queued"/>.
+          </column>
+
+          <column name="status" key="packet-in-TYPE-backlog"
+                  type='{"type": "integer", "minInteger": 0}'>
+            Number of packets currently queued.  The other statistics increase
+            monotonically, but this one fluctuates between 0 and the <ref
+            column="controller_burst_limit"/> as conditions change.
+          </column>
+        </group>
+      </group>
     </group>
 
     <group title="Additional In-Band Configuration">
@@ -3324,7 +3405,7 @@
           <dd>Equivalent to <code>other</code>, except that there may be at
           most one master controller at a time.  When a controller configures
           itself as <code>master</code>, any existing master is demoted to
-          the <code>slave</code>role.</dd>
+          the <code>slave</code> role.</dd>
           <dt><code>slave</code></dt>
           <dd>Allows the controller read-only access to OpenFlow features.
           Attempts to modify the flow table will be rejected with an

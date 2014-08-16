@@ -155,7 +155,8 @@ static void do_setup(struct net_device *netdev)
 	netdev->tx_queue_len = 0;
 
 	netdev->features = NETIF_F_LLTX | NETIF_F_SG | NETIF_F_FRAGLIST |
-			   NETIF_F_HIGHDMA | NETIF_F_HW_CSUM | NETIF_F_GSO_SOFTWARE;
+			   NETIF_F_HIGHDMA | NETIF_F_HW_CSUM |
+			   NETIF_F_GSO_SOFTWARE | NETIF_F_GSO_ENCAP_ALL;
 
 	netdev->vlan_features = netdev->features;
 	netdev->features |= NETIF_F_HW_VLAN_CTAG_TX;
@@ -163,6 +164,11 @@ static void do_setup(struct net_device *netdev)
 #if LINUX_VERSION_CODE >= KERNEL_VERSION(2,6,39)
 	netdev->hw_features = netdev->features & ~NETIF_F_LLTX;
 #endif
+
+#if LINUX_VERSION_CODE >= KERNEL_VERSION(3,8,0)
+	netdev->hw_enc_features = netdev->features;
+#endif
+
 	eth_hw_addr_random(netdev);
 }
 
@@ -235,6 +241,11 @@ static int internal_dev_recv(struct vport *vport, struct sk_buff *skb)
 {
 	struct net_device *netdev = netdev_vport_priv(vport)->dev;
 	int len;
+
+	if (unlikely(!(netdev->flags & IFF_UP))) {
+		kfree_skb(skb);
+		return 0;
+	}
 
 #if LINUX_VERSION_CODE < KERNEL_VERSION(2,6,37)
 	if (vlan_tx_tag_present(skb)) {

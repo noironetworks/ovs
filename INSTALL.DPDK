@@ -14,15 +14,15 @@ and "make".
 Building and Installing:
 ------------------------
 
-Recommended to use DPDK 1.6.
+Required DPDK 1.7.
 
 DPDK:
-Set dir i.g.:   export DPDK_DIR=/usr/src/dpdk-1.6.0r2
+Set dir i.g.:   export DPDK_DIR=/usr/src/dpdk-1.7.0
 cd $DPDK_DIR
-update config/defconfig_x86_64-default-linuxapp-gcc so that dpdk generate single lib file.
+update config/common_linuxapp so that dpdk generate single lib file.
 CONFIG_RTE_BUILD_COMBINE_LIBS=y
 
-make install T=x86_64-default-linuxapp-gcc
+make install T=x86_64-native-linuxapp-gcc
 For details refer to  http://dpdk.org/
 
 Linux kernel:
@@ -32,7 +32,7 @@ DPDK kernel requirement.
 OVS:
 cd $(OVS_DIR)/openvswitch
 ./boot.sh
-export DPDK_BUILD=/usr/src/dpdk-1.6.0r2/x86_64-default-linuxapp-gcc
+export DPDK_BUILD=$DPDK_DIR/x86_64-native-linuxapp-gcc/
 ./configure --with-dpdk=$DPDK_BUILD
 make
 
@@ -49,9 +49,9 @@ First setup DPDK devices:
   - insert uio.ko
     e.g. modprobe uio
   - insert igb_uio.ko
-    e.g. insmod DPDK/x86_64-default-linuxapp-gcc/kmod/igb_uio.ko
-  - Bind network device to ibg_uio.
-    e.g. DPDK/tools/pci_unbind.py --bind=igb_uio eth1
+    e.g. insmod $DPDK_BUILD/kmod/igb_uio.ko
+  - Bind network device to igb_uio.
+    e.g. $DPDK_DIR/tools/dpdk_nic_bind.py --bind=igb_uio eth1
     Alternate binding method:
      Find target Ethernet devices
       lspci -nn|grep Ethernet
@@ -72,8 +72,6 @@ First setup DPDK devices:
       0000:02:00.0  0000:02:00.1  bind  module  new_id  remove_id  uevent  unbind
 
 Prepare system:
-  - load ovs kernel module
-    e.g modprobe openvswitch
   - mount hugetlbfs
     e.g. mount -t hugetlbfs -o pagesize=1G none /mnt/huge/
 
@@ -91,7 +89,7 @@ Start ovsdb-server as discussed in INSTALL doc:
     start ovsdb-server
       cd $OVS_DIR
       ./ovsdb/ovsdb-server --remote=punix:/usr/local/var/run/openvswitch/db.sock \
-          --remote=db:OpenOpen_vSwitch,manager_options \
+          --remote=db:Open_vSwitch,Open_vSwitch,manager_options \
           --private-key=db:Open_vSwitch,SSL,private_key \
           --certificate=dbitch,SSL,certificate \
           --bootstrap-ca-cert=db:Open_vSwitch,SSL,ca_cert --pidfile --detach
@@ -101,7 +99,8 @@ Start ovsdb-server as discussed in INSTALL doc:
 
 Start vswitchd:
 DPDK configuration arguments can be passed to vswitchd via `--dpdk`
-argument. dpdk arg -c is ignored by ovs-dpdk, but it is a required parameter
+argument. This needs to be first argument passed to vswitchd process.
+dpdk arg -c is ignored by ovs-dpdk, but it is a required parameter
 for dpdk initialization.
 
    e.g.
@@ -190,6 +189,45 @@ The core 23 is left idle, which allows core 7 to run at full rate.
 
 Future changes may change the need for cpu core affinitization.
 
+DPDK Rings :
+------------
+
+Following the steps above to create a bridge, you can now add dpdk rings
+as a port to the vswitch.  OVS will expect the DPDK ring device name to
+start with dpdkr and end with a portid.
+
+    ovs-vsctl add-port br0 dpdkr0 -- set Interface dpdkr0 type=dpdkr
+
+DPDK rings client test application
+
+Included in the test directory is a sample DPDK application for testing
+the rings.  This is from the base dpdk directory and modified to work
+with the ring naming used within ovs.
+
+location tests/ovs_client
+
+To run the client :
+
+    ovsclient -c 1 -n 4 --proc-type=secondary -- -n "port id you gave dpdkr"
+
+In the case of the dpdkr example above the "port id you gave dpdkr" is 0.
+
+It is essential to have --proc-type=secondary
+
+The application simply receives an mbuf on the receive queue of the
+ethernet ring and then places that same mbuf on the transmit ring of
+the ethernet ring.  It is a trivial loopback application.
+
+In addition to executing the client in the host, you can execute it within
+a guest VM. To do so you will need a patched qemu.  You can download the
+patch and getting started guide at :
+
+https://01.org/packet-processing/downloads
+
+A general rule of thumb for better performance is that the client
+application should not be assigned the same dpdk core mask "-c" as
+the vswitchd.
+
 Restrictions:
 -------------
 
@@ -202,6 +240,11 @@ Restrictions:
     device queues configured.
   - Work with 1500 MTU, needs few changes in DPDK lib to fix this issue.
   - Currently DPDK port does not make use any offload functionality.
+  ivshmem
+  - The shared memory is currently restricted to the use of a 1GB
+   huge pages.
+  - All huge pages are shared amongst the host, clients, virtual
+   machines etc.
 
 Bug Reporting:
 --------------

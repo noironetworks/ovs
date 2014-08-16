@@ -143,7 +143,8 @@ bool ofproto_has_vlan_splinters(const struct ofproto_dpif *);
 ofp_port_t vsp_realdev_to_vlandev(const struct ofproto_dpif *,
                                   ofp_port_t realdev_ofp_port,
                                   ovs_be16 vlan_tci);
-bool vsp_adjust_flow(const struct ofproto_dpif *, struct flow *);
+bool vsp_adjust_flow(const struct ofproto_dpif *, struct flow *,
+                     struct ofpbuf *packet);
 
 int ofproto_dpif_execute_actions(struct ofproto_dpif *, const struct flow *,
                                  struct rule_dpif *, const struct ofpact *,
@@ -260,6 +261,15 @@ static inline void rule_dpif_ref(struct rule_dpif *rule)
         ofproto_rule_ref(RULE_CAST(rule));
     }
 }
+
+static inline bool rule_dpif_try_ref(struct rule_dpif *rule)
+{
+    if (rule) {
+        return ofproto_rule_try_ref(RULE_CAST(rule));
+    }
+    return false;
+}
+
 
 static inline void rule_dpif_unref(struct rule_dpif *rule)
 {

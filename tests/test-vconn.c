@@ -61,7 +61,7 @@ static void
 check_errno(int a, int b, const char *as, const char *file, int line)
 {
     if (a != b) {
-        char *str_b = strdup(ovs_strerror(abs(b)));
+        char *str_b = xstrdup(ovs_strerror(abs(b)));
         ovs_fatal(0, "%s:%d: %s is %d (%s) but should be %d (%s)",
                   file, line, as, a, ovs_strerror(abs(a)), b, str_b);
     }
@@ -156,12 +156,20 @@ test_refuse_connection(int argc OVS_UNUSED, char *argv[])
 
     error = vconn_connect_block(vconn);
     if (!strcmp(type, "tcp")) {
-        if (error != ECONNRESET && error != EPIPE) {
+        if (error != ECONNRESET && error != EPIPE
+#ifdef _WIN32
+            && error != WSAECONNRESET
+#endif
+            ) {
             ovs_fatal(0, "unexpected vconn_connect() return value %d (%s)",
                       error, ovs_strerror(error));
         }
     } else if (!strcmp(type, "unix")) {
+#ifndef _WIN32
         CHECK_ERRNO(error, EPIPE);
+#else
+        CHECK_ERRNO(error, WSAECONNRESET);
+#endif
     } else if (!strcmp(type, "ssl")) {
         if (error != EPROTO && error != ECONNRESET) {
             ovs_fatal(0, "unexpected vconn_connect() return value %d (%s)",
@@ -194,7 +202,11 @@ test_accept_then_close(int argc OVS_UNUSED, char *argv[])
 
     error = vconn_connect_block(vconn);
     if (!strcmp(type, "tcp") || !strcmp(type, "unix")) {
-        if (error != ECONNRESET && error != EPIPE) {
+        if (error != ECONNRESET && error != EPIPE
+#ifdef _WIN32
+            && error != WSAECONNRESET
+#endif
+            ) {
             ovs_fatal(0, "unexpected vconn_connect() return value %d (%s)",
                       error, ovs_strerror(error));
         }

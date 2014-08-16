@@ -118,10 +118,10 @@ struct mf_ctx {
 /* miniflow_push_* macros allow filling in a miniflow data values in order.
  * Assertions are needed only when the layout of the struct flow is modified.
  * 'ofs' is a compile-time constant, which allows most of the code be optimized
- * away.  Some GCC versions gave warnigns on ALWAYS_INLINE, so these are
+ * away.  Some GCC versions gave warnings on ALWAYS_INLINE, so these are
  * defined as macros. */
 
-#if (FLOW_WC_SEQ != 26)
+#if (FLOW_WC_SEQ != 27)
 #define MINIFLOW_ASSERT(X) ovs_assert(X)
 #else
 #define MINIFLOW_ASSERT(X)
@@ -210,7 +210,7 @@ parse_mpls(void **datap, size_t *sizep)
             break;
         }
     }
-    return MAX(count, FLOW_MAX_MPLS_LABELS);
+    return MIN(count, FLOW_MAX_MPLS_LABELS);
 }
 
 static inline ovs_be16
@@ -899,6 +899,14 @@ flow_wildcards_set_reg_mask(struct flow_wildcards *wc, int idx, uint32_t mask)
     wc->masks.regs[idx] = mask;
 }
 
+/* Sets the wildcard mask for register 'idx' in 'wc' to 'mask'.
+ * (A 0-bit indicates a wildcard bit.) */
+void
+flow_wildcards_set_xreg_mask(struct flow_wildcards *wc, int idx, uint64_t mask)
+{
+    flow_set_xreg(&wc->masks, idx, mask);
+}
+
 /* Calculates the 5-tuple hash from the given miniflow.
  * This returns the same value as flow_hash_5tuple for the corresponding
  * flow. */
@@ -910,7 +918,7 @@ miniflow_hash_5tuple(const struct miniflow *flow, uint32_t basis)
     if (flow) {
         ovs_be16 dl_type = MINIFLOW_GET_BE16(flow, dl_type);
 
-        hash = mhash_add(hash, MINIFLOW_GET_U8(flow, nw_proto));
+        hash = hash_add(hash, MINIFLOW_GET_U8(flow, nw_proto));
 
         /* Separate loops for better optimization. */
         if (dl_type == htons(ETH_TYPE_IPV6)) {
@@ -919,7 +927,7 @@ miniflow_hash_5tuple(const struct miniflow *flow, uint32_t basis)
             uint32_t value;
 
             MINIFLOW_FOR_EACH_IN_MAP(value, flow, map) {
-                hash = mhash_add(hash, value);
+                hash = hash_add(hash, value);
             }
         } else {
             uint64_t map = MINIFLOW_MAP(nw_src) | MINIFLOW_MAP(nw_dst)
@@ -927,10 +935,10 @@ miniflow_hash_5tuple(const struct miniflow *flow, uint32_t basis)
             uint32_t value;
 
             MINIFLOW_FOR_EACH_IN_MAP(value, flow, map) {
-                hash = mhash_add(hash, value);
+                hash = hash_add(hash, value);
             }
         }
-        hash = mhash_finish(hash, 42); /* Arbitrary number. */
+        hash = hash_finish(hash, 42); /* Arbitrary number. */
     }
     return hash;
 }
@@ -951,22 +959,22 @@ flow_hash_5tuple(const struct flow *flow, uint32_t basis)
     if (flow) {
         const uint32_t *flow_u32 = (const uint32_t *)flow;
 
-        hash = mhash_add(hash, flow->nw_proto);
+        hash = hash_add(hash, flow->nw_proto);
 
         if (flow->dl_type == htons(ETH_TYPE_IPV6)) {
             int ofs = offsetof(struct flow, ipv6_src) / 4;
             int end = ofs + 2 * sizeof flow->ipv6_src / 4;
 
             while (ofs < end) {
-                hash = mhash_add(hash, flow_u32[ofs++]);
+                hash = hash_add(hash, flow_u32[ofs++]);
             }
         } else {
-            hash = mhash_add(hash, (OVS_FORCE uint32_t) flow->nw_src);
-            hash = mhash_add(hash, (OVS_FORCE uint32_t) flow->nw_dst);
+            hash = hash_add(hash, (OVS_FORCE uint32_t) flow->nw_src);
+            hash = hash_add(hash, (OVS_FORCE uint32_t) flow->nw_dst);
         }
-        hash = mhash_add(hash, flow_u32[offsetof(struct flow, tp_src) / 4]);
+        hash = hash_add(hash, flow_u32[offsetof(struct flow, tp_src) / 4]);
 
-        hash = mhash_finish(hash, 42); /* Arbitrary number. */
+        hash = hash_finish(hash, 42); /* Arbitrary number. */
     }
     return hash;
 }
@@ -1141,9 +1149,9 @@ flow_hash_in_wildcards(const struct flow *flow,
 
     hash = basis;
     for (i = 0; i < FLOW_U32S; i++) {
-        hash = mhash_add(hash, flow_u32[i] & wc_u32[i]);
+        hash = hash_add(hash, flow_u32[i] & wc_u32[i]);
     }
-    return mhash_finish(hash, 4 * FLOW_U32S);
+    return hash_finish(hash, 4 * FLOW_U32S);
 }
 
 /* Sets the VLAN VID that 'flow' matches to 'vid', which is interpreted as an

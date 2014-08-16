@@ -235,32 +235,40 @@ const struct mf_field mf_fields[MFF_N_IDS] = {
         OFPUTIL_P_NXM_OXM_ANY,                  \
         -1,                                     \
     }
-#if FLOW_N_REGS > 0
+#if FLOW_N_REGS == 8
     REGISTER(0),
-#endif
-#if FLOW_N_REGS > 1
     REGISTER(1),
-#endif
-#if FLOW_N_REGS > 2
     REGISTER(2),
-#endif
-#if FLOW_N_REGS > 3
     REGISTER(3),
-#endif
-#if FLOW_N_REGS > 4
     REGISTER(4),
-#endif
-#if FLOW_N_REGS > 5
     REGISTER(5),
-#endif
-#if FLOW_N_REGS > 6
     REGISTER(6),
-#endif
-#if FLOW_N_REGS > 7
     REGISTER(7),
+#else
+#error "Need to update mf_fields[] to match FLOW_N_REGS"
 #endif
-#if FLOW_N_REGS > 8
-#error
+
+#define XREGISTER(IDX)                                              \
+    {                                                               \
+        MFF_XREG##IDX, "xreg" #IDX, NULL,                           \
+        MF_FIELD_SIZES(be64),                                       \
+        MFM_FULLY,                                                  \
+        MFS_HEXADECIMAL,                                            \
+        MFP_NONE,                                                   \
+        true,                                                       \
+        OXM_OF_PKT_REG(IDX), "OXM_OF_PKT_REG" #IDX,                 \
+        OXM_OF_PKT_REG(IDX), "OXM_OF_PKT_REG" #IDX, OFP15_VERSION,  \
+        OFPUTIL_P_NXM_OXM_ANY,                                      \
+        OFPUTIL_P_NXM_OXM_ANY,                                      \
+        -1,                                                         \
+    }
+#if FLOW_N_XREGS == 4
+    XREGISTER(0),
+    XREGISTER(1),
+    XREGISTER(2),
+    XREGISTER(3),
+#else
+#error "Need to update mf_fields[] to match FLOW_N_XREGS"
 #endif
 
     /* ## -- ## */
@@ -951,6 +959,8 @@ mf_is_all_wild(const struct mf_field *mf, const struct flow_wildcards *wc)
         return !wc->masks.pkt_mark;
     CASE_MFF_REGS:
         return !wc->masks.regs[mf->id - MFF_REG0];
+    CASE_MFF_XREGS:
+        return !flow_get_xreg(&wc->masks, mf->id - MFF_XREG0);
 
     case MFF_ETH_SRC:
         return eth_addr_is_zero(wc->masks.dl_src);
@@ -1190,6 +1200,7 @@ mf_is_value_valid(const struct mf_field *mf, const union mf_value *value)
     case MFF_SKB_PRIORITY:
     case MFF_PKT_MARK:
     CASE_MFF_REGS:
+    CASE_MFF_XREGS:
     case MFF_ETH_SRC:
     case MFF_ETH_DST:
     case MFF_ETH_TYPE:
@@ -1321,6 +1332,10 @@ mf_get_value(const struct mf_field *mf, const struct flow *flow,
 
     CASE_MFF_REGS:
         value->be32 = htonl(flow->regs[mf->id - MFF_REG0]);
+        break;
+
+    CASE_MFF_XREGS:
+        value->be64 = htonll(flow_get_xreg(flow, mf->id - MFF_XREG0));
         break;
 
     case MFF_ETH_SRC:
@@ -1526,6 +1541,10 @@ mf_set_value(const struct mf_field *mf,
 
     CASE_MFF_REGS:
         match_set_reg(match, mf->id - MFF_REG0, ntohl(value->be32));
+        break;
+
+    CASE_MFF_XREGS:
+        match_set_xreg(match, mf->id - MFF_XREG0, ntohll(value->be64));
         break;
 
     case MFF_ETH_SRC:
@@ -1750,6 +1769,10 @@ mf_set_flow_value(const struct mf_field *mf,
         flow->regs[mf->id - MFF_REG0] = ntohl(value->be32);
         break;
 
+    CASE_MFF_XREGS:
+        flow_set_xreg(flow, mf->id - MFF_XREG0, ntohll(value->be64));
+        break;
+
     case MFF_ETH_SRC:
         memcpy(flow->dl_src, value->mac, ETH_ADDR_LEN);
         break;
@@ -1968,6 +1991,10 @@ mf_set_wild(const struct mf_field *mf, struct match *match)
 
     CASE_MFF_REGS:
         match_set_reg_masked(match, mf->id - MFF_REG0, 0, 0);
+        break;
+
+    CASE_MFF_XREGS:
+        match_set_xreg_masked(match, mf->id - MFF_XREG0, 0, 0);
         break;
 
     case MFF_ETH_SRC:
@@ -2194,6 +2221,11 @@ mf_set(const struct mf_field *mf,
     CASE_MFF_REGS:
         match_set_reg_masked(match, mf->id - MFF_REG0,
                              ntohl(value->be32), ntohl(mask->be32));
+        break;
+
+    CASE_MFF_XREGS:
+        match_set_xreg_masked(match, mf->id - MFF_XREG0,
+                              ntohll(value->be64), ntohll(mask->be64));
         break;
 
     case MFF_PKT_MARK:

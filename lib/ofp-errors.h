@@ -222,6 +222,10 @@ enum ofperr {
      * unsupported value, or modifies a read-only field. */
     OFPERR_OFPBAC_BAD_SET_ARGUMENT,
 
+    /* NX1.3-1.4(14), OF1.5+(2,16).  Field in Set-Field action has Has-Mask bit
+     * set to 1. */
+    OFPERR_OFPBAC_BAD_SET_MASK,
+
     /* NX1.0-1.1(2,256), NX1.2+(11).  Must-be-zero action argument had nonzero
      * value. */
     OFPERR_NXBAC_MUST_BE_ZERO,
@@ -233,7 +237,8 @@ enum ofperr {
     /* OF1.1+(3,0).  Unknown instruction. */
     OFPERR_OFPBIC_UNKNOWN_INST,
 
-    /* OF1.1+(3,1).  Switch or table does not support the instruction. */
+    /* NX1.0(2,257), OF1.1+(3,1).  Switch or table does not support the
+     * instruction. */
     OFPERR_OFPBIC_UNSUP_INST,
 
     /* OF1.1+(3,2).  Invalid Table-ID specified. */
@@ -552,22 +557,22 @@ enum ofperr {
      * [Known as OFPTFFC_BAD_ARGUMENT in OF1.3.] */
     OFPERR_OFPBPC_BAD_VALUE,
 
-    /* OF1.4+(14,3).  Can't handle this many properties. */
+    /* HPL1.3(4443), OF1.4+(14,3).  Can't handle this many properties. */
     OFPERR_OFPBPC_TOO_MANY,
 
-    /* OF1.4+(14,4).  A property type was duplicated. */
+    /* HPL1.3(4444), OF1.4+(14,4).  A property type was duplicated. */
     OFPERR_OFPBPC_DUP_TYPE,
 
-    /* OF1.4+(14,5).  Unknown experimenter id specified. */
+    /* HPL1.3(4445), OF1.4+(14,5).  Unknown experimenter id specified. */
     OFPERR_OFPBPC_BAD_EXPERIMENTER,
 
-    /* OF1.4+(14,6).  Unknown exp_type for experimenter id. */
+    /* HPL1.3(4446), OF1.4+(14,6).  Unknown exp_type for experimenter id. */
     OFPERR_OFPBPC_BAD_EXP_TYPE,
 
-    /* OF1.4+(14,7).  Unknown value for experimenter id. */
+    /* HPL1.3(4447), OF1.4+(14,7).  Unknown value for experimenter id. */
     OFPERR_OFPBPC_BAD_EXP_VALUE,
 
-    /* OF1.4+(14,8).  Permissions error. */
+    /* HPL1.3(4448), OF1.4+(14,8).  Permissions error. */
     OFPERR_OFPBPC_EPERM,
 
 /* ## -------------------- ## */

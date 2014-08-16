@@ -98,14 +98,15 @@ struct datapath {
  * struct ovs_skb_cb - OVS data in skb CB
  * @flow: The flow associated with this packet.  May be %NULL if no flow.
  * @pkt_key: The flow information extracted from the packet.  Must be nonnull.
- * @tun_key: Key for the tunnel that encapsulated this packet. NULL if the
+ * @egress_tun_info: Tunnel information about this packet on egress path.
+ * NULL if the packet is not being tunneled.
  * @input_vport: The original vport packet came in on. This value is cached
  * when a packet is received by OVS.
  */
 struct ovs_skb_cb {
 	struct sw_flow		*flow;
 	struct sw_flow_key	*pkt_key;
-	struct ovs_tunnel_info  *tun_info;
+	struct ovs_tunnel_info  *egress_tun_info;
 	struct vport	*input_vport;
 };
 #define OVS_CB(skb) ((struct ovs_skb_cb *)(skb)->cb)
@@ -113,7 +114,6 @@ struct ovs_skb_cb {
 /**
  * struct dp_upcall - metadata to include with a packet to send to userspace
  * @cmd: One of %OVS_PACKET_CMD_*.
- * @key: Becomes %OVS_PACKET_ATTR_KEY.  Must be nonnull.
  * @userdata: If nonnull, its variable-length value is passed to userspace as
  * %OVS_PACKET_ATTR_USERDATA.
  * @portid: Netlink PID to which packet should be sent.  If @portid is 0 then no
@@ -121,10 +121,9 @@ struct ovs_skb_cb {
  * counter.
  */
 struct dp_upcall_info {
-	u8 cmd;
-	const struct sw_flow_key *key;
 	const struct nlattr *userdata;
 	u32 portid;
+	u8 cmd;
 };
 
 /**
@@ -149,7 +148,7 @@ int lockdep_ovsl_is_held(void);
 #define lockdep_ovsl_is_held()	1
 #endif
 
-#define ASSERT_OVSL()		WARN_ON(unlikely(!lockdep_ovsl_is_held()))
+#define ASSERT_OVSL()		WARN_ON(!lockdep_ovsl_is_held())
 #define ovsl_dereference(p)					\
 	rcu_dereference_protected(p, lockdep_ovsl_is_held())
 #define rcu_dereference_ovsl(p)					\
@@ -189,9 +188,7 @@ extern struct notifier_block ovs_dp_device_notifier;
 extern struct genl_family dp_vport_genl_family;
 extern struct genl_multicast_group ovs_dp_vport_multicast_group;
 
-void ovs_dp_process_received_packet(struct sk_buff *);
-void ovs_dp_process_packet_with_key(struct sk_buff *,
-				    struct sw_flow_key *pkt_key, bool recirc);
+void ovs_dp_process_packet(struct sk_buff *, bool recirc);
 void ovs_dp_detach_port(struct vport *);
 int ovs_dp_upcall(struct datapath *, struct sk_buff *,
 		  const struct dp_upcall_info *);

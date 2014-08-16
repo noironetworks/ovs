@@ -55,6 +55,8 @@ lib_libopenvswitch_la_SOURCES = \
 	lib/dummy.h \
 	lib/dhparams.h \
 	lib/dirs.h \
+	lib/dpctl.c \
+	lib/dpctl.h \
 	lib/dpif-netdev.c \
 	lib/dpif-netdev.h \
 	lib/dpif-provider.h \
@@ -137,7 +139,6 @@ lib_libopenvswitch_la_SOURCES = \
 	lib/ofp-print.c \
 	lib/ofp-print.h \
 	lib/ofp-util.c \
-	lib/ofp-util.def \
 	lib/ofp-util.h \
 	lib/ofp-version-opt.h \
 	lib/ofp-version-opt.c \
@@ -148,9 +149,11 @@ lib_libopenvswitch_la_SOURCES = \
 	lib/ovs-atomic-flag-gcc4.7+.h \
 	lib/ovs-atomic-gcc4+.h \
 	lib/ovs-atomic-gcc4.7+.h \
+	lib/ovs-atomic-i586.h \
 	lib/ovs-atomic-locked.c \
 	lib/ovs-atomic-locked.h \
 	lib/ovs-atomic-pthreads.h \
+	lib/ovs-atomic-x86_64.h \
 	lib/ovs-atomic.h \
 	lib/ovs-rcu.c \
 	lib/ovs-rcu.h \
@@ -307,6 +310,8 @@ lib_libopenvswitch_la_SOURCES += \
 	lib/netlink-protocol.h \
 	lib/netlink-socket.c \
 	lib/netlink-socket.h \
+	lib/ovs-numa.c \
+	lib/ovs-numa.h \
 	lib/rtnetlink-link.c \
 	lib/rtnetlink-link.h \
 	lib/route-table.c \
@@ -317,6 +322,15 @@ if DPDK_NETDEV
 lib_libopenvswitch_la_SOURCES += \
        lib/netdev-dpdk.c \
        lib/netdev-dpdk.h
+endif
+
+if WIN32
+lib_libopenvswitch_la_SOURCES += \
+	lib/netlink-notifier.c \
+	lib/netlink-notifier.h \
+	lib/netlink-protocol.h \
+	lib/netlink-socket.c \
+	lib/netlink-socket.h
 endif
 
 if HAVE_POSIX_AIO
@@ -364,6 +378,7 @@ MAN_FRAGMENTS += \
 	lib/coverage-unixctl.man \
 	lib/daemon.man \
 	lib/daemon-syn.man \
+	lib/dpctl.man \
 	lib/memory-unixctl.man \
 	lib/ofp-version.man \
 	lib/ovs.tmac \
@@ -419,6 +434,14 @@ lib/dirs.c: lib/dirs.c.in Makefile
 		-e 's,[@]pkgdatadir[@],"$(pkgdatadir)",g') \
 	     > lib/dirs.c.tmp
 	mv lib/dirs.c.tmp lib/dirs.c
+
+lib/ofp-actions.inc1: $(srcdir)/build-aux/extract-ofp-actions lib/ofp-actions.c
+	$(run_python) $^ --prototypes > $@.tmp && mv $@.tmp $@
+lib/ofp-actions.inc2: $(srcdir)/build-aux/extract-ofp-actions lib/ofp-actions.c
+	$(run_python) $^ --definitions > $@.tmp && mv $@.tmp $@
+lib/ofp-actions.lo: lib/ofp-actions.inc1 lib/ofp-actions.inc2
+CLEANFILES += lib/ofp-actions.inc1 lib/ofp-actions.inc2
+EXTRA_DIST += build-aux/extract-ofp-actions lib/ofp-errors.inc
 
 $(srcdir)/lib/ofp-errors.inc: \
 	lib/ofp-errors.h include/openflow/openflow-common.h \

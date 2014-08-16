@@ -13,6 +13,7 @@ Andrew Lambeth          wal@nicira.com
 Andy Hill               hillad@gmail.com
 Andy Southgate          andy.southgate@citrix.com
 Andy Zhou               azhou@nicira.com
+Ankur Sharma            ankursharma@vmware.com
 Anoob Soman             anoob.soman@citrix.com
 Ansis Atteka            aatteka@nicira.com
 Anupam Chanda           achanda@nicira.com
@@ -46,6 +47,8 @@ Duffie Cooley           dcooley@nicira.com
 Ed Maste                emaste at freebsd.org
 Edouard Bourguignon     madko@linuxed.net
 Edward Tomasz Napierała trasz@freebsd.org
+Eitan Eliahu            eliahue@vmware.com
+Eric Sesterhenn         eric.sesterhenn@lsexperts.de
 Ethan Jackson           ethan@nicira.com
 Flavio Leitner          fbl@redhat.com
 Francesco Fusco         ffusco@redhat.com
@@ -88,11 +91,13 @@ Luca Giraudo            lgiraudo@nicira.com
 Luigi Rizzo             rizzo@iet.unipi.it
 Mark Hamilton           mhamilton@nicira.com
 Martin Casado           casado@nicira.com
+Maryam Tahhan           maryam.tahhan@intel.com
 Mehak Mahajan           mmahajan@nicira.com
 Murphy McCauley         murphy.mccauley@gmail.com
 Natasha Gude            natasha@nicira.com
 Neil McKee              neil.mckee@inmon.com
 Neil Zhu                zhuj@centecnetworks.com
+Nithin Raju             nithin@vmware.com
 Padmanabhan Krishnan    kprad1@yahoo.com
 Paraneetharan Chandrasekaran    paraneetharanc@gmail.com
 Paul Fazzone            pfazzone@nicira.com
@@ -134,6 +139,7 @@ Wei Yongjun             yjwei@cn.fujitsu.com
 William Fulton
 YAMAMOTO Takashi        yamamoto@valinux.co.jp
 Yasuhito Takamiya       yasuhito@gmail.com
+yinpeijun               yinpeijun@huawei.com
 Yu Zhiguo               yuzg@cn.fujitsu.com
 ZhengLingyun            konghuarukhr@163.com
 Zoltan Kiss             zoltan.kiss@citrix.com
@@ -159,6 +165,7 @@ Andreas Beckmann        debian@abeckmann.de
 Andrei Andone           andrei.andone@softvision.ro
 Anshuman Manral         anshuman.manral@outlook.com
 Anton Matsiuk           anton.matsiuk@gmail.com
+Anup Khadka             khadka.py@gmail.com
 Anuprem Chalvadi        achalvadi@vmware.com
 Ariel Tubaltsev         atubaltsev@vmware.com
 Atzm Watanabe           atzm@stratosphere.co.jp
@@ -186,12 +193,15 @@ Eric Lopez              elopez@nicira.com
 Frido Roose             fr.roose@gmail.com
 Gaetano Catalli         gaetano.catalli@gmail.com
 George Shuklin          amarao@desunote.ru
+Gerald Rogers           gerald.rogers@intel.com
 Ghanem Bahri            bahri.ghanem@gmail.com
 Giuseppe de Candia      giuseppe.decandia@gmail.com
 Gordon Good             ggood@nicira.com
 Greg Dahlman            gdahlman@hotmail.com
 Gregor Schaffrath       grsch@net.t-labs.tu-berlin.de
 Guolin Yang             gyang@vmware.com
+Gur Stavi               gstavi@mrv.com
+Hari Sasank Bhamidipalli hbhamidi@cisco.com
 Hassan Khan             hassan.khan@seecs.edu.pk
 Hector Oron             hector.oron@gmail.com
 Henrik Amren            henrik@nicira.com
@@ -218,6 +228,7 @@ John Hurley             john.hurley@netronome.com
 Kevin Mancuso           kevin.mancuso@rackspace.com
 Kiran Shanbhog          kiran@vmware.com
 Kirill Kabardin
+Kirkland Spector        kspector@salesforce.com
 Koichi Yagishita        yagishita.koichi@jrc.co.jp
 Konstantin Khorenko     khorenko@openvz.org
 Kris zhang              zhang.kris@gmail.com
@@ -232,6 +243,7 @@ Michael A. Collins      mike.a.collins@ark-net.org
 Michael Hu              mhu@nicira.com
 Michael Mao             mmao@nicira.com
 Michael Shigorin        mike@osdn.org.ua
+Mihir Gangar            gangarm@vmware.com
 Mike Bursell            mike.bursell@citrix.com
 Mike Kruze              mkruze@nicira.com
 Min Chen                ustcer.tonychan@gmail.com
@@ -258,6 +270,7 @@ Scott Hendricks         shendricks@nicira.com
 Sean Brady              sbrady@gtfservices.com
 Sebastian Andrzej Siewior  sebastian@breakpoint.cc
 Sébastien RICCIO        sr@swisscenter.com
+Simon Jouet             simon.jouet@gmail.com
 Spiro Kourtessis        spiro@vmware.com
 Sridhar Samudrala       samudrala.sridhar@gmail.com
 Srini Seetharaman       seethara@stanford.edu

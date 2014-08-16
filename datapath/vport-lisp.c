@@ -196,8 +196,9 @@ static void lisp_build_header(const struct vport *vport,
 	struct lisp_port *lisp_port = lisp_vport(vport);
 	struct udphdr *udph = udp_hdr(skb);
 	struct lisphdr *lisph = (struct lisphdr *)(udph + 1);
-	const struct ovs_key_ipv4_tunnel *tun_key = &OVS_CB(skb)->tun_info->tunnel;
+	const struct ovs_key_ipv4_tunnel *tun_key;
 
+	tun_key = &OVS_CB(skb)->egress_tun_info->tunnel;
 	udph->dest = lisp_port->dst_port;
 	udph->source = htons(get_src_port(net, skb));
 	udph->check = 0;
@@ -409,6 +410,11 @@ static int handle_offloads(struct sk_buff *skb)
 #else
 static int handle_offloads(struct sk_buff *skb)
 {
+	if (skb->encapsulation && skb_is_gso(skb)) {
+		kfree_skb(skb);
+		return -ENOSYS;
+	}
+
 	if (skb_is_gso(skb)) {
 		int err = skb_unclone(skb, GFP_ATOMIC);
 		if (unlikely(err))
@@ -434,10 +440,10 @@ static int lisp_send(struct vport *vport, struct sk_buff *skb)
 	int sent_len;
 	int err;
 
-	if (unlikely(!OVS_CB(skb)->tun_info))
+	if (unlikely(!OVS_CB(skb)->egress_tun_info))
 		return -EINVAL;
 
-	tun_key = &OVS_CB(skb)->tun_info->tunnel;
+	tun_key = &OVS_CB(skb)->egress_tun_info->tunnel;
 
 	if (skb->protocol != htons(ETH_P_IP) &&
 	    skb->protocol != htons(ETH_P_IPV6)) {

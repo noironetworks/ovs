@@ -14,11 +14,13 @@ AM_LDFLAGS = $(SSL_LDFLAGS)
 
 if WIN32
 AM_CPPFLAGS += -I $(top_srcdir)/include/windows
+AM_CPPFLAGS += -I $(top_srcdir)/datapath-windows/include
 AM_CPPFLAGS += $(PTHREAD_INCLUDES)
 AM_LDFLAGS += $(PTHREAD_LDFLAGS)
 endif
 
 AM_CPPFLAGS += -I $(top_srcdir)/include
+AM_CPPFLAGS += -I $(top_builddir)/include
 AM_CPPFLAGS += -I $(top_srcdir)/lib
 AM_CPPFLAGS += -I $(top_builddir)/lib
 
@@ -57,7 +59,6 @@ CLEAN_LOCAL =
 DISTCLEANFILES =
 PYCOV_CLEAN_FILES = build-aux/check-structs,cover
 EXTRA_DIST = \
-	BUILD.Windows \
 	CONTRIBUTING \
 	CodingStyle \
 	DESIGN \
@@ -73,6 +74,7 @@ EXTRA_DIST = \
 	INSTALL.SSL \
 	INSTALL.XenServer \
 	INSTALL.userspace \
+	INSTALL.Windows \
 	IntegrationGuide \
 	NOTICE \
 	OPENFLOW-1.1+ \
@@ -197,7 +199,7 @@ config-h-check:
 	@cd $(srcdir); \
 	if test -e .git && (git --version) >/dev/null 2>&1 && \
 	   git --no-pager grep -L '#include <config\.h>' `git ls-files | grep '\.c$$' | \
-               grep -vE '^datapath|^lib/sflow|^third-party'`; \
+               grep -vE '^datapath|^lib/sflow|^third-party|^datapath-windows'`; \
 	then \
 	    echo "See above for list of violations of the rule that"; \
 	    echo "every C source file must #include <config.h>."; \
@@ -313,3 +315,5 @@ include python/automake.mk
 include python/compat/automake.mk
 include tutorial/automake.mk
 include vtep/automake.mk
+include datapath-windows/automake.mk
+include datapath-windows/include/automake.mk

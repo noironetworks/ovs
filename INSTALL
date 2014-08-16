@@ -67,8 +67,10 @@ install the following:
       obsolete and not needed.)
 
       To use GRE tunneling on Linux 2.6.37 or newer, kernel support
-      for GRE must be compiled in or available as a module
-      (CONFIG_NET_IPGRE_DEMUX).
+      for GRE demultiplexing (CONFIG_NET_IPGRE_DEMUX) must be compiled
+      in or available as a module.  Also, on kernels before 3.11, the
+      ip_gre module, for GRE tunnels over IP (NET_IPGRE), must not be
+      loaded or compiled in.
 
       To configure HTB or HFSC quality of service with Open vSwitch,
       you must enable the respective configuration options.
@@ -380,7 +382,7 @@ of Open vSwitch, make sure that the new userspace version is compatible with
 the previously loaded kernel module.
 
 2. An upgrade of userspace daemons means that they have to be restarted.
-Restarting the daemons means that the Openflow flows in the ovs-vswitchd daemon
+Restarting the daemons means that the OpenFlow flows in the ovs-vswitchd daemon
 will be lost.  One way to restore the flows is to let the controller
 re-populate it.  Another way is to save the previous flows using a utility
 like ovs-ofctl and then re-add them after the restart. Restoring the old flows

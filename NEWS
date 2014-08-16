@@ -7,9 +7,19 @@ Post-v2.3.0
      possible to generate or match options. This is planned for a future
      release. The protocol is documented at
      http://tools.ietf.org/html/draft-gross-geneve-00
+   - The OVS database now reports controller rate limiting statistics.
+   - ovs-dpctl functionality is now available for datapaths integrated
+     into ovs-vswitchd, via ovs-appctl.  Some existing ovs-appctl
+     commands are now redundant and will be removed in a future
+     release.  See ovs-vswitchd(8) for details.
+   - OpenFlow:
+     * OpenFlow 1.5 (draft) extended registers are now supported.
+     * OpenFlow 1.5 (draft) Copy-Field action is now supported.
+     * OpenFlow 1.3+ table features requests are now supported (read-only).
+     * Nicira extension "move" actions may now be included in action sets.
 
 
-v2.3.0 - xx xxx xxxx
+v2.3.0 - 14 Aug 2014
 ---------------------
    - OpenFlow 1.1, 1.2, and 1.3 are now enabled by default in
      ovs-vswitchd.

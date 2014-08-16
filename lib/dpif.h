@@ -115,7 +115,7 @@
  *      a flow, but the datapath interface uses a different data format to
  *      allow ABI forward- and backward-compatibility.  datapath/README
  *      describes the rationale and design.  Refer to OVS_KEY_ATTR_* and
- *      "struct ovs_key_*" in include/linux/openvswitch.h for details.
+ *      "struct ovs_key_*" in include/odp-netlink.h for details.
  *      lib/odp-util.h defines several functions for working with these flows.
  *
  *    - A "mask" that, for each bit in the flow, specifies whether the datapath
@@ -154,9 +154,8 @@
  *      within a flow.  Some examples of actions are OVS_ACTION_ATTR_OUTPUT,
  *      which transmits the packet out a port, and OVS_ACTION_ATTR_SET, which
  *      modifies packet headers.  Refer to OVS_ACTION_ATTR_* and "struct
- *      ovs_action_*" in include/linux/openvswitch.h for details.
- *      lib/odp-util.h defines several functions for working with datapath
- *      actions.
+ *      ovs_action_*" in include/odp-netlink.h for details.  lib/odp-util.h
+ *      defines several functions for working with datapath actions.
  *
  *      The actions list may be empty.  This indicates that nothing should be
  *      done to matching packets, that is, they should be dropped.
@@ -400,11 +399,13 @@ extern "C" {
 #endif
 
 struct dpif;
+struct dpif_class;
+struct dpif_flow;
 struct ds;
 struct flow;
+struct flow_wildcards;
 struct nlattr;
 struct sset;
-struct dpif_class;
 
 int dp_register_provider(const struct dpif_class *);
 int dp_unregister_provider(const char *type);
@@ -522,9 +523,9 @@ int dpif_flow_put(struct dpif *, enum dpif_flow_put_flags,
 int dpif_flow_del(struct dpif *,
                   const struct nlattr *key, size_t key_len,
                   struct dpif_flow_stats *);
-int dpif_flow_get(const struct dpif *,
+int dpif_flow_get(struct dpif *,
                   const struct nlattr *key, size_t key_len,
-                  struct ofpbuf **actionsp, struct dpif_flow_stats *);
+                  struct ofpbuf *, struct dpif_flow *);
 
 /* Flow dumping interface
  * ======================
@@ -573,6 +574,8 @@ struct dpif_flow {
 };
 int dpif_flow_dump_next(struct dpif_flow_dump_thread *,
                         struct dpif_flow *flows, int max_flows);
+
+#define DPIF_FLOW_BUFSIZE 2048
 
 /* Operation batching interface.
  *
@@ -584,8 +587,31 @@ enum dpif_op_type {
     DPIF_OP_FLOW_PUT = 1,
     DPIF_OP_FLOW_DEL,
     DPIF_OP_EXECUTE,
+    DPIF_OP_FLOW_GET,
 };
 
+/* Add or modify a flow.
+ *
+ * The flow is specified by the Netlink attributes with types OVS_KEY_ATTR_* in
+ * the 'key_len' bytes starting at 'key'.  The associated actions are specified
+ * by the Netlink attributes with types OVS_ACTION_ATTR_* in the 'actions_len'
+ * bytes starting at 'actions'.
+ *
+ *   - If the flow's key does not exist in the dpif, then the flow will be
+ *     added if 'flags' includes DPIF_FP_CREATE.  Otherwise the operation will
+ *     fail with ENOENT.
+ *
+ *     If the operation succeeds, then 'stats', if nonnull, will be zeroed.
+ *
+ *   - If the flow's key does exist in the dpif, then the flow's actions will
+ *     be updated if 'flags' includes DPIF_FP_MODIFY.  Otherwise the operation
+ *     will fail with EEXIST.  If the flow's actions are updated, then its
+ *     statistics will be zeroed if 'flags' includes DPIF_FP_ZERO_STATS, and
+ *     left as-is otherwise.
+ *
+ *     If the operation succeeds, then 'stats', if nonnull, will be set to the
+ *     flow's statistics before the update.
+ */
 struct dpif_flow_put {
     /* Input. */
     enum dpif_flow_put_flags flags; /* DPIF_FP_*. */
@@ -600,6 +626,14 @@ struct dpif_flow_put {
     struct dpif_flow_stats *stats;  /* Optional flow statistics. */
 };
 
+/* Delete a flow.
+ *
+ * The flow is specified by the Netlink attributes with types OVS_KEY_ATTR_* in
+ * the 'key_len' bytes starting at 'key'.  Succeeds with status 0 if the flow
+ * is deleted, or fails with ENOENT if the dpif does not contain such a flow.
+ *
+ * If the operation succeeds, then 'stats', if nonnull, will be set to the
+ * flow's statistics before its deletion. */
 struct dpif_flow_del {
     /* Input. */
     const struct nlattr *key;       /* Flow to delete. */
@@ -609,21 +643,54 @@ struct dpif_flow_del {
     struct dpif_flow_stats *stats;  /* Optional flow statistics. */
 };
 
+/* Executes actions on a specified packet.
+ *
+ * Performs the 'actions_len' bytes of actions in 'actions' on the Ethernet
+ * frame in 'packet' and on the packet metadata in 'md'.  May modify both
+ * 'packet' and 'md'.
+ *
+ * Some dpif providers do not implement every action.  The Linux kernel
+ * datapath, in particular, does not implement ARP field modification.  If
+ * 'needs_help' is true, the dpif layer executes in userspace all of the
+ * actions that it can, and for OVS_ACTION_ATTR_OUTPUT and
+ * OVS_ACTION_ATTR_USERSPACE actions it passes the packet through to the dpif
+ * implementation.
+ *
+ * This works even if 'actions_len' is too long for a Netlink attribute. */
 struct dpif_execute {
-    /* Raw support for execute passed along to the provider. */
+    /* Input. */
     const struct nlattr *actions;   /* Actions to execute on packet. */
     size_t actions_len;             /* Length of 'actions' in bytes. */
+    bool needs_help;
+
+    /* Input, but possibly modified as a side effect of execution. */
     struct ofpbuf *packet;          /* Packet to execute. */
     struct pkt_metadata md;         /* Packet metadata. */
+};
 
-    /* Some dpif providers do not implement every action.  The Linux kernel
-     * datapath, in particular, does not implement ARP field modification.
-     *
-     * If this member is set to true, the dpif layer executes in userspace all
-     * of the actions that it can, and for OVS_ACTION_ATTR_OUTPUT and
-     * OVS_ACTION_ATTR_USERSPACE actions it passes the packet through to the
-     * dpif implementation. */
-    bool needs_help;
+/* Queries the dpif for a flow entry.
+ *
+ * The flow is specified by the Netlink attributes with types OVS_KEY_ATTR_* in
+ * the 'key_len' bytes starting at 'key'. 'buffer' must point to an initialized
+ * buffer, with a recommended size of DPIF_FLOW_BUFSIZE bytes.
+ *
+ * On success, 'flow' will be populated with the mask, actions and stats for
+ * the datapath flow corresponding to 'key'. The mask and actions may point
+ * within '*buffer', or may point at RCU-protected data. Therefore, callers
+ * that wish to hold these over quiescent periods must make a copy of these
+ * fields before quiescing.
+ *
+ * Succeeds with status 0 if the flow is fetched, or fails with ENOENT if no
+ * such flow exists. Other failures are indicated with a positive errno value.
+ */
+struct dpif_flow_get {
+    /* Input. */
+    const struct nlattr *key;       /* Flow to get. */
+    size_t key_len;                 /* Length of 'key' in bytes. */
+    struct ofpbuf *buffer;          /* Storage for output parameters. */
+
+    /* Output. */
+    struct dpif_flow *flow;         /* Resulting flow from datapath. */
 };
 
 int dpif_execute(struct dpif *, struct dpif_execute *);
@@ -635,6 +702,7 @@ struct dpif_op {
         struct dpif_flow_put flow_put;
         struct dpif_flow_del flow_del;
         struct dpif_execute execute;
+        struct dpif_flow_get flow_get;
     } u;
 };
 
@@ -670,12 +738,44 @@ struct dpif_upcall {
     struct nlattr *userdata;    /* Argument to OVS_ACTION_ATTR_USERSPACE. */
 };
 
+/* A callback to process an upcall, currently implemented only by dpif-netdev.
+ *
+ * The caller provides the 'packet' and 'flow' to process, the 'type' of the
+ * upcall, and if 'type' is DPIF_UC_ACTION then the 'userdata' attached to the
+ * action.
+ *
+ * The callback must fill in 'actions' with the datapath actions to apply to
+ * 'packet'.  'wc' and 'put_actions' will either be both null or both nonnull.
+ * If they are nonnull, then the caller will install a flow entry to process
+ * all future packets that match 'flow' and 'wc'; the callback must store a
+ * wildcard mask suitable for that purpose into 'wc'.  If the actions to store
+ * into the flow entry are the same as 'actions', then the callback may leave
+ * 'put_actions' empty; otherwise it must store the desired actions into
+ * 'put_actions'.
+ *
+ * Returns 0 if successful, ENOSPC if the flow limit has been reached and no
+ * flow should be installed, or some otherwise a positive errno value. */
+typedef int upcall_callback(const struct ofpbuf *packet,
+                            const struct flow *flow,
+                            enum dpif_upcall_type type,
+                            const struct nlattr *userdata,
+                            struct ofpbuf *actions,
+                            struct flow_wildcards *wc,
+                            struct ofpbuf *put_actions,
+                            void *aux);
+
+void dpif_register_upcall_cb(struct dpif *, upcall_callback *, void *aux);
+
 int dpif_recv_set(struct dpif *, bool enable);
 int dpif_handlers_set(struct dpif *, uint32_t n_handlers);
 int dpif_recv(struct dpif *, uint32_t handler_id, struct dpif_upcall *,
               struct ofpbuf *);
 void dpif_recv_purge(struct dpif *);
 void dpif_recv_wait(struct dpif *, uint32_t handler_id);
+void dpif_enable_upcall(struct dpif *);
+void dpif_disable_upcall(struct dpif *);
+
+void dpif_print_packet(struct dpif *, struct dpif_upcall *);
 
 /* Miscellaneous. */
 

@@ -19,6 +19,8 @@
 
 struct dpif;
 struct dpif_backer;
+struct dpif_upcall;
+struct ofpbuf;
 struct seq;
 struct simap;
 

@@ -73,8 +73,8 @@ struct dpif_linux_dp {
     const char *name;                  /* OVS_DP_ATTR_NAME. */
     const uint32_t *upcall_pid;        /* OVS_DP_ATTR_UPCALL_PID. */
     uint32_t user_features;            /* OVS_DP_ATTR_USER_FEATURES */
-    struct ovs_dp_stats stats;         /* OVS_DP_ATTR_STATS. */
-    struct ovs_dp_megaflow_stats megaflow_stats;
+    const struct ovs_dp_stats *stats;  /* OVS_DP_ATTR_STATS. */
+    const struct ovs_dp_megaflow_stats *megaflow_stats;
                                        /* OVS_DP_ATTR_MEGAFLOW_STATS.*/
 };
 
@@ -126,6 +126,8 @@ static int dpif_linux_flow_transact(struct dpif_linux_flow *request,
                                     struct ofpbuf **bufp);
 static void dpif_linux_flow_get_stats(const struct dpif_linux_flow *,
                                       struct dpif_flow_stats *);
+static void dpif_linux_flow_to_dpif_flow(struct dpif_flow *,
+                                         const struct dpif_linux_flow *);
 
 /* One of the dpif channels between the kernel and userspace. */
 struct dpif_channel {
@@ -554,12 +556,23 @@ dpif_linux_get_stats(const struct dpif *dpif_, struct dpif_dp_stats *stats)
 
     error = dpif_linux_dp_get(dpif_, &dp, &buf);
     if (!error) {
-        stats->n_hit    = dp.stats.n_hit;
-        stats->n_missed = dp.stats.n_missed;
-        stats->n_lost   = dp.stats.n_lost;
-        stats->n_flows  = dp.stats.n_flows;
-        stats->n_masks  = dp.megaflow_stats.n_masks;
-        stats->n_mask_hit  = dp.megaflow_stats.n_mask_hit;
+        memset(stats, 0, sizeof *stats);
+
+        if (dp.stats) {
+            stats->n_hit    = get_32aligned_u64(&dp.stats->n_hit);
+            stats->n_missed = get_32aligned_u64(&dp.stats->n_missed);
+            stats->n_lost   = get_32aligned_u64(&dp.stats->n_lost);
+            stats->n_flows  = get_32aligned_u64(&dp.stats->n_flows);
+        }
+
+        if (dp.megaflow_stats) {
+            stats->n_masks = dp.megaflow_stats->n_masks;
+            stats->n_mask_hit = get_32aligned_u64(
+                &dp.megaflow_stats->n_mask_hit);
+        } else {
+            stats->n_masks = UINT32_MAX;
+            stats->n_mask_hit = UINT64_MAX;
+        }
         ofpbuf_delete(buf);
     }
     return error;
@@ -842,13 +855,19 @@ dpif_linux_port_get_pid__(const struct dpif_linux *dpif, odp_port_t port_no,
     uint32_t port_idx = odp_to_u32(port_no);
     uint32_t pid = 0;
 
-    if (dpif->handlers) {
+    if (dpif->handlers && dpif->uc_array_size > 0) {
         /* The ODPP_NONE "reserved" port number uses the "ovs-system"'s
          * channel, since it is not heavily loaded. */
         uint32_t idx = port_idx >= dpif->uc_array_size ? 0 : port_idx;
         struct dpif_handler *h = &dpif->handlers[hash % dpif->n_handlers];
 
-        pid = nl_sock_pid(h->channels[idx].sock);
+        /* Needs to check in case the socket pointer is changed in between
+         * the holding of upcall_lock.  A known case happens when the main
+         * thread deletes the vport while the handler thread is handling
+         * the upcall from that port. */
+        if (h->channels[idx].sock) {
+            pid = nl_sock_pid(h->channels[idx].sock);
+        }
     }
 
     return pid;
@@ -1046,45 +1065,27 @@ dpif_linux_port_poll_wait(const struct dpif *dpif_)
     }
 }
 
-static int
-dpif_linux_flow_get__(const struct dpif_linux *dpif,
-                      const struct nlattr *key, size_t key_len,
-                      struct dpif_linux_flow *reply, struct ofpbuf **bufp)
+static void
+dpif_linux_init_flow_get(const struct dpif_linux *dpif,
+                         const struct nlattr *key, size_t key_len,
+                         struct dpif_linux_flow *request)
 {
-    struct dpif_linux_flow request;
-
-    dpif_linux_flow_init(&request);
-    request.cmd = OVS_FLOW_CMD_GET;
-    request.dp_ifindex = dpif->dp_ifindex;
-    request.key = key;
-    request.key_len = key_len;
-    return dpif_linux_flow_transact(&request, reply, bufp);
+    dpif_linux_flow_init(request);
+    request->cmd = OVS_FLOW_CMD_GET;
+    request->dp_ifindex = dpif->dp_ifindex;
+    request->key = key;
+    request->key_len = key_len;
 }
 
 static int
-dpif_linux_flow_get(const struct dpif *dpif_,
+dpif_linux_flow_get(const struct dpif_linux *dpif,
                     const struct nlattr *key, size_t key_len,
-                    struct ofpbuf **actionsp, struct dpif_flow_stats *stats)
+                    struct dpif_linux_flow *reply, struct ofpbuf **bufp)
 {
-    const struct dpif_linux *dpif = dpif_linux_cast(dpif_);
-    struct dpif_linux_flow reply;
-    struct ofpbuf *buf;
-    int error;
+    struct dpif_linux_flow request;
 
-    error = dpif_linux_flow_get__(dpif, key, key_len, &reply, &buf);
-    if (!error) {
-        if (stats) {
-            dpif_linux_flow_get_stats(&reply, stats);
-        }
-        if (actionsp) {
-            ofpbuf_set_data(buf, CONST_CAST(struct nlattr *, reply.actions));
-            ofpbuf_set_size(buf, reply.actions_len);
-            *actionsp = buf;
-        } else {
-            ofpbuf_delete(buf);
-        }
-    }
-    return error;
+    dpif_linux_init_flow_get(dpif, key, key_len, &request);
+    return dpif_linux_flow_transact(&request, reply, bufp);
 }
 
 static void
@@ -1112,25 +1113,6 @@ dpif_linux_init_flow_put(struct dpif_linux *dpif, const struct dpif_flow_put *pu
     request->nlmsg_flags = put->flags & DPIF_FP_MODIFY ? 0 : NLM_F_CREATE;
 }
 
-static int
-dpif_linux_flow_put(struct dpif *dpif_, const struct dpif_flow_put *put)
-{
-    struct dpif_linux *dpif = dpif_linux_cast(dpif_);
-    struct dpif_linux_flow request, reply;
-    struct ofpbuf *buf;
-    int error;
-
-    dpif_linux_init_flow_put(dpif, put, &request);
-    error = dpif_linux_flow_transact(&request,
-                                     put->stats ? &reply : NULL,
-                                     put->stats ? &buf : NULL);
-    if (!error && put->stats) {
-        dpif_linux_flow_get_stats(&reply, put->stats);
-        ofpbuf_delete(buf);
-    }
-    return error;
-}
-
 static void
 dpif_linux_init_flow_del(struct dpif_linux *dpif, const struct dpif_flow_del *del,
                          struct dpif_linux_flow *request)
@@ -1140,25 +1122,6 @@ dpif_linux_init_flow_del(struct dpif_linux *dpif, const struct dpif_flow_del *de
     request->dp_ifindex = dpif->dp_ifindex;
     request->key = del->key;
     request->key_len = del->key_len;
-}
-
-static int
-dpif_linux_flow_del(struct dpif *dpif_, const struct dpif_flow_del *del)
-{
-    struct dpif_linux *dpif = dpif_linux_cast(dpif_);
-    struct dpif_linux_flow request, reply;
-    struct ofpbuf *buf;
-    int error;
-
-    dpif_linux_init_flow_del(dpif, del, &request);
-    error = dpif_linux_flow_transact(&request,
-                                     del->stats ? &reply : NULL,
-                                     del->stats ? &buf : NULL);
-    if (!error && del->stats) {
-        dpif_linux_flow_get_stats(&reply, del->stats);
-        ofpbuf_delete(buf);
-    }
-    return error;
 }
 
 struct dpif_linux_flow_dump {
@@ -1252,7 +1215,7 @@ dpif_linux_flow_dump_thread_destroy(struct dpif_flow_dump_thread *thread_)
 
 static void
 dpif_linux_flow_to_dpif_flow(struct dpif_flow *dpif_flow,
-                             struct dpif_linux_flow *linux_flow)
+                             const struct dpif_linux_flow *linux_flow)
 {
     dpif_flow->key = linux_flow->key;
     dpif_flow->key_len = linux_flow->key_len;
@@ -1301,9 +1264,9 @@ dpif_linux_flow_dump_next(struct dpif_flow_dump_thread *thread_,
         } else {
             /* Rare case: the flow does not include actions.  Retrieve this
              * individual flow again to get the actions. */
-            error = dpif_linux_flow_get__(dpif, linux_flow.key,
-                                          linux_flow.key_len, &linux_flow,
-                                          &thread->nl_actions);
+            error = dpif_linux_flow_get(dpif, linux_flow.key,
+                                        linux_flow.key_len, &linux_flow,
+                                        &thread->nl_actions);
             if (error == ENOENT) {
                 VLOG_DBG("dumped flow disappeared on get");
                 continue;
@@ -1353,29 +1316,6 @@ dpif_linux_encode_execute(int dp_ifindex, const struct dpif_execute *d_exec,
                       d_exec->actions, d_exec->actions_len);
 }
 
-static int
-dpif_linux_execute__(int dp_ifindex, const struct dpif_execute *execute)
-{
-    uint64_t request_stub[1024 / 8];
-    struct ofpbuf request;
-    int error;
-
-    ofpbuf_use_stub(&request, request_stub, sizeof request_stub);
-    dpif_linux_encode_execute(dp_ifindex, execute, &request);
-    error = nl_transact(NETLINK_GENERIC, &request, NULL);
-    ofpbuf_uninit(&request);
-
-    return error;
-}
-
-static int
-dpif_linux_execute(struct dpif *dpif_, struct dpif_execute *execute)
-{
-    const struct dpif_linux *dpif = dpif_linux_cast(dpif_);
-
-    return dpif_linux_execute__(dpif->dp_ifindex, execute);
-}
-
 #define MAX_OPS 50
 
 static void
@@ -1402,6 +1342,7 @@ dpif_linux_operate__(struct dpif_linux *dpif,
         struct dpif_flow_put *put;
         struct dpif_flow_del *del;
         struct dpif_execute *execute;
+        struct dpif_flow_get *get;
         struct dpif_linux_flow flow;
 
         ofpbuf_use_stub(&aux->request,
@@ -1438,6 +1379,13 @@ dpif_linux_operate__(struct dpif_linux *dpif,
                                       &aux->request);
             break;
 
+        case DPIF_OP_FLOW_GET:
+            get = &op->u.flow_get;
+            dpif_linux_init_flow_get(dpif, get->key, get->key_len, &flow);
+            aux->txn.reply = get->buffer;
+            dpif_linux_flow_to_ofpbuf(&flow, &aux->request);
+            break;
+
         default:
             OVS_NOT_REACHED();
         }
@@ -1454,6 +1402,7 @@ dpif_linux_operate__(struct dpif_linux *dpif,
         struct dpif_op *op = ops[i];
         struct dpif_flow_put *put;
         struct dpif_flow_del *del;
+        struct dpif_flow_get *get;
 
         op->error = txn->error;
 
@@ -1470,10 +1419,6 @@ dpif_linux_operate__(struct dpif_linux *dpif,
                         dpif_linux_flow_get_stats(&reply, put->stats);
                     }
                 }
-
-                if (op->error) {
-                    memset(put->stats, 0, sizeof *put->stats);
-                }
             }
             break;
 
@@ -1489,14 +1434,22 @@ dpif_linux_operate__(struct dpif_linux *dpif,
                         dpif_linux_flow_get_stats(&reply, del->stats);
                     }
                 }
-
-                if (op->error) {
-                    memset(del->stats, 0, sizeof *del->stats);
-                }
             }
             break;
 
         case DPIF_OP_EXECUTE:
+            break;
+
+        case DPIF_OP_FLOW_GET:
+            get = &op->u.flow_get;
+            if (!op->error) {
+                struct dpif_linux_flow reply;
+
+                op->error = dpif_linux_flow_from_ofpbuf(&reply, txn->reply);
+                if (!op->error) {
+                    dpif_linux_flow_to_dpif_flow(get->flow, &reply);
+                }
+            }
             break;
 
         default:
@@ -1925,16 +1878,12 @@ const struct dpif_class dpif_linux_class = {
     dpif_linux_port_dump_done,
     dpif_linux_port_poll,
     dpif_linux_port_poll_wait,
-    dpif_linux_flow_get,
-    dpif_linux_flow_put,
-    dpif_linux_flow_del,
     dpif_linux_flow_flush,
     dpif_linux_flow_dump_create,
     dpif_linux_flow_dump_destroy,
     dpif_linux_flow_dump_thread_create,
     dpif_linux_flow_dump_thread_destroy,
     dpif_linux_flow_dump_next,
-    dpif_linux_execute,
     dpif_linux_operate,
     dpif_linux_recv_set,
     dpif_linux_handlers_set,
@@ -1942,6 +1891,9 @@ const struct dpif_class dpif_linux_class = {
     dpif_linux_recv,
     dpif_linux_recv_wait,
     dpif_linux_recv_purge,
+    NULL,                       /* register_upcall_cb */
+    NULL,                       /* enable_upcall */
+    NULL,                       /* disable_upcall */
 };
 
 static int
@@ -2208,17 +2160,11 @@ dpif_linux_dp_from_ofpbuf(struct dpif_linux_dp *dp, const struct ofpbuf *buf)
     dp->dp_ifindex = ovs_header->dp_ifindex;
     dp->name = nl_attr_get_string(a[OVS_DP_ATTR_NAME]);
     if (a[OVS_DP_ATTR_STATS]) {
-        /* Can't use structure assignment because Netlink doesn't ensure
-         * sufficient alignment for 64-bit members. */
-        memcpy(&dp->stats, nl_attr_get(a[OVS_DP_ATTR_STATS]),
-               sizeof dp->stats);
+        dp->stats = nl_attr_get(a[OVS_DP_ATTR_STATS]);
     }
 
     if (a[OVS_DP_ATTR_MEGAFLOW_STATS]) {
-        /* Can't use structure assignment because Netlink doesn't ensure
-         * sufficient alignment for 64-bit members. */
-        memcpy(&dp->megaflow_stats, nl_attr_get(a[OVS_DP_ATTR_MEGAFLOW_STATS]),
-               sizeof dp->megaflow_stats);
+        dp->megaflow_stats = nl_attr_get(a[OVS_DP_ATTR_MEGAFLOW_STATS]);
     }
 
     return 0;
@@ -2257,8 +2203,6 @@ static void
 dpif_linux_dp_init(struct dpif_linux_dp *dp)
 {
     memset(dp, 0, sizeof *dp);
-    dp->megaflow_stats.n_masks = UINT32_MAX;
-    dp->megaflow_stats.n_mask_hit = UINT64_MAX;
 }
 
 static void
@@ -2478,8 +2422,8 @@ dpif_linux_flow_get_stats(const struct dpif_linux_flow *flow,
                           struct dpif_flow_stats *stats)
 {
     if (flow->stats) {
-        stats->n_packets = get_unaligned_u64(&flow->stats->n_packets);
-        stats->n_bytes = get_unaligned_u64(&flow->stats->n_bytes);
+        stats->n_packets = get_32aligned_u64(&flow->stats->n_packets);
+        stats->n_bytes = get_32aligned_u64(&flow->stats->n_bytes);
     } else {
         stats->n_packets = 0;
         stats->n_bytes = 0;

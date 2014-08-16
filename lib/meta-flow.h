@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2011, 2012, 2013 Nicira, Inc.
+ * Copyright (c) 2011, 2012, 2013, 2014 Nicira, Inc.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -20,9 +20,9 @@
 #include <sys/types.h>
 #include <netinet/in.h>
 #include <netinet/ip6.h>
+#include "bitmap.h"
 #include "flow.h"
 #include "ofp-errors.h"
-#include "ofp-util.h"
 #include "packets.h"
 #include "util.h"
 
@@ -48,29 +48,26 @@ enum OVS_PACKED_ENUM mf_field_id {
     MFF_SKB_PRIORITY,           /* be32 */
     MFF_PKT_MARK,               /* be32 */
 
-#if FLOW_N_REGS > 0
+#if FLOW_N_REGS == 8
     MFF_REG0,                   /* be32 */
-#endif
-#if FLOW_N_REGS > 1
     MFF_REG1,                   /* be32 */
-#endif
-#if FLOW_N_REGS > 2
     MFF_REG2,                   /* be32 */
-#endif
-#if FLOW_N_REGS > 3
     MFF_REG3,                   /* be32 */
-#endif
-#if FLOW_N_REGS > 4
     MFF_REG4,                   /* be32 */
-#endif
-#if FLOW_N_REGS > 5
     MFF_REG5,                   /* be32 */
-#endif
-#if FLOW_N_REGS > 6
     MFF_REG6,                   /* be32 */
-#endif
-#if FLOW_N_REGS > 7
     MFF_REG7,                   /* be32 */
+#else
+#error "Need to update MFF_REG* to match FLOW_N_REGS"
+#endif
+
+#if FLOW_N_XREGS == 4
+    MFF_XREG0,                  /* be64 */
+    MFF_XREG1,                  /* be64 */
+    MFF_XREG2,                  /* be64 */
+    MFF_XREG3,                  /* be64 */
+#else
+#error "Need to update MFF_REG* to match FLOW_N_XREGS"
 #endif
 
     /* L2. */
@@ -147,38 +144,29 @@ enum OVS_PACKED_ENUM mf_field_id {
     MFF_N_IDS
 };
 
+/* A set of mf_field_ids. */
+struct mf_bitmap {
+    unsigned long bm[BITMAP_N_LONGS(MFF_N_IDS)];
+};
+#define MF_BITMAP_INITIALIZER { { [0] = 0 } }
+
 /* Use this macro as CASE_MFF_REGS: in a switch statement to choose all of the
- * MFF_REGx cases. */
-#if FLOW_N_REGS == 1
-# define CASE_MFF_REGS                                          \
-    case MFF_REG0
-#elif FLOW_N_REGS == 2
-# define CASE_MFF_REGS                                          \
-    case MFF_REG0: case MFF_REG1
-#elif FLOW_N_REGS == 3
-# define CASE_MFF_REGS                                          \
-    case MFF_REG0: case MFF_REG1: case MFF_REG2
-#elif FLOW_N_REGS == 4
-# define CASE_MFF_REGS                                          \
-    case MFF_REG0: case MFF_REG1: case MFF_REG2: case MFF_REG3
-#elif FLOW_N_REGS == 5
-# define CASE_MFF_REGS                                          \
-    case MFF_REG0: case MFF_REG1: case MFF_REG2: case MFF_REG3: \
-    case MFF_REG4
-#elif FLOW_N_REGS == 6
-# define CASE_MFF_REGS                                          \
-    case MFF_REG0: case MFF_REG1: case MFF_REG2: case MFF_REG3: \
-    case MFF_REG4: case MFF_REG5
-#elif FLOW_N_REGS == 7
-# define CASE_MFF_REGS                                          \
-    case MFF_REG0: case MFF_REG1: case MFF_REG2: case MFF_REG3: \
-    case MFF_REG4: case MFF_REG5: case MFF_REG6
-#elif FLOW_N_REGS == 8
-# define CASE_MFF_REGS                                          \
+ * MFF_REGn cases. */
+#if FLOW_N_REGS == 8
+#define CASE_MFF_REGS                                           \
     case MFF_REG0: case MFF_REG1: case MFF_REG2: case MFF_REG3: \
     case MFF_REG4: case MFF_REG5: case MFF_REG6: case MFF_REG7
 #else
-# error
+#error "Need to update CASE_MFF_REGS to match FLOW_N_REGS"
+#endif
+
+/* Use this macro as CASE_MFF_XREGS: in a switch statement to choose all of the
+ * MFF_REGn cases. */
+#if FLOW_N_XREGS == 4
+#define CASE_MFF_XREGS                                              \
+    case MFF_XREG0: case MFF_XREG1: case MFF_XREG2: case MFF_XREG3
+#else
+#error "Need to update CASE_MFF_XREGS to match FLOW_N_XREGS"
 #endif
 
 /* Prerequisites for matching a field.
@@ -301,15 +289,19 @@ struct mf_field {
     enum ofp_version oxm_version; /* OpenFlow version that added oxm_header. */
 
     /* Usable protocols.
+     *
      * NXM and OXM are extensible, allowing later extensions to be sent in
      * earlier protocol versions, so this does not necessarily correspond to
      * the OpenFlow protocol version the field was introduced in.
      * Also, some field types are tranparently mapped to each other via the
      * struct flow (like vlan and dscp/tos fields), so each variant supports
-     * all protocols. */
-    enum ofputil_protocol usable_protocols; /* If fully/cidr masked. */
-    /* If partially/non-cidr masked. */
-    enum ofputil_protocol usable_protocols_bitwise;
+     * all protocols.
+     *
+     * These are combinations of OFPUTIL_P_*.  (They are not declared as type
+     * enum ofputil_protocol because that would give meta-flow.h and ofp-util.h
+     * a circular dependency.) */
+    uint32_t usable_protocols;         /* If fully/CIDR masked. */
+    uint32_t usable_protocols_bitwise; /* If partially/non-CIDR masked. */
 
     int flow_be32ofs;  /* Field's be32 offset in "struct flow", if prefix tree
                         * lookup is supported for the field, or -1. */

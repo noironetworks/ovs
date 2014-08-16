@@ -20,6 +20,7 @@
 #include <stdbool.h>
 #include <stddef.h>
 #include <stdint.h>
+#include "dpif.h"
 #include "openvswitch/types.h"
 #include "ofpbuf.h"
 #include "packets.h"
@@ -40,6 +41,7 @@ static inline void dp_packet_pad(struct ofpbuf *b)
 }
 
 #define NR_QUEUE   1
+#define NR_PMD_THREADS 1
 
 #ifdef  __cplusplus
 }
