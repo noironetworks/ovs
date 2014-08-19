@@ -19,7 +19,7 @@
  */
 
 #include <linux/version.h>
-#if LINUX_VERSION_CODE < KERNEL_VERSION(3,12,0)
+#if LINUX_VERSION_CODE < KERNEL_VERSION(3,16,0)
 
 #define pr_fmt(fmt) KBUILD_MODNAME ": " fmt
 
@@ -173,6 +173,7 @@ __be16 vxlan_src_port(__u16 port_min, __u16 port_max, struct sk_buff *skb)
 	return htons((((u64) hash * range) >> 32) + port_min);
 }
 
+#if LINUX_VERSION_CODE < KERNEL_VERSION(3,12,0)
 static void vxlan_gso(struct sk_buff *skb)
 {
 	int udp_offset = skb_transport_offset(skb);
@@ -197,11 +198,14 @@ static void vxlan_gso(struct sk_buff *skb)
 	}
 	skb->ip_summed = CHECKSUM_NONE;
 }
+#endif
 
 static int handle_offloads(struct sk_buff *skb)
 {
 	if (skb_is_gso(skb)) {
+#if LINUX_VERSION_CODE < KERNEL_VERSION(3,12,0)
 		OVS_GSO_CB(skb)->fix_segment = vxlan_gso;
+# endif
 	} else {
 		if (skb->ip_summed != CHECKSUM_PARTIAL)
 			skb->ip_summed = CHECKSUM_NONE;
