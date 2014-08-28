@@ -38,6 +38,7 @@ struct flow_tnl {
     ovs_be32 ip_dst;
     uint16_t flags;
     uint16_t ivxlan_sepg;
+    uint8_t  ivxlan_spa;
     uint8_t ip_tos;
     uint8_t ip_ttl;
 };

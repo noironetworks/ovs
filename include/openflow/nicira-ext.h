@@ -969,6 +969,7 @@ OFP_ASSERT(sizeof(struct nx_async_config) == 24);
 #define NXM_NX_RECIRC_ID   NXM_HEADER  (0x0001, 36, 4)
 
 #define NXM_NX_TUN_IVXLAN_SEPG NXM_HEADER (0x0001, 37, 2)
+#define NXM_NX_TUN_IVXLAN_SPA  NXM_HEADER (0x0001, 38, 1)
 
 /* ## --------------------- ## */
 /* ## Requests and replies. ## */

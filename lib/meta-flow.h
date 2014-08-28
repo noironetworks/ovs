@@ -40,6 +40,7 @@ enum OVS_PACKED_ENUM mf_field_id {
     MFF_TUN_DST,                /* be32 */
     MFF_TUN_FLAGS,              /* be16 */
     MFF_TUN_IVXLAN_SEPG,        /* be16 */
+    MFF_TUN_IVXLAN_SPA,         /* u8 */
     MFF_TUN_TTL,                /* u8 */
     MFF_TUN_TOS,                /* u8 */
     MFF_METADATA,               /* be64 */

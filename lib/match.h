@@ -72,6 +72,10 @@ void match_set_tun_ivxlan_sepg_masked(struct match *match,
                                       uint16_t ivxlan_sepg,
                                       uint16_t mask);
 void match_set_tun_ivxlan_sepg(struct match *match, uint16_t ivxlan_sepg);
+void match_set_tun_ivxlan_spa_masked(struct match *match,
+                                     uint8_t ivxlan_spa,
+                                     uint8_t mask);
+void match_set_tun_ivxlan_spa(struct match *match, uint8_t ivxlan_spa);
 void match_set_in_port(struct match *, ofp_port_t ofp_port);
 void match_set_pkt_mark(struct match *, uint32_t pkt_mark);
 void match_set_pkt_mark_masked(struct match *, uint32_t pkt_mark, uint32_t mask);

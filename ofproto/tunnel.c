@@ -43,6 +43,7 @@ struct tnl_match {
     odp_port_t odp_port;
     uint32_t pkt_mark;
     ovs_be16 ivxlan_sepg;
+    uint8_t ivxlan_spa;
     bool in_key_flow;
     bool ip_src_flow;
     bool ip_dst_flow;
