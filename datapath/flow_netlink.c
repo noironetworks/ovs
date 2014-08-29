@@ -48,6 +48,7 @@
 #include <net/ip_tunnels.h>
 #include <net/ipv6.h>
 #include <net/ndisc.h>
+#include <net/ivxlan.h>
 
 #include "flow_netlink.h"
 
@@ -381,6 +382,7 @@ static int ipv4_tun_from_nlattr(const struct nlattr *attr,
 	int rem;
 	bool ttl = false;
 	__be16 tun_flags = 0;
+        struct ivxlan_opts *ivxlan_opts;
 
 	nla_for_each_nested(a, attr, rem) {
 		int type = nla_type(a);
@@ -394,7 +396,7 @@ static int ipv4_tun_from_nlattr(const struct nlattr *attr,
 			[OVS_TUNNEL_KEY_ATTR_CSUM] = 0,
 			[OVS_TUNNEL_KEY_ATTR_OAM] = 0,
 			[OVS_TUNNEL_KEY_ATTR_GENEVE_OPTS] = -1,
-                        [OVS_TUNNEL_KEY_ATTR_IVXLAN_SEPG] = sizeof(u16),
+                        [OVS_TUNNEL_KEY_ATTR_IVXLAN_OPTS] = sizeof(struct ivxlan_opts),
 		};
 
 		if (type > OVS_TUNNEL_KEY_ATTR_MAX) {
@@ -494,9 +496,14 @@ static int ipv4_tun_from_nlattr(const struct nlattr *attr,
 							   nla_len(a)),
 				nla_data(a), nla_len(a), is_mask);
 			break;
-                case OVS_TUNNEL_KEY_ATTR_IVXLAN_SEPG:
-                        SW_FLOW_KEY_PUT(match, tun_key.ivxlan_sepg,
-                                        nla_get_be16(a), is_mask);
+                case OVS_TUNNEL_KEY_ATTR_IVXLAN_OPTS:
+                        ivxlan_opts = (struct ivxlan_opts *)nla_data(a);
+                        if (ivxlan_opts->sepg)
+                            SW_FLOW_KEY_PUT(match, tun_key.ivxlan_sepg,
+                                            ivxlan_opts->sepg, is_mask);
+                        if (ivxlan_opts->spa)
+                            SW_FLOW_KEY_PUT(match, tun_key.ivxlan_spa,
+                                            ivxlan_opts->spa, is_mask);
                         break;
 		default:
 			OVS_NLERR("Unknown IPv4 tunnel attribute (%d).\n", type);
@@ -532,6 +539,8 @@ static int ipv4_tun_to_nlattr(struct sk_buff *skb,
 			      int swkey_tun_opts_len)
 {
 	struct nlattr *nla;
+        struct ivxlan_opts ivxlan_opts;
+        bool ivxlan_present = false;
 
 	nla = nla_nest_start(skb, OVS_KEY_ATTR_TUNNEL);
 	if (!nla)
@@ -540,9 +549,6 @@ static int ipv4_tun_to_nlattr(struct sk_buff *skb,
 	if (output->tun_flags & TUNNEL_KEY &&
 	    nla_put_be64(skb, OVS_TUNNEL_KEY_ATTR_ID, output->tun_id))
 		return -EMSGSIZE;
-        if (output->ivxlan_sepg &&
-                nla_put_be16(skb, OVS_TUNNEL_KEY_ATTR_IVXLAN_SEPG, output->ivxlan_sepg))
-                return -EMSGSIZE;
 	if (output->ipv4_src &&
 		nla_put_be32(skb, OVS_TUNNEL_KEY_ATTR_IPV4_SRC, output->ipv4_src))
 		return -EMSGSIZE;
@@ -567,6 +573,19 @@ static int ipv4_tun_to_nlattr(struct sk_buff *skb,
 	    nla_put(skb, OVS_TUNNEL_KEY_ATTR_GENEVE_OPTS,
 		    swkey_tun_opts_len, tun_opts))
 		return -EMSGSIZE;
+
+        memset(&ivxlan_opts, 0, sizeof(ivxlan_opts));
+        if (output->ivxlan_sepg) {
+            ivxlan_opts.sepg = output->ivxlan_sepg;
+            ivxlan_present = true;
+        }
+        if (output->ivxlan_spa) {
+            ivxlan_opts.spa = output->ivxlan_spa;
+            ivxlan_present = true;
+        }
+        if (ivxlan_present && 
+                nla_put(skb, OVS_TUNNEL_KEY_ATTR_IVXLAN_OPTS, sizeof(ivxlan_opts), &ivxlan_opts))
+                return -EMSGSIZE;
 
 	nla_nest_end(skb, nla);
 	return 0;

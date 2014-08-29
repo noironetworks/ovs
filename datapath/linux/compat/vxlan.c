@@ -70,22 +70,37 @@ struct vxlanhdr {
 };
 
 struct ivxlanhdr_word1 {
-#ifdef __LITTLE_ENDIAN_BITFIELD
-        __u8 reserved_flags:3;
-        __u8 instance_id_present:1;
-        __u8 map_version_present:1;
-        __u8 solicit_echo_nonce:1;
-        __u8 locator_status_bits_present:1;
-        __u8 nonce_present:1;
+#if defined(__LITTLE_ENDIAN_BITFIELD)
+        __u16 reserved_flags:3,
+              instance_id_present:1,
+              map_version_present:1,
+              solicit_echo_nonce:1,
+              locator_status_bits_present:1,
+              nonce_present:1,
+
+              dre_or_mcast_bits:3,
+              dst_epg_policy_applied:1,
+              src_epg_policy_applied:1,
+              forward_exception:1,
+              dont_learn_addr_to_tep:1,
+              load_balancing_enabled:1;
+#elif defined(__BIG_ENDIAN_BITFIELD)
+        __u16 nonce_present:1,
+              locator_status_bits_present:1,
+              solicit_echo_nonce:1,
+              map_version_present:1,
+              instance_id_present:1,
+              reserved_flags:3,
+
+              load_balancing_enabled:1,
+              dont_learn_addr_to_tep:1,
+              forward_exception:1,
+              src_epg_policy_applied:1,
+              dst_epg_policy_applied:1,
+              dre_or_mcast_bits:3;
 #else
-        __u8 nonce_present:1;
-        __u8 locator_status_bits_present:1;
-        __u8 solicit_echo_nonce:1;
-        __u8 map_version_present:1;
-        __u8 instance_id_present:1;
-        __u8 reserved_flags:3;
+#error "Adjust your <asm/byteorder.h> defines"
 #endif
-        __u8 unsupported;
         __be16 src_group;
 };
 
@@ -103,17 +118,19 @@ static int vxlan_udp_encap_recv(struct sock *sk, struct sk_buff *skb)
 	struct vxlan_sock *vs;
 	struct vxlanhdr *vxh;
         struct ivxlanhdr *ivxh;
-        __be16 ivxlan_sepg = 0;
+	struct ivxlan_opts opts;
 
 	/* Need Vxlan and inner Ethernet header to be present */
 	if (!pskb_may_pull(skb, VXLAN_HLEN))
 		goto error;
+  	memset(&opts, 0, sizeof(opts));
 
 	/* Return packets with reserved bits set */
 	vxh = (struct vxlanhdr *)(udp_hdr(skb) + 1);
         ivxh = (struct ivxlanhdr *)(udp_hdr(skb) + 1);
         if (ivxh->u1.word1.nonce_present) {
-            ivxlan_sepg = ivxh->u1.word1.src_group;
+            opts.sepg = ivxh->u1.word1.src_group;
+            opts.spa = ivxh->u1.word1.src_epg_policy_applied;
 	} else if (vxh->vx_flags != htonl(VXLAN_FLAGS) ||
 	        (vxh->vx_vni & htonl(0xff))) {
 		pr_warn("invalid vxlan flags=%#x vni=%#x\n",
@@ -128,7 +145,7 @@ static int vxlan_udp_encap_recv(struct sock *sk, struct sk_buff *skb)
 	if (!vs)
 		goto drop;
 
-	vs->rcv(vs, skb, vxh->vx_vni, ivxlan_sepg);
+	vs->rcv(vs, skb, vxh->vx_vni, &opts);
 	return 0;
 
 drop:
@@ -216,13 +233,15 @@ static int handle_offloads(struct sk_buff *skb)
 int vxlan_xmit_skb(struct vxlan_sock *vs,
 		   struct rtable *rt, struct sk_buff *skb,
 		   __be32 src, __be32 dst, __u8 tos, __u8 ttl, __be16 df,
-		   __be16 src_port, __be16 dst_port, __be32 vni, __be16 epg)
+		   __be16 src_port, __be16 dst_port, __be32 vni,
+                   void *opts)
 {
 	struct vxlanhdr *vxh;
         struct ivxlanhdr *ivxh;
 	struct udphdr *uh;
 	int min_headroom;
 	int err;
+        struct ivxlan_opts *ivxlan_opts = (struct ivxlan_opts *)opts;
 
 	min_headroom = LL_RESERVED_SPACE(rt_dst(rt).dev) + rt_dst(rt).header_len
 			+ VXLAN_HLEN + sizeof(struct iphdr)
@@ -244,7 +263,7 @@ int vxlan_xmit_skb(struct vxlan_sock *vs,
 
 	skb_reset_inner_headers(skb);
 
-        if (epg == 0) {
+        if (opts == NULL) {
                 vxh = (struct vxlanhdr *) __skb_push(skb, sizeof(*vxh));
                 vxh->vx_flags = htonl(VXLAN_FLAGS);
         	vxh->vx_vni = vni;
@@ -253,7 +272,9 @@ int vxlan_xmit_skb(struct vxlan_sock *vs,
                 ivxh->u1.vx_flags = htonl(VXLAN_FLAGS);
                 ivxh->vx_vni = vni;
                 ivxh->u1.word1.nonce_present = 1;
-                ivxh->u1.word1.src_group = epg;
+                printk(KERN_ERR "%x %x\n", ivxlan_opts->sepg, ivxlan_opts->spa);
+                ivxh->u1.word1.src_group = ivxlan_opts->sepg;
+                ivxh->u1.word1.src_epg_policy_applied = ivxlan_opts->spa;
         }
 
 	__skb_push(skb, sizeof(*uh));

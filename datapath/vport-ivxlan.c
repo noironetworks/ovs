@@ -59,7 +59,7 @@ static inline struct ivxlan_port *ivxlan_vport(const struct vport *vport)
 }
 
 /* Called with rcu_read_lock and BH disabled. */
-static void ivxlan_rcv(struct vxlan_sock *vs, struct sk_buff *skb, __be32 vx_vni, __be16 sepg)
+static void ivxlan_rcv(struct vxlan_sock *vs, struct sk_buff *skb, __be32 vx_vni, void *opts)
 {
 	struct ovs_tunnel_info tun_info;
 	struct vport *vport = vs->data;
@@ -69,7 +69,7 @@ static void ivxlan_rcv(struct vxlan_sock *vs, struct sk_buff *skb, __be32 vx_vni
 	/* Save outer tunnel values */
 	iph = ip_hdr(skb);
 	key = cpu_to_be64(ntohl(vx_vni) >> 8);
-	ovs_flow_tun_info_init(&tun_info, iph, key, TUNNEL_KEY, sepg, NULL, 0);
+	ovs_flow_tun_info_init(&tun_info, iph, key, TUNNEL_KEY, opts, NULL, 0);
 
 	ovs_vport_receive(vport, skb, &tun_info);
 }
@@ -155,12 +155,12 @@ static int ivxlan_tnl_send(struct vport *vport, struct sk_buff *skb)
         struct ovs_key_ipv4_tunnel *tun_key;
 	struct net *net = ovs_dp_get_net(vport->dp);
 	struct ivxlan_port *ivxlan_port = ivxlan_vport(vport);
+	struct ivxlan_opts opts;
 	__be16 dst_port = inet_sport(ivxlan_port->vs->sock->sk);
 	struct rtable *rt;
 	__be16 src_port;
 	__be32 saddr;
 	__be16 df;
-        __be16 ivxlan_sepg = 0;
 	int port_min;
 	int port_max;
 	int err;
@@ -191,16 +191,17 @@ static int ivxlan_tnl_send(struct vport *vport, struct sk_buff *skb)
 
 	inet_get_local_port_range(net, &port_min, &port_max);
 	src_port = vxlan_src_port(port_min, port_max, skb);
-
-        ivxlan_sepg = tun_key->ivxlan_sepg ? tun_key->ivxlan_sepg : 
-                       ivxlan_port->ivxlan_sepg;
+	memset(&opts, 0, sizeof(opts));
+        opts.sepg = tun_key->ivxlan_sepg ? tun_key->ivxlan_sepg : 
+                    ivxlan_port->ivxlan_sepg;
+        opts.spa = tun_key->ivxlan_spa;
 	err = vxlan_xmit_skb(ivxlan_port->vs, rt, skb,
 			     saddr, tun_key->ipv4_dst,
 			     tun_key->ipv4_tos,
 			     tun_key->ipv4_ttl, df,
 			     src_port, dst_port,
 			     htonl(be64_to_cpu(tun_key->tun_id) << 8),
-                             ivxlan_sepg);
+                             &opts);
 	if (err < 0)
 		ip_rt_put(rt);
 error:

@@ -880,6 +880,7 @@ odp_tun_key_from_attr(const struct nlattr *attr, struct flow_tnl *tun)
     const struct nlattr *a;
     bool ttl = false;
     bool unknown = false;
+    struct ivxlan_opts *ivxlan_opts;
 
     NL_NESTED_FOR_EACH(a, left, attr) {
         uint16_t type = nl_attr_type(a);
@@ -917,8 +918,12 @@ odp_tun_key_from_attr(const struct nlattr *attr, struct flow_tnl *tun)
         case OVS_TUNNEL_KEY_ATTR_OAM:
             tun->flags |= FLOW_TNL_F_OAM;
             break;
-        case OVS_TUNNEL_KEY_ATTR_IVXLAN_SEPG:
-            tun->ivxlan_sepg = nl_attr_get_be16(a);
+        case OVS_TUNNEL_KEY_ATTR_IVXLAN_OPTS:
+            ivxlan_opts = (struct ivxlan_opts *)nl_attr_get_unspec(a, sizeof(*ivxlan_opts));
+            if (ivxlan_opts->sepg)
+                tun->ivxlan_sepg = ivxlan_opts->sepg;
+            if (ivxlan_opts->spa)
+                tun->ivxlan_spa = ivxlan_opts->spa;
             break;
         case OVS_TUNNEL_KEY_ATTR_GENEVE_OPTS: {
             if (parse_geneve_opts(a)) {
@@ -950,6 +955,8 @@ static void
 tun_key_to_attr(struct ofpbuf *a, const struct flow_tnl *tun_key)
 {
     size_t tun_key_ofs;
+    struct ivxlan_opts ivxlan_opts;
+    bool ivxlan_present = false;
 
     tun_key_ofs = nl_msg_start_nested(a, OVS_KEY_ATTR_TUNNEL);
 
@@ -976,9 +983,18 @@ tun_key_to_attr(struct ofpbuf *a, const struct flow_tnl *tun_key)
     if (tun_key->flags & FLOW_TNL_F_OAM) {
         nl_msg_put_flag(a, OVS_TUNNEL_KEY_ATTR_OAM);
     }
+
+    memset(&ivxlan_opts, 0, sizeof(ivxlan_opts));
     if (tun_key->ivxlan_sepg) {
-        nl_msg_put_be16(a, OVS_TUNNEL_KEY_ATTR_IVXLAN_SEPG, 
-                        tun_key->ivxlan_sepg);
+        ivxlan_opts.sepg = tun_key->ivxlan_sepg;
+        ivxlan_present = true;
+    }
+    if (tun_key->ivxlan_spa) {
+        ivxlan_opts.spa = tun_key->ivxlan_spa;
+        ivxlan_present = true;
+    }
+    if (ivxlan_present) {
+        nl_msg_put_unspec(a, OVS_TUNNEL_KEY_ATTR_IVXLAN_OPTS, &ivxlan_opts, sizeof(ivxlan_opts));
     }
     nl_msg_end_nested(a, tun_key_ofs);
 }
@@ -1133,11 +1149,13 @@ format_odp_key_attr(const struct nlattr *a, const struct nlattr *ma,
             odp_tun_key_from_attr(ma, &tun_mask);
             ds_put_format(ds, "tun_id=%#"PRIx64"/%#"PRIx64
                           ",ivxlan_sepg=%#"PRIx16"/%#"PRIx16
+                          ",ivxlan_spa=%"PRIu8"/%#"PRIx8
                           ",src="IP_FMT"/"IP_FMT",dst="IP_FMT"/"IP_FMT
                           ",tos=%#"PRIx8"/%#"PRIx8",ttl=%"PRIu8"/%#"PRIx8
                           ",flags(",
                           ntohll(tun_key.tun_id), ntohll(tun_mask.tun_id),
                           ntohs(tun_key.ivxlan_sepg), ntohs(tun_mask.ivxlan_sepg),
+                          tun_key.ivxlan_spa, tun_mask.ivxlan_spa,
                           IP_ARGS(tun_key.ip_src), IP_ARGS(tun_mask.ip_src),
                           IP_ARGS(tun_key.ip_dst), IP_ARGS(tun_mask.ip_dst),
                           tun_key.ip_tos, tun_mask.ip_tos,
@@ -1153,10 +1171,11 @@ format_odp_key_attr(const struct nlattr *a, const struct nlattr *ma,
             */
             ds_put_char(ds, ')');
         } else {
-            ds_put_format(ds, "tun_id=0x%"PRIx64",ivxlan_sepg=0x%"PRIx16",src="IP_FMT",dst="IP_FMT","
+            ds_put_format(ds, "tun_id=0x%"PRIx64",ivxlan_sepg=0x%"PRIx16",ivxlan_spa=%"PRIu8",src="IP_FMT",dst="IP_FMT","
                           "tos=0x%"PRIx8",ttl=%"PRIu8",flags(",
                           ntohll(tun_key.tun_id),
                           ntohs(tun_key.ivxlan_sepg),
+                          tun_key.ivxlan_spa,
                           IP_ARGS(tun_key.ip_src),
                           IP_ARGS(tun_key.ip_dst),
                           tun_key.ip_tos, tun_key.ip_ttl);
