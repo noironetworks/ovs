@@ -19,7 +19,7 @@
  */
 
 #include <linux/version.h>
-#if LINUX_VERSION_CODE < KERNEL_VERSION(3,16,0)
+#if LINUX_VERSION_CODE < KERNEL_VERSION(3,12,0)
 
 #define pr_fmt(fmt) KBUILD_MODNAME ": " fmt
 
@@ -69,83 +69,53 @@ struct vxlanhdr {
 	__be32 vx_vni;
 };
 
-struct ivxlanhdr_word1 {
-#if defined(__LITTLE_ENDIAN_BITFIELD)
-        __u16 reserved_flags:3,
-              instance_id_present:1,
-              map_version_present:1,
-              solicit_echo_nonce:1,
-              locator_status_bits_present:1,
-              nonce_present:1,
+/* Default parse routine for vxlan udp encapsulation */
+static struct vxlanhdr *vxlan_udp_encap_parse_hdr(struct sock *sk, struct sk_buff *skb, int *retval)
+{
+        struct vxlanhdr *vxh;
 
-              dre_or_mcast_bits:3,
-              dst_epg_policy_applied:1,
-              src_epg_policy_applied:1,
-              forward_exception:1,
-              dont_learn_addr_to_tep:1,
-              load_balancing_enabled:1;
-#elif defined(__BIG_ENDIAN_BITFIELD)
-        __u16 nonce_present:1,
-              locator_status_bits_present:1,
-              solicit_echo_nonce:1,
-              map_version_present:1,
-              instance_id_present:1,
-              reserved_flags:3,
-
-              load_balancing_enabled:1,
-              dont_learn_addr_to_tep:1,
-              forward_exception:1,
-              src_epg_policy_applied:1,
-              dst_epg_policy_applied:1,
-              dre_or_mcast_bits:3;
-#else
-#error "Adjust your <asm/byteorder.h> defines"
-#endif
-        __be16 src_group;
-};
-
-struct ivxlanhdr {
-        union {
-                struct ivxlanhdr_word1 word1;
-                __be32 vx_flags;
-        } u1;
-        __be32 vx_vni;
-};
+        /* Return packets with reserved bits set */
+        vxh = (struct vxlanhdr *)(udp_hdr(skb) + 1);
+        if (vxh->vx_flags != htonl(VXLAN_FLAGS) ||
+            (vxh->vx_vni & htonl(0xff))) {
+                pr_warn("invalid vxlan flags=%#x vni=%#x\n",
+                         ntohl(vxh->vx_flags), ntohl(vxh->vx_vni));
+                *retval = VXLAN_PARSE_ERR;
+                return NULL;
+        }
+        *retval = VXLAN_PARSE_OK;
+        return vxh;
+}
 
 /* Callback from net/ipv4/udp.c to receive packets */
 static int vxlan_udp_encap_recv(struct sock *sk, struct sk_buff *skb)
 {
 	struct vxlan_sock *vs;
 	struct vxlanhdr *vxh;
-        struct ivxlanhdr *ivxh;
-	struct ivxlan_opts opts;
+        int retval;
 
 	/* Need Vxlan and inner Ethernet header to be present */
 	if (!pskb_may_pull(skb, VXLAN_HLEN))
 		goto error;
-  	memset(&opts, 0, sizeof(opts));
-
-	/* Return packets with reserved bits set */
-	vxh = (struct vxlanhdr *)(udp_hdr(skb) + 1);
-        ivxh = (struct ivxlanhdr *)(udp_hdr(skb) + 1);
-        if (ivxh->u1.word1.nonce_present) {
-            opts.sepg = ivxh->u1.word1.src_group;
-            opts.spa = ivxh->u1.word1.src_epg_policy_applied;
-	} else if (vxh->vx_flags != htonl(VXLAN_FLAGS) ||
-	        (vxh->vx_vni & htonl(0xff))) {
-		pr_warn("invalid vxlan flags=%#x vni=%#x\n",
-			ntohl(vxh->vx_flags), ntohl(vxh->vx_vni));
-		goto error;
-	}
-
-	if (iptunnel_pull_header(skb, VXLAN_HLEN, htons(ETH_P_TEB)))
-		goto drop;
 
 	vs = rcu_dereference_sk_user_data(sk);
 	if (!vs)
 		goto drop;
 
-	vs->rcv(vs, skb, vxh->vx_vni, &opts);
+        vxh = vs->parse(sk, skb, &retval);
+
+        /* Non vxlan packet */
+        if (unlikely(retval == VXLAN_PARSE_ERR))
+                goto error;
+
+	if (retval == VXLAN_PARSE_CONSUMED)
+		return 0;
+
+        /* vxlan packet for which we have to do further processing */
+	if (iptunnel_pull_header(skb, VXLAN_HLEN, htons(ETH_P_TEB)))
+		goto drop;
+
+	vs->rcv(vs, skb, vxh->vx_vni);
 	return 0;
 
 drop:
@@ -190,7 +160,6 @@ __be16 vxlan_src_port(__u16 port_min, __u16 port_max, struct sk_buff *skb)
 	return htons((((u64) hash * range) >> 32) + port_min);
 }
 
-#if LINUX_VERSION_CODE < KERNEL_VERSION(3,12,0)
 static void vxlan_gso(struct sk_buff *skb)
 {
 	int udp_offset = skb_transport_offset(skb);
@@ -215,14 +184,11 @@ static void vxlan_gso(struct sk_buff *skb)
 	}
 	skb->ip_summed = CHECKSUM_NONE;
 }
-#endif
 
 static int handle_offloads(struct sk_buff *skb)
 {
 	if (skb_is_gso(skb)) {
-#if LINUX_VERSION_CODE < KERNEL_VERSION(3,12,0)
 		OVS_GSO_CB(skb)->fix_segment = vxlan_gso;
-# endif
 	} else {
 		if (skb->ip_summed != CHECKSUM_PARTIAL)
 			skb->ip_summed = CHECKSUM_NONE;
@@ -230,18 +196,21 @@ static int handle_offloads(struct sk_buff *skb)
 	return 0;
 }
 
+static void vxlan_construct_hdr(struct sk_buff *skb, __be32 vni)
+{
+       struct vxlanhdr *vxh = (struct vxlanhdr *) __skb_push(skb, sizeof(*vxh));
+       vxh->vx_flags = htonl(VXLAN_FLAGS);
+       vxh->vx_vni = vni;
+}
+
 int vxlan_xmit_skb(struct vxlan_sock *vs,
 		   struct rtable *rt, struct sk_buff *skb,
 		   __be32 src, __be32 dst, __u8 tos, __u8 ttl, __be16 df,
-		   __be16 src_port, __be16 dst_port, __be32 vni,
-                   void *opts)
+		   __be16 src_port, __be16 dst_port, __be32 vni)
 {
-	struct vxlanhdr *vxh;
-        struct ivxlanhdr *ivxh;
 	struct udphdr *uh;
 	int min_headroom;
 	int err;
-        struct ivxlan_opts *ivxlan_opts = (struct ivxlan_opts *)opts;
 
 	min_headroom = LL_RESERVED_SPACE(rt_dst(rt).dev) + rt_dst(rt).header_len
 			+ VXLAN_HLEN + sizeof(struct iphdr)
@@ -263,19 +232,7 @@ int vxlan_xmit_skb(struct vxlan_sock *vs,
 
 	skb_reset_inner_headers(skb);
 
-        if (opts == NULL) {
-                vxh = (struct vxlanhdr *) __skb_push(skb, sizeof(*vxh));
-                vxh->vx_flags = htonl(VXLAN_FLAGS);
-        	vxh->vx_vni = vni;
-        } else {
-                ivxh = (struct ivxlanhdr *) __skb_push(skb, sizeof(*ivxh));
-                ivxh->u1.vx_flags = htonl(VXLAN_FLAGS);
-                ivxh->vx_vni = vni;
-                ivxh->u1.word1.nonce_present = 1;
-                printk(KERN_ERR "%x %x\n", ivxlan_opts->sepg, ivxlan_opts->spa);
-                ivxh->u1.word1.src_group = ivxlan_opts->sepg;
-                ivxh->u1.word1.src_epg_policy_applied = ivxlan_opts->spa;
-        }
+        vs->construct(skb, vni);
 
 	__skb_push(skb, sizeof(*uh));
 	skb_reset_transport_header(skb);
@@ -353,6 +310,8 @@ static struct vxlan_sock *vxlan_socket_create(struct net *net, __be16 port,
 		return ERR_PTR(rc);
 	}
 	vs->rcv = rcv;
+        vs->parse = vxlan_udp_encap_parse_hdr;
+        vs->construct = vxlan_construct_hdr;
 	vs->data = data;
 
 	/* Disable multicast loopback */
@@ -380,5 +339,12 @@ void vxlan_sock_release(struct vxlan_sock *vs)
 
 	queue_work(system_wq, &vs->del_work);
 }
+
+void vxlan_register_extensions (struct vxlan_sock *vs, struct vxlan_ext *ext)
+{
+       vs->construct = ext->construct;
+       vs->parse = ext->parse;
+}
+EXPORT_SYMBOL_GPL(vxlan_register_extensions);
 
 #endif /* 3.12 */

@@ -58,7 +58,7 @@ static inline struct vxlan_port *vxlan_vport(const struct vport *vport)
 }
 
 /* Called with rcu_read_lock and BH disabled. */
-static void vxlan_rcv(struct vxlan_sock *vs, struct sk_buff *skb, __be32 vx_vni, void *opts)
+static void vxlan_rcv(struct vxlan_sock *vs, struct sk_buff *skb, __be32 vx_vni)
 {
 	struct ovs_tunnel_info tun_info;
 	struct vport *vport = vs->data;
@@ -68,7 +68,7 @@ static void vxlan_rcv(struct vxlan_sock *vs, struct sk_buff *skb, __be32 vx_vni,
 	/* Save outer tunnel values */
 	iph = ip_hdr(skb);
 	key = cpu_to_be64(ntohl(vx_vni) >> 8);
-	ovs_flow_tun_info_init(&tun_info, iph, key, TUNNEL_KEY, opts, NULL, 0);
+	ovs_flow_tun_info_init(&tun_info, iph, key, TUNNEL_KEY, NULL, 0);
 
 	ovs_vport_receive(vport, skb, &tun_info);
 }
@@ -180,8 +180,7 @@ static int vxlan_tnl_send(struct vport *vport, struct sk_buff *skb)
 			     tun_key->ipv4_tos,
 			     tun_key->ipv4_ttl, df,
 			     src_port, dst_port,
-			     htonl(be64_to_cpu(tun_key->tun_id) << 8),
-                             0);
+			     htonl(be64_to_cpu(tun_key->tun_id) << 8));
 	if (err < 0)
 		ip_rt_put(rt);
 error:

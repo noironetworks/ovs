@@ -37,10 +37,58 @@
 #include <net/inet_ecn.h>
 #include <net/net_namespace.h>
 #include <net/netns/generic.h>
+#include <net/ivxlan.h>
 #include <net/vxlan.h>
 
 #include "datapath.h"
 #include "vport.h"
+
+struct ivxlanhdr_word1 {
+#if defined(__LITTLE_ENDIAN_BITFIELD)
+        __u16 reserved_flags:3,
+              instance_id_present:1,
+              map_version_present:1,
+              solicit_echo_nonce:1,
+              locator_status_bits_present:1,
+              nonce_present:1,
+
+              dre_or_mcast_bits:3,
+              dst_epg_policy_applied:1,
+              src_epg_policy_applied:1,
+              forward_exception:1,
+              dont_learn_addr_to_tep:1,
+              load_balancing_enabled:1;
+#elif defined(__BIG_ENDIAN_BITFIELD)
+        __u16 nonce_present:1,
+              locator_status_bits_present:1,
+              solicit_echo_nonce:1,
+              map_version_present:1,
+              instance_id_present:1,
+              reserved_flags:3,
+
+              load_balancing_enabled:1,
+              dont_learn_addr_to_tep:1,
+              forward_exception:1,
+              src_epg_policy_applied:1,
+              dst_epg_policy_applied:1,
+              dre_or_mcast_bits:3;
+#else
+#error "Adjust your <asm/byteorder.h> defines"
+#endif
+        __be16 src_group;
+};
+
+struct ivxlanhdr {
+        union {
+                struct ivxlanhdr_word1 word1;
+                __be32 vx_flags;
+        } u1;
+        __be32 vx_vni;
+};
+
+#define IVXLAN_HLEN (sizeof(struct udphdr) + sizeof(struct ivxlanhdr))
+
+#define IVXLAN_FLAGS 0x08000000  /* struct ivxlanhdr.vx_flags required value. */
 
 /**
  * struct ivxlan_port - Keeps track of open UDP ports
@@ -58,20 +106,61 @@ static inline struct ivxlan_port *ivxlan_vport(const struct vport *vport)
 	return vport_priv(vport);
 }
 
-/* Called with rcu_read_lock and BH disabled. */
-static void ivxlan_rcv(struct vxlan_sock *vs, struct sk_buff *skb, __be32 vx_vni, void *opts)
+
+/* Called with rcu_read_lock and BH disabled from vxlan_udp_encap_recv. */
+static struct vxlanhdr *ivxlan_udp_encap_parse_hdr(struct sock *sk, struct sk_buff *skb, int *retval)
 {
+        struct ivxlanhdr *ivxh;
 	struct ovs_tunnel_info tun_info;
-	struct vport *vport = vs->data;
+	struct vxlan_sock *vs;
 	struct iphdr *iph;
+	struct vport *vport;
 	__be64 key;
 
-	/* Save outer tunnel values */
-	iph = ip_hdr(skb);
-	key = cpu_to_be64(ntohl(vx_vni) >> 8);
-	ovs_flow_tun_info_init(&tun_info, iph, key, TUNNEL_KEY, opts, NULL, 0);
+	ivxh = (struct ivxlanhdr *)(udp_hdr(skb) + 1);
+        if (likely(ivxh->u1.word1.nonce_present)) {
+            tun_info.tunnel.ivxlan_sepg = ivxh->u1.word1.src_group;
+            tun_info.tunnel.ivxlan_spa = ivxh->u1.word1.src_epg_policy_applied;
+	} else if (ivxh->u1.vx_flags != htonl(IVXLAN_FLAGS) ||
+                   (ivxh->vx_vni & htonl(0xff))) {
+            pr_warn("invalid vxlan flags=%#x vni=%#x\n",
+                    ntohl(ivxh->u1.vx_flags), ntohl(ivxh->vx_vni));
+	    *retval = VXLAN_PARSE_ERR;
+            return NULL;
+        }
+            
+	*retval = VXLAN_PARSE_CONSUMED;
+	vs = rcu_dereference_sk_user_data(sk);
+	if (!vs || iptunnel_pull_header(skb, IVXLAN_HLEN, htons(ETH_P_TEB))) {
+                kfree_skb(skb);
+		return NULL;
+	}
 
+	vport = vs->data;
+	iph = ip_hdr(skb);
+	key = cpu_to_be64(ntohl(ivxh->vx_vni) >> 8);
+        /* MUST not zero tun_info */
+        ovs_flow_tun_info_init(&tun_info, iph, key, TUNNEL_KEY, NULL, 0);    
 	ovs_vport_receive(vport, skb, &tun_info);
+
+	return NULL;
+}
+
+static void ivxlan_construct_hdr(struct sk_buff *skb, __be32 vni)
+{
+	struct ivxlanhdr *ivxh = (struct ivxlanhdr *) __skb_push(skb, sizeof(*ivxh));
+        struct ovs_key_ipv4_tunnel *tun_key = &OVS_CB(skb)->egress_tun_info->tunnel;
+	ivxh->u1.vx_flags = htonl(IVXLAN_FLAGS);
+	ivxh->vx_vni = vni;
+	ivxh->u1.word1.nonce_present = 1;
+	ivxh->u1.word1.src_group = tun_key->ivxlan_sepg;
+	ivxh->u1.word1.src_epg_policy_applied = tun_key->ivxlan_spa;
+}
+
+/* Called with rcu_read_lock and BH disabled. */
+static void ivxlan_rcv(struct vxlan_sock *vs, struct sk_buff *skb, __be32 vx_vni)
+{
+	BUG();
 }
 
 static int ivxlan_get_options(const struct vport *vport, struct sk_buff *skb)
@@ -102,6 +191,7 @@ static struct vport *ivxlan_tnl_create(const struct vport_parms *parms)
 	struct nlattr *options = parms->options;
 	struct ivxlan_port *ivxlan_port;
 	struct vxlan_sock *vs;
+	struct vxlan_ext vext;
 	struct vport *vport;
 	struct nlattr *a;
 	u16 dst_port, epg;
@@ -142,6 +232,9 @@ static struct vport *ivxlan_tnl_create(const struct vport_parms *parms)
 		ovs_vport_free(vport);
 		return (void *)vs;
 	}
+	vext.parse = ivxlan_udp_encap_parse_hdr;
+	vext.construct = ivxlan_construct_hdr;
+	vxlan_register_extensions(vs, &vext);
 	ivxlan_port->vs = vs;
 
 	return vport;
@@ -155,7 +248,6 @@ static int ivxlan_tnl_send(struct vport *vport, struct sk_buff *skb)
         struct ovs_key_ipv4_tunnel *tun_key;
 	struct net *net = ovs_dp_get_net(vport->dp);
 	struct ivxlan_port *ivxlan_port = ivxlan_vport(vport);
-	struct ivxlan_opts opts;
 	__be16 dst_port = inet_sport(ivxlan_port->vs->sock->sk);
 	struct rtable *rt;
 	__be16 src_port;
@@ -191,17 +283,14 @@ static int ivxlan_tnl_send(struct vport *vport, struct sk_buff *skb)
 
 	inet_get_local_port_range(net, &port_min, &port_max);
 	src_port = vxlan_src_port(port_min, port_max, skb);
-	memset(&opts, 0, sizeof(opts));
-        opts.sepg = tun_key->ivxlan_sepg ? tun_key->ivxlan_sepg : 
-                    ivxlan_port->ivxlan_sepg;
-        opts.spa = tun_key->ivxlan_spa;
+	if (tun_key->ivxlan_sepg == 0)
+	    tun_key->ivxlan_sepg = ivxlan_port->ivxlan_sepg;
 	err = vxlan_xmit_skb(ivxlan_port->vs, rt, skb,
 			     saddr, tun_key->ipv4_dst,
 			     tun_key->ipv4_tos,
 			     tun_key->ipv4_ttl, df,
 			     src_port, dst_port,
-			     htonl(be64_to_cpu(tun_key->tun_id) << 8),
-                             &opts);
+			     htonl(be64_to_cpu(tun_key->tun_id) << 8));
 	if (err < 0)
 		ip_rt_put(rt);
 error:

@@ -334,7 +334,7 @@ match_set_tun_ivxlan_spa_masked(struct match *match,
 void
 match_set_tun_ivxlan_spa(struct match *match, uint8_t ivxlan_spa)
 {
-    match_set_tun_ivxlan_spa_masked(match, ivxlan_spa, UINT16_MAX);
+    match_set_tun_ivxlan_spa_masked(match, ivxlan_spa, UINT8_MAX);
 }
 
 void
