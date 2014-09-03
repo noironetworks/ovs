@@ -70,11 +70,12 @@ BUILD_ASSERT_DECL(offsetof(struct flow, nw_frag) + 3
                   offsetof(struct flow, nw_proto) / 4
                   == offsetof(struct flow, nw_tos) / 4);
 
-/* TCP flags in the first half of a BE32, zeroes in the other half. */
+/* TCP flags in the first half of a BE32, 'conn_state' and pad in the
+ * other half. */
 BUILD_ASSERT_DECL(offsetof(struct flow, tcp_flags) + 2
-                  == offsetof(struct flow, pad) &&
+                  == offsetof(struct flow, conn_state) &&
                   offsetof(struct flow, tcp_flags) / 4
-                  == offsetof(struct flow, pad) / 4);
+                  == offsetof(struct flow, conn_state) / 4);
 #if WORDS_BIGENDIAN
 #define TCP_FLAGS_BE32(tcp_ctl) ((OVS_FORCE ovs_be32)TCP_FLAGS_BE16(tcp_ctl) \
                                  << 16)
@@ -138,6 +139,19 @@ struct mf_ctx {
 #define miniflow_push_be32_(MF, OFS, VALUE) \
     miniflow_push_uint32_(MF, OFS, (OVS_FORCE uint32_t)(VALUE))
 
+/* xxx Possibly clean this up. Assert if another value has been pushed. */
+/* Caller must have previously called a miniflow_push_* macro for "OFS"
+ * with no other push calls in between. */
+#define miniflow_update_uint32_(MF, OFS, VALUE, MASK)           \
+{                                                               \
+       MINIFLOW_ASSERT(MF.data < MF.end && (OFS) % 4 == 0);        \
+    *(MF.data-1) |= (VALUE & MASK);                             \
+}
+
+#define miniflow_update_be32_(MF, OFS, VALUE, MASK)               \
+    miniflow_update_uint32_(MF, OFS, (OVS_FORCE uint32_t)(VALUE), \
+                                     (OVS_FORCE uint32_t)(MASK))
+
 #define miniflow_push_uint16_(MF, OFS, VALUE)                   \
 {                                                               \
     MINIFLOW_ASSERT(MF.data < MF.end &&                                 \
@@ -187,6 +201,12 @@ struct mf_ctx {
             miniflow_push_be32_(MF, offsetof(struct flow, FIELD), VALUE); \
         }                                                               \
     }
+
+#define miniflow_update_uint32(MF, FIELD, VALUE, MASK)                  \
+    miniflow_update_uint32_(MF, offsetof(struct flow, FIELD), VALUE, MASK)
+
+#define miniflow_update_be32(MF, FIELD, VALUE, MASK)                    \
+    miniflow_update_be32_(MF, offsetof(struct flow, FIELD), VALUE, MASK)
 
 #define miniflow_push_uint16(MF, FIELD, VALUE)                          \
     miniflow_push_uint16_(MF, offsetof(struct flow, FIELD), VALUE)
@@ -570,13 +590,28 @@ miniflow_extract(struct ofpbuf *packet, const struct pkt_metadata *md,
     miniflow_push_be32(mf, nw_frag,
                        BYTES_TO_BE32(nw_frag, nw_tos, nw_ttl, nw_proto));
 
+    /* xxx This is hacky to get around ICMPv6 issues. */
+    if ((nw_frag & FLOW_NW_FRAG_LATER) || (nw_proto != IPPROTO_ICMPV6)) {
+        if (md) {
+            /* xxx Can't be use _check() version, since state may be 0 */
+            miniflow_push_be32(mf, tcp_flags,
+                                     BYTES_TO_BE32(0, 0, md->conn_state, 0));
+        } else {
+            /* xxx Hack so tcp_flags always has pushed entry */
+            miniflow_push_be32(mf, tcp_flags,
+                                     BYTES_TO_BE32(0, 0, 0, 0));
+        }
+    }
+
     if (OVS_LIKELY(!(nw_frag & FLOW_NW_FRAG_LATER))) {
         if (OVS_LIKELY(nw_proto == IPPROTO_TCP)) {
             if (OVS_LIKELY(size >= TCP_HEADER_LEN)) {
                 const struct tcp_header *tcp = data;
 
-                miniflow_push_be32(mf, tcp_flags,
-                                   TCP_FLAGS_BE32(tcp->tcp_ctl));
+                miniflow_update_be32(mf, tcp_flags,
+                                     TCP_FLAGS_BE32(tcp->tcp_ctl),
+                                     htonl(0xffff0000));
+
                 miniflow_push_words(mf, tp_src, &tcp->tcp_src, 1);
             }
         } else if (OVS_LIKELY(nw_proto == IPPROTO_UDP)) {
@@ -622,6 +657,17 @@ miniflow_extract(struct ofpbuf *packet, const struct pkt_metadata *md,
                         miniflow_push_words(mf, nd_target, nd_target,
                                             sizeof *nd_target / 4);
                     }
+                    /* xxx This is gross. */
+                    if (md) {
+                        /* xxx Can't be use _check() version, since
+                         * xxx state may be 0 */
+                        miniflow_push_be32(mf, tcp_flags,
+                                     BYTES_TO_BE32(0, 0, md->conn_state, 0));
+                    } else {
+                        /* xxx Hack so tcp_flags always has pushed entry */
+                        miniflow_push_be32(mf, tcp_flags,
+                                           BYTES_TO_BE32(0, 0, 0, 0));
+                    }
                     miniflow_push_be16(mf, tp_src, htons(icmp->icmp6_type));
                     miniflow_push_be16(mf, tp_dst, htons(icmp->icmp6_code));
                 }
@@ -665,7 +711,7 @@ flow_unwildcard_tp_ports(const struct flow *flow, struct flow_wildcards *wc)
 void
 flow_get_metadata(const struct flow *flow, struct flow_metadata *fmd)
 {
-    BUILD_ASSERT_DECL(FLOW_WC_SEQ == 27);
+    BUILD_ASSERT_DECL(FLOW_WC_SEQ == 28);
 
     fmd->dp_hash = flow->dp_hash;
     fmd->recirc_id = flow->recirc_id;
@@ -675,6 +721,7 @@ flow_get_metadata(const struct flow *flow, struct flow_metadata *fmd)
     fmd->metadata = flow->metadata;
     memcpy(fmd->regs, flow->regs, sizeof fmd->regs);
     fmd->pkt_mark = flow->pkt_mark;
+    fmd->conn_state = flow->conn_state;
     fmd->in_port = flow->in_port.ofp_port;
 }
 
@@ -1335,7 +1382,7 @@ flow_push_mpls(struct flow *flow, int n, ovs_be16 mpls_eth_type,
         flow->mpls_lse[0] = set_mpls_lse_values(ttl, tc, 1, htonl(label));
 
         /* Clear all L3 and L4 fields. */
-        BUILD_ASSERT(FLOW_WC_SEQ == 27);
+        BUILD_ASSERT(FLOW_WC_SEQ == 28);
         memset((char *) flow + FLOW_SEGMENT_2_ENDS_AT, 0,
                sizeof(struct flow) - FLOW_SEGMENT_2_ENDS_AT);
     }

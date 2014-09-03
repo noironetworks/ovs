@@ -250,7 +250,7 @@ size_t ovs_key_attr_size(void)
 {
 	/* Whenever adding new OVS_KEY_ FIELDS, we should consider
 	 * updating this function.  */
-	BUILD_BUG_ON(OVS_KEY_ATTR_TUNNEL_INFO != 22);
+	BUILD_BUG_ON(OVS_KEY_ATTR_TUNNEL_INFO != 23);
 
 	return    nla_total_size(4)   /* OVS_KEY_ATTR_PRIORITY */
 		+ nla_total_size(0)   /* OVS_KEY_ATTR_TUNNEL */
@@ -267,6 +267,7 @@ size_t ovs_key_attr_size(void)
 		+ nla_total_size(4)   /* OVS_KEY_ATTR_SKB_MARK */
 		+ nla_total_size(4)   /* OVS_KEY_ATTR_DP_HASH */
 		+ nla_total_size(4)   /* OVS_KEY_ATTR_RECIRC_ID */
+		+ nla_total_size(1)   /* OVS_KEY_ATTR_CONN_STATE */
 		+ nla_total_size(12)  /* OVS_KEY_ATTR_ETHERNET */
 		+ nla_total_size(2)   /* OVS_KEY_ATTR_ETHERTYPE */
 		+ nla_total_size(4)   /* OVS_KEY_ATTR_VLAN */
@@ -283,6 +284,7 @@ static const int ovs_key_lens[OVS_KEY_ATTR_MAX + 1] = {
 	[OVS_KEY_ATTR_PRIORITY] = sizeof(u32),
 	[OVS_KEY_ATTR_IN_PORT] = sizeof(u32),
 	[OVS_KEY_ATTR_SKB_MARK] = sizeof(u32),
+	[OVS_KEY_ATTR_CONN_STATE] = sizeof(u8),
 	[OVS_KEY_ATTR_ETHERNET] = sizeof(struct ovs_key_ethernet),
 	[OVS_KEY_ATTR_VLAN] = sizeof(__be16),
 	[OVS_KEY_ATTR_ETHERTYPE] = sizeof(__be16),
@@ -617,6 +619,12 @@ static int metadata_from_nlattrs(struct sw_flow_match *match,  u64 *attrs,
 			return -EINVAL;
 		*attrs &= ~(1ULL << OVS_KEY_ATTR_TUNNEL);
 	}
+        if (*attrs & (1ULL << OVS_KEY_ATTR_CONN_STATE)) {
+                uint8_t conn_state = nla_get_u8(a[OVS_KEY_ATTR_CONN_STATE]);
+
+                SW_FLOW_KEY_PUT(match, phy.conn_state, conn_state, is_mask);
+                *attrs &= ~(1ULL << OVS_KEY_ATTR_CONN_STATE);
+        }
 	return 0;
 }
 
@@ -1100,6 +1108,9 @@ int ovs_nla_put_flow(struct datapath *dp, const struct sw_flow_key *swkey,
 	if (nla_put_u32(skb, OVS_KEY_ATTR_SKB_MARK, output->phy.skb_mark))
 		goto nla_put_failure;
 
+        if (nla_put_u8(skb, OVS_KEY_ATTR_CONN_STATE, output->phy.conn_state))
+                goto nla_put_failure;
+
 	nla = nla_reserve(skb, OVS_KEY_ATTR_ETHERNET, sizeof(*eth_key));
 	if (!nla)
 		goto nla_put_failure;
@@ -1570,6 +1581,7 @@ static int validate_set(const struct nlattr *a,
 
 	case OVS_KEY_ATTR_PRIORITY:
 	case OVS_KEY_ATTR_SKB_MARK:
+	case OVS_KEY_ATTR_CONN_STATE:
 	case OVS_KEY_ATTR_ETHERNET:
 		break;
 
@@ -1703,7 +1715,8 @@ static int __ovs_nla_copy_actions(const struct nlattr *attr,
 			[OVS_ACTION_ATTR_POP_VLAN] = 0,
 			[OVS_ACTION_ATTR_SET] = (u32)-1,
 			[OVS_ACTION_ATTR_SAMPLE] = (u32)-1,
-			[OVS_ACTION_ATTR_HASH] = sizeof(struct ovs_action_hash)
+			[OVS_ACTION_ATTR_HASH] = sizeof(struct ovs_action_hash),
+			[OVS_ACTION_ATTR_CONNTRACK] = sizeof(u16)
 		};
 		const struct ovs_action_push_vlan *vlan;
 		int type = nla_type(a);
@@ -1808,6 +1821,9 @@ static int __ovs_nla_copy_actions(const struct nlattr *attr,
 				return err;
 			skip_copy = true;
 			break;
+
+                case OVS_ACTION_ATTR_CONNTRACK:
+                        break;
 
 		default:
 			return -EINVAL;

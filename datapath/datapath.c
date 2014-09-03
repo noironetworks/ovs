@@ -264,6 +264,17 @@ void ovs_dp_process_packet(struct sk_buff *skb, bool recirc)
 	stats = this_cpu_ptr(dp->stats_percpu);
 
 	/* Look up flow. */
+        /* xxx Are we better off resetting the SKB hash, since we've changed
+         * xxx the value of a field?  Will we always have collision for packets
+         * xxx that only vary based on the conn_state? */
+#if 0
+        flow = ovs_flow_tbl_lookup_stats(&dp->table, pkt_key, skb_get_hash(skb),
+                                         &n_mask_hit);
+#else
+        /* xxx Gross, clearing hash. */
+        flow = ovs_flow_tbl_lookup_stats(&dp->table, pkt_key, 0,
+                                         &n_mask_hit);
+#endif
 	flow = ovs_flow_tbl_lookup_stats(&dp->table, pkt_key, skb_get_hash(skb),
 					 &n_mask_hit);
 	if (unlikely(!flow)) {
