@@ -20,7 +20,7 @@ static inline int rpl_vxlan_xmit_skb(struct vxlan_sock *vs,
 	}
 
 	return vxlan_xmit_skb(vs, rt, skb, src, dst, tos, ttl, df,
-			      src_port, dst_port, vni);
+			      src_port, dst_port, vni, false);
 }
 
 #define vxlan_xmit_skb rpl_vxlan_xmit_skb

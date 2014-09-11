@@ -131,13 +131,14 @@ static __be64 vni_to_tunnel_id(__u8 *vni)
 static void geneve_build_header(const struct vport *vport,
 			      struct sk_buff *skb)
 {
+	struct net *net = ovs_dp_get_net(vport->dp);
 	struct geneve_port *geneve_port = geneve_vport(vport);
 	struct udphdr *udph = udp_hdr(skb);
 	struct genevehdr *geneveh = (struct genevehdr *)(udph + 1);
 	const struct ovs_tunnel_info *tun_info = OVS_CB(skb)->egress_tun_info;
 
 	udph->dest = inet_sport(geneve_port->sock->sk);
-	udph->source = vxlan_src_port(1, USHRT_MAX, skb);
+	udph->source = udp_flow_src_port(net, skb, 1, USHRT_MAX, true);
 	udph->check = 0;
 	udph->len = htons(skb->len - skb_transport_offset(skb));
 
@@ -421,7 +422,7 @@ static int geneve_send(struct vport *vport, struct sk_buff *skb)
 
 	df = tun_key->tun_flags & TUNNEL_DONT_FRAGMENT ? htons(IP_DF) : 0;
 
-	sent_len = iptunnel_xmit(rt, skb,
+	sent_len = iptunnel_xmit(skb->sk, rt, skb,
 			     saddr, tun_key->ipv4_dst,
 			     IPPROTO_UDP, tun_key->ipv4_tos,
 			     tun_key->ipv4_ttl,
@@ -437,6 +438,7 @@ error:
 
 static const char *geneve_get_name(const struct vport *vport)
 {
+	struct net *net = ovs_dp_get_net(vport->dp);
 	struct geneve_port *geneve_port = geneve_vport(vport);
 	return geneve_port->name;
 }
