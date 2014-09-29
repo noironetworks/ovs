@@ -922,8 +922,8 @@ odp_tun_key_from_attr(const struct nlattr *attr, struct flow_tnl *tun)
             ivxlan_opts = (struct ivxlan_opts *)nl_attr_get_unspec(a, sizeof(*ivxlan_opts));
             if (ivxlan_opts->sepg)
                 tun->ivxlan_sepg = ivxlan_opts->sepg;
-            if (ivxlan_opts->spa)
-                tun->ivxlan_spa = ivxlan_opts->spa;
+            if (ivxlan_opts->flags)
+                tun->ivxlan_flags = ivxlan_opts->flags;
             break;
         case OVS_TUNNEL_KEY_ATTR_GENEVE_OPTS: {
             if (parse_geneve_opts(a)) {
@@ -989,8 +989,8 @@ tun_key_to_attr(struct ofpbuf *a, const struct flow_tnl *tun_key)
         ivxlan_opts.sepg = tun_key->ivxlan_sepg;
         ivxlan_present = true;
     }
-    if (tun_key->ivxlan_spa) {
-        ivxlan_opts.spa = tun_key->ivxlan_spa;
+    if (tun_key->ivxlan_flags) {
+        ivxlan_opts.flags = tun_key->ivxlan_flags;
         ivxlan_present = true;
     }
     if (ivxlan_present) {
@@ -1149,13 +1149,13 @@ format_odp_key_attr(const struct nlattr *a, const struct nlattr *ma,
             odp_tun_key_from_attr(ma, &tun_mask);
             ds_put_format(ds, "tun_id=%#"PRIx64"/%#"PRIx64
                           ",ivxlan_sepg=%#"PRIx16"/%#"PRIx16
-                          ",ivxlan_spa=%"PRIu8"/%#"PRIx8
+                          ",ivxlan_flags=%"PRIu8"/%#"PRIx8
                           ",src="IP_FMT"/"IP_FMT",dst="IP_FMT"/"IP_FMT
                           ",tos=%#"PRIx8"/%#"PRIx8",ttl=%"PRIu8"/%#"PRIx8
                           ",flags(",
                           ntohll(tun_key.tun_id), ntohll(tun_mask.tun_id),
                           ntohs(tun_key.ivxlan_sepg), ntohs(tun_mask.ivxlan_sepg),
-                          tun_key.ivxlan_spa, tun_mask.ivxlan_spa,
+                          tun_key.ivxlan_flags, tun_mask.ivxlan_flags,
                           IP_ARGS(tun_key.ip_src), IP_ARGS(tun_mask.ip_src),
                           IP_ARGS(tun_key.ip_dst), IP_ARGS(tun_mask.ip_dst),
                           tun_key.ip_tos, tun_mask.ip_tos,
@@ -1171,11 +1171,11 @@ format_odp_key_attr(const struct nlattr *a, const struct nlattr *ma,
             */
             ds_put_char(ds, ')');
         } else {
-            ds_put_format(ds, "tun_id=0x%"PRIx64",ivxlan_sepg=0x%"PRIx16",ivxlan_spa=%"PRIu8",src="IP_FMT",dst="IP_FMT","
+            ds_put_format(ds, "tun_id=0x%"PRIx64",ivxlan_sepg=0x%"PRIx16",ivxlan_flags=%"PRIu8",src="IP_FMT",dst="IP_FMT","
                           "tos=0x%"PRIx8",ttl=%"PRIu8",flags(",
                           ntohll(tun_key.tun_id),
                           ntohs(tun_key.ivxlan_sepg),
-                          tun_key.ivxlan_spa,
+                          tun_key.ivxlan_flags,
                           IP_ARGS(tun_key.ip_src),
                           IP_ARGS(tun_key.ip_dst),
                           tun_key.ip_tos, tun_key.ip_ttl);

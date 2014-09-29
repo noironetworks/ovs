@@ -501,9 +501,9 @@ static int ipv4_tun_from_nlattr(const struct nlattr *attr,
                         if (ivxlan_opts->sepg)
                             SW_FLOW_KEY_PUT(match, tun_key.ivxlan_sepg,
                                             ivxlan_opts->sepg, is_mask);
-                        if (ivxlan_opts->spa)
-                            SW_FLOW_KEY_PUT(match, tun_key.ivxlan_spa,
-                                            ivxlan_opts->spa, is_mask);
+                        if (ivxlan_opts->flags)
+                            SW_FLOW_KEY_PUT(match, tun_key.ivxlan_flags,
+                                            ivxlan_opts->flags, is_mask);
                         break;
 		default:
 			OVS_NLERR("Unknown IPv4 tunnel attribute (%d).\n", type);
@@ -579,8 +579,8 @@ static int ipv4_tun_to_nlattr(struct sk_buff *skb,
             ivxlan_opts.sepg = output->ivxlan_sepg;
             ivxlan_present = true;
         }
-        if (output->ivxlan_spa) {
-            ivxlan_opts.spa = output->ivxlan_spa;
+        if (output->ivxlan_flags) {
+            ivxlan_opts.flags = output->ivxlan_flags;
             ivxlan_present = true;
         }
         if (ivxlan_present && 

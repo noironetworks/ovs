@@ -136,14 +136,14 @@ const struct mf_field mf_fields[MFF_N_IDS] = {
         OFPUTIL_P_NXM_OXM_ANY,
         -1,
     }, {
-        MFF_TUN_IVXLAN_SPA, "tun_ivxlan_spa", NULL,
+        MFF_TUN_IVXLAN_FLAGS, "tun_ivxlan_flags", NULL,
         MF_FIELD_SIZES(u8),
         MFM_FULLY,
         MFS_DECIMAL,
         MFP_NONE,
         true,
-        NXM_NX_TUN_IVXLAN_SPA, "NXM_NX_TUN_IVXLAN_SPA",
-        NXM_NX_TUN_IVXLAN_SPA, "NXM_NX_TUN_IVXLAN_SPA", 0,
+        NXM_NX_TUN_IVXLAN_FLAGS, "NXM_NX_TUN_IVXLAN_FLAGS",
+        NXM_NX_TUN_IVXLAN_FLAGS, "NXM_NX_TUN_IVXLAN_FLAGS", 0,
         OFPUTIL_P_NXM_OXM_ANY,
         OFPUTIL_P_NXM_OXM_ANY,
         -1,
@@ -960,8 +960,8 @@ mf_is_all_wild(const struct mf_field *mf, const struct flow_wildcards *wc)
         return !wc->masks.tunnel.tun_id;
     case MFF_TUN_IVXLAN_SEPG:
         return !wc->masks.tunnel.ivxlan_sepg;
-    case MFF_TUN_IVXLAN_SPA:
-        return !wc->masks.tunnel.ivxlan_spa;
+    case MFF_TUN_IVXLAN_FLAGS:
+        return !wc->masks.tunnel.ivxlan_flags;
     case MFF_METADATA:
         return !wc->masks.metadata;
     case MFF_IN_PORT:
@@ -1209,7 +1209,7 @@ mf_is_value_valid(const struct mf_field *mf, const union mf_value *value)
     case MFF_TUN_TTL:
     case MFF_TUN_FLAGS:
     case MFF_TUN_IVXLAN_SEPG:
-    case MFF_TUN_IVXLAN_SPA:
+    case MFF_TUN_IVXLAN_FLAGS:
     case MFF_METADATA:
     case MFF_IN_PORT:
     case MFF_SKB_PRIORITY:
@@ -1319,8 +1319,8 @@ mf_get_value(const struct mf_field *mf, const struct flow *flow,
     case MFF_TUN_IVXLAN_SEPG:
         value->be16 = flow->tunnel.ivxlan_sepg;
         break;
-    case MFF_TUN_IVXLAN_SPA:
-        value->u8 = flow->tunnel.ivxlan_spa;
+    case MFF_TUN_IVXLAN_FLAGS:
+        value->u8 = flow->tunnel.ivxlan_flags;
         break;
     case MFF_TUN_TTL:
         value->u8 = flow->tunnel.ip_ttl;
@@ -1527,8 +1527,8 @@ mf_set_value(const struct mf_field *mf,
     case MFF_TUN_IVXLAN_SEPG:
          match_set_tun_ivxlan_sepg(match, value->be16);
          break;
-    case MFF_TUN_IVXLAN_SPA:
-         match_set_tun_ivxlan_spa(match, value->u8);
+    case MFF_TUN_IVXLAN_FLAGS:
+         match_set_tun_ivxlan_flags(match, value->u8);
          break;
     case MFF_TUN_TOS:
         match_set_tun_tos(match, value->u8);
@@ -1756,8 +1756,8 @@ mf_set_flow_value(const struct mf_field *mf,
     case MFF_TUN_IVXLAN_SEPG:
         flow->tunnel.ivxlan_sepg = value->be16;
         break;
-    case MFF_TUN_IVXLAN_SPA:
-        flow->tunnel.ivxlan_spa = value->u8;
+    case MFF_TUN_IVXLAN_FLAGS:
+        flow->tunnel.ivxlan_flags = value->u8;
         break; 
     case MFF_TUN_TOS:
         flow->tunnel.ip_tos = value->u8;
@@ -1986,8 +1986,8 @@ mf_set_wild(const struct mf_field *mf, struct match *match)
     case MFF_TUN_IVXLAN_SEPG:
         match_set_tun_ivxlan_sepg_masked(match, 0, 0);
         break;
-    case MFF_TUN_IVXLAN_SPA:
-        match_set_tun_ivxlan_spa_masked(match, 0, 0);
+    case MFF_TUN_IVXLAN_FLAGS:
+        match_set_tun_ivxlan_flags_masked(match, 0, 0);
         break;
     case MFF_TUN_TOS:
         match_set_tun_tos_masked(match, 0, 0);
@@ -2234,8 +2234,8 @@ mf_set(const struct mf_field *mf,
     case MFF_TUN_IVXLAN_SEPG:
         match_set_tun_ivxlan_sepg_masked(match, value->be16, mask->be16);
         break;
-    case MFF_TUN_IVXLAN_SPA:
-        match_set_tun_ivxlan_spa_masked(match, value->u8, mask->u8);
+    case MFF_TUN_IVXLAN_FLAGS:
+        match_set_tun_ivxlan_flags_masked(match, value->u8, mask->u8);
         break;
     case MFF_TUN_TTL:
         match_set_tun_ttl_masked(match, value->u8, mask->u8);

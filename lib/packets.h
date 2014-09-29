@@ -33,7 +33,7 @@ struct ds;
 
 struct ivxlan_opts {
     ovs_be16 sepg;
-    uint8_t spa;
+    uint8_t flags;
 };
 
 /* Tunnel information used in flow key and metadata. */
@@ -43,7 +43,7 @@ struct flow_tnl {
     ovs_be32 ip_dst;
     uint16_t flags;
     uint16_t ivxlan_sepg;
-    uint8_t  ivxlan_spa;
+    uint8_t  ivxlan_flags;
     uint8_t ip_tos;
     uint8_t ip_ttl;
 };

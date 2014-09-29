@@ -170,7 +170,7 @@ struct flow_metadata {
     ovs_be32 tun_src;                /* Tunnel outer IPv4 src addr */
     ovs_be32 tun_dst;                /* Tunnel outer IPv4 dst addr */
     ovs_be16 tun_ivxlan_sepg;        /* Tunnel ivxlan sepg */
-    uint8_t  tun_ivxlan_spa;         /* Tunnel ivxlan source policy applied */
+    uint8_t  tun_ivxlan_flags;         /* Tunnel ivxlan source policy applied */
     ovs_be64 metadata;               /* OpenFlow 1.1+ metadata field. */
     uint32_t regs[FLOW_N_REGS];      /* Registers. */
     uint32_t pkt_mark;               /* Packet mark. */

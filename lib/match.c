@@ -323,18 +323,18 @@ match_set_tun_ivxlan_sepg(struct match *match, uint16_t ivxlan_sepg)
 }
 
 void
-match_set_tun_ivxlan_spa_masked(struct match *match,
-                                uint8_t ivxlan_spa,
+match_set_tun_ivxlan_flags_masked(struct match *match,
+                                uint8_t ivxlan_flags,
                                 uint8_t mask)
 {
-    match->wc.masks.tunnel.ivxlan_spa = mask;
-    match->flow.tunnel.ivxlan_spa = ivxlan_spa & mask;
+    match->wc.masks.tunnel.ivxlan_flags = mask;
+    match->flow.tunnel.ivxlan_flags = ivxlan_flags & mask;
 }
 
 void
-match_set_tun_ivxlan_spa(struct match *match, uint8_t ivxlan_spa)
+match_set_tun_ivxlan_flags(struct match *match, uint8_t ivxlan_flags)
 {
-    match_set_tun_ivxlan_spa_masked(match, ivxlan_spa, UINT8_MAX);
+    match_set_tun_ivxlan_flags_masked(match, ivxlan_flags, UINT8_MAX);
 }
 
 void
@@ -968,8 +968,8 @@ format_flow_tunnel(struct ds *s, const struct match *match)
         format_be16_masked(s, "tun_ivxlan_sepg", tnl->ivxlan_sepg, wc->masks.tunnel.ivxlan_sepg);
     }
 
-    if (wc->masks.tunnel.ivxlan_spa) {
-        ds_put_format(s, "tun_ivxlan_spa=%"PRIx8",", tnl->ivxlan_spa);
+    if (wc->masks.tunnel.ivxlan_flags) {
+        ds_put_format(s, "tun_ivxlan_flags=%"PRIx8",", tnl->ivxlan_flags);
     }
 
     if (wc->masks.tunnel.ip_tos) {

@@ -106,6 +106,22 @@ static inline struct ivxlan_port *ivxlan_vport(const struct vport *vport)
 	return vport_priv(vport);
 }
 
+static inline void ivxlan_parse_header(struct ovs_tunnel_info *tun_info, struct ivxlanhdr *ivxh)
+{
+	tun_info->tunnel.ivxlan_sepg = ivxh->u1.word1.src_group;
+
+	tun_info->tunnel.ivxlan_flags = 0;
+	if (ivxh->u1.word1.src_epg_policy_applied)
+		tun_info->tunnel.ivxlan_flags |= IVXLAN_SPA;
+	if (ivxh->u1.word1.dst_epg_policy_applied)
+		tun_info->tunnel.ivxlan_flags |= IVXLAN_DPA;
+	if (ivxh->u1.word1.load_balancing_enabled)
+		tun_info->tunnel.ivxlan_flags |= IVXLAN_LB;
+	if (ivxh->u1.word1.dont_learn_addr_to_tep)
+		tun_info->tunnel.ivxlan_flags |= IVXLAN_DL;
+	if (ivxh->u1.word1.forward_exception)
+		tun_info->tunnel.ivxlan_flags |= IVXLAN_FE;
+}
 
 /* Called with rcu_read_lock and BH disabled from vxlan_udp_encap_recv. */
 static struct vxlanhdr *ivxlan_udp_encap_parse_hdr(struct sock *sk, struct sk_buff *skb, int *retval)
@@ -119,8 +135,7 @@ static struct vxlanhdr *ivxlan_udp_encap_parse_hdr(struct sock *sk, struct sk_bu
 
 	ivxh = (struct ivxlanhdr *)(udp_hdr(skb) + 1);
         if (likely(ivxh->u1.word1.nonce_present)) {
-            tun_info.tunnel.ivxlan_sepg = ivxh->u1.word1.src_group;
-            tun_info.tunnel.ivxlan_spa = ivxh->u1.word1.src_epg_policy_applied;
+            ivxlan_parse_header(&tun_info, ivxh);
 	} else if (ivxh->u1.vx_flags != htonl(IVXLAN_FLAGS) ||
                    (ivxh->vx_vni & htonl(0xff))) {
             pr_warn("invalid vxlan flags=%#x vni=%#x\n",
@@ -154,7 +169,16 @@ static void ivxlan_construct_hdr(struct sk_buff *skb, __be32 vni)
 	ivxh->vx_vni = vni;
 	ivxh->u1.word1.nonce_present = 1;
 	ivxh->u1.word1.src_group = tun_key->ivxlan_sepg;
-	ivxh->u1.word1.src_epg_policy_applied = tun_key->ivxlan_spa;
+        if (tun_key->ivxlan_flags & IVXLAN_SPA)
+		ivxh->u1.word1.src_epg_policy_applied = 1;
+	if (tun_key->ivxlan_flags & IVXLAN_DPA)
+		ivxh->u1.word1.dst_epg_policy_applied = 1;
+	if (tun_key->ivxlan_flags & IVXLAN_LB)
+		ivxh->u1.word1.load_balancing_enabled = 1;
+	if (tun_key->ivxlan_flags & IVXLAN_DL)
+		ivxh->u1.word1.dont_learn_addr_to_tep = 1;
+	if (tun_key->ivxlan_flags & IVXLAN_FE)
+		ivxh->u1.word1.forward_exception = 1;
 }
 
 /* Called with rcu_read_lock and BH disabled. */

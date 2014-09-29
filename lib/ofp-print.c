@@ -132,8 +132,8 @@ ofp_print_packet_in(struct ds *string, const struct ofp_header *oh,
                       ntohs(pin.fmd.tun_ivxlan_sepg));
     }
 
-    if (pin.fmd.tun_ivxlan_spa) {
-        ds_put_format(string, " tun_ivxlan_spa=%"PRIu8, pin.fmd.tun_ivxlan_spa);
+    if (pin.fmd.tun_ivxlan_flags) {
+        ds_put_format(string, " tun_ivxlan_flags=%"PRIu8, pin.fmd.tun_ivxlan_flags);
     }
 
     if (pin.fmd.metadata != htonll(0)) {
