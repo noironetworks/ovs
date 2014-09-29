@@ -501,6 +501,8 @@ set_tunnel_config(struct netdev *dev_, const struct smap *args)
             } else {
                  tnl_cfg.ivxlan_sepg = htons(atoi(node->value));
             }
+        } else if (!strcmp(node->key, "ivxlan_flags")) {
+            /* ivxlan flags are always flow driven */
         } else {
             VLOG_WARN("%s: unknown %s argument '%s'", name, type, node->key);
         }
