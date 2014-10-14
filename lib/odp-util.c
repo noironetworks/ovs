@@ -1147,19 +1147,31 @@ format_odp_key_attr(const struct nlattr *a, const struct nlattr *ma,
 
             memset(&tun_mask, 0, sizeof tun_mask);
             odp_tun_key_from_attr(ma, &tun_mask);
-            ds_put_format(ds, "tun_id=%#"PRIx64"/%#"PRIx64
-                          ",ivxlan_sepg=%#"PRIx16"/%#"PRIx16
-                          ",ivxlan_flags=%"PRIu8"/%#"PRIx8
-                          ",src="IP_FMT"/"IP_FMT",dst="IP_FMT"/"IP_FMT
-                          ",tos=%#"PRIx8"/%#"PRIx8",ttl=%"PRIu8"/%#"PRIx8
-                          ",flags(",
-                          ntohll(tun_key.tun_id), ntohll(tun_mask.tun_id),
-                          ntohs(tun_key.ivxlan_sepg), ntohs(tun_mask.ivxlan_sepg),
-                          tun_key.ivxlan_flags, tun_mask.ivxlan_flags,
-                          IP_ARGS(tun_key.ip_src), IP_ARGS(tun_mask.ip_src),
-                          IP_ARGS(tun_key.ip_dst), IP_ARGS(tun_mask.ip_dst),
-                          tun_key.ip_tos, tun_mask.ip_tos,
-                          tun_key.ip_ttl, tun_mask.ip_ttl);
+            if (tun_key.ivxlan_sepg || tun_key.ivxlan_flags) {
+            	ds_put_format(ds, "tun_id=%#"PRIx64"/%#"PRIx64
+                              ",ivxlan_sepg=%#"PRIx16"/%#"PRIx16
+                              ",ivxlan_flags=%"PRIu8"/%#"PRIx8
+                              ",src="IP_FMT"/"IP_FMT",dst="IP_FMT"/"IP_FMT
+                              ",tos=%#"PRIx8"/%#"PRIx8",ttl=%"PRIu8"/%#"PRIx8
+                              ",flags(",
+                              ntohll(tun_key.tun_id), ntohll(tun_mask.tun_id),
+                              ntohs(tun_key.ivxlan_sepg), ntohs(tun_mask.ivxlan_sepg),
+                              tun_key.ivxlan_flags, tun_mask.ivxlan_flags,
+                              IP_ARGS(tun_key.ip_src), IP_ARGS(tun_mask.ip_src),
+                              IP_ARGS(tun_key.ip_dst), IP_ARGS(tun_mask.ip_dst),
+                              tun_key.ip_tos, tun_mask.ip_tos,
+                              tun_key.ip_ttl, tun_mask.ip_ttl);
+            } else {
+                ds_put_format(ds, "tun_id=%#"PRIx64"/%#"PRIx64
+                              ",src="IP_FMT"/"IP_FMT",dst="IP_FMT"/"IP_FMT
+                              ",tos=%#"PRIx8"/%#"PRIx8",ttl=%"PRIu8"/%#"PRIx8
+                              ",flags(",
+                              ntohll(tun_key.tun_id), ntohll(tun_mask.tun_id),
+                              IP_ARGS(tun_key.ip_src), IP_ARGS(tun_mask.ip_src),
+                              IP_ARGS(tun_key.ip_dst), IP_ARGS(tun_mask.ip_dst),
+                              tun_key.ip_tos, tun_mask.ip_tos,
+                              tun_key.ip_ttl, tun_mask.ip_ttl);
+            }
 
             format_flags(ds, flow_tun_flag_to_string, tun_key.flags, ',');
 
@@ -1171,14 +1183,23 @@ format_odp_key_attr(const struct nlattr *a, const struct nlattr *ma,
             */
             ds_put_char(ds, ')');
         } else {
-            ds_put_format(ds, "tun_id=0x%"PRIx64",ivxlan_sepg=0x%"PRIx16",ivxlan_flags=%"PRIu8",src="IP_FMT",dst="IP_FMT","
-                          "tos=0x%"PRIx8",ttl=%"PRIu8",flags(",
-                          ntohll(tun_key.tun_id),
-                          ntohs(tun_key.ivxlan_sepg),
-                          tun_key.ivxlan_flags,
-                          IP_ARGS(tun_key.ip_src),
-                          IP_ARGS(tun_key.ip_dst),
-                          tun_key.ip_tos, tun_key.ip_ttl);
+            if (tun_key.ivxlan_sepg || tun_key.ivxlan_flags) {
+                ds_put_format(ds, "tun_id=0x%"PRIx64",ivxlan_sepg=0x%"PRIx16",ivxlan_flags=%"PRIu8",src="IP_FMT",dst="IP_FMT","
+                              "tos=0x%"PRIx8",ttl=%"PRIu8",flags(",
+                              ntohll(tun_key.tun_id),
+                              ntohs(tun_key.ivxlan_sepg),
+                              tun_key.ivxlan_flags,
+                              IP_ARGS(tun_key.ip_src),
+                              IP_ARGS(tun_key.ip_dst),
+                              tun_key.ip_tos, tun_key.ip_ttl);
+            } else {
+                ds_put_format(ds, "tun_id=0x%"PRIx64",src="IP_FMT",dst="IP_FMT","
+                              "tos=0x%"PRIx8",ttl=%"PRIu8",flags(",
+                              ntohll(tun_key.tun_id),
+                              IP_ARGS(tun_key.ip_src),
+                              IP_ARGS(tun_key.ip_dst),
+                              tun_key.ip_tos, tun_key.ip_ttl);
+            }
 
             format_flags(ds, flow_tun_flag_to_string, tun_key.flags, ',');
             ds_put_char(ds, ')');
@@ -1763,6 +1784,7 @@ parse_odp_key_mask_attr(const char *s, const struct simap *port_names,
     {
         uint64_t tun_id, tun_id_mask;
         struct flow_tnl tun_key, tun_key_mask;
+	memset(&tun_key, 0, sizeof tun_key);
         int n = -1;
 
         if (mask && ovs_scan(s, "tunnel(tun_id=%"SCNi64"/%"SCNi64","
