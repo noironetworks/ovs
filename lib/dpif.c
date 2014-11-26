@@ -39,6 +39,7 @@
 #include "packets.h"
 #include "poll-loop.h"
 #include "route-table.h"
+#include "seq.h"
 #include "shash.h"
 #include "sset.h"
 #include "timeval.h"
@@ -104,6 +105,9 @@ static void log_execute_message(struct dpif *, const struct dpif_execute *,
 static void log_flow_get_message(const struct dpif *,
                                  const struct dpif_flow_get *, int error);
 
+/* Incremented whenever tnl route, arp, etc changes. */
+struct seq *tnl_conf_seq;
+
 static void
 dp_initialize(void)
 {
@@ -112,13 +116,15 @@ dp_initialize(void)
     if (ovsthread_once_start(&once)) {
         int i;
 
-        for (i = 0; i < ARRAY_SIZE(base_dpif_classes); i++) {
-            dp_register_provider(base_dpif_classes[i]);
-        }
+        tnl_conf_seq = seq_create();
         dpctl_unixctl_register();
         tnl_port_map_init();
         tnl_arp_cache_init();
         route_table_register();
+
+        for (i = 0; i < ARRAY_SIZE(base_dpif_classes); i++) {
+            dp_register_provider(base_dpif_classes[i]);
+        }
 
         ovsthread_once_done(&once);
     }
@@ -823,6 +829,21 @@ dpif_flow_stats_format(const struct dpif_flow_stats *stats, struct ds *s)
         ds_put_cstr(s, ", flags:");
         packet_format_tcp_flags(s, stats->tcp_flags);
     }
+}
+
+/* Places the hash of the 'key_len' bytes starting at 'key' into '*hash'. */
+void
+dpif_flow_hash(const struct dpif *dpif OVS_UNUSED,
+               const void *key, size_t key_len, ovs_u128 *hash)
+{
+    static struct ovsthread_once once = OVSTHREAD_ONCE_INITIALIZER;
+    static uint32_t secret;
+
+    if (ovsthread_once_start(&once)) {
+        secret = random_uint32();
+        ovsthread_once_done(&once);
+    }
+    hash_bytes128(key, key_len, secret, hash);
 }
 
 /* Deletes all flows from 'dpif'.  Returns 0 if successful, otherwise a
