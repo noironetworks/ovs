@@ -30,8 +30,8 @@ AC_DEFUN([OVS_CHECK_COVERAGE],
       esac],
      [coverage=false])
    if $coverage; then
-     CFLAGS="$CFLAGS -O0 --coverage"
-     LDFLAGS="$LDFLAGS --coverage"
+     OVS_CFLAGS="$OVS_CFLAGS -O0 --coverage"
+     OVS_LDFLAGS="$OVS_LDFLAGS --coverage"
    fi])
 
 dnl Checks for --enable-ndebug and defines NDEBUG if it is specified.
@@ -86,11 +86,50 @@ AC_DEFUN([OVS_CHECK_WIN32],
             AC_MSG_ERROR([pthread directory not specified])
          ]
       )
+      AC_ARG_WITH([debug],
+         [AS_HELP_STRING([--with-debug],
+            [Build without compiler optimizations])],
+         [
+            MSVC_CFLAGS="-O0"
+            AC_SUBST([MSVC_CFLAGS])
+         ], [
+            MSVC_CFLAGS="-O2"
+            AC_SUBST([MSVC_CFLAGS])
+         ]
+      )
+
       AC_DEFINE([WIN32], [1], [Define to 1 if building on WIN32.])
       AH_BOTTOM([#ifdef WIN32
 #include "include/windows/windefs.h"
 #endif])
    fi])
+
+dnl OVS_CHECK_WINDOWS
+dnl
+dnl Configure Visual Studio solution build
+AC_DEFUN([OVS_CHECK_VISUAL_STUDIO_DDK], [
+AC_ARG_WITH([vstudioddk],
+         [AS_HELP_STRING([--with-vstudioddk=version_type],
+            [Visual Studio DDK version type e.g. Win8.1 Release])],
+         [
+            case "$withval" in
+            "Win8.1 Release") ;;
+            "Win8.1 Debug") ;;
+            "Win8 Release") ;;
+            "Win8 Debug") ;;
+            *) AC_MSG_ERROR([No good Visual Studio configuration found]) ;;
+            esac
+
+            VSTUDIO_CONFIG=$withval
+         ], [
+            VSTUDIO_CONFIG=
+         ]
+      )
+
+  AC_SUBST([VSTUDIO_CONFIG])
+  AC_DEFINE([VSTUDIO_DDK], [1], [System uses the Visual Studio DDK version module.])
+  AM_CONDITIONAL([VSTUDIO_DDK], [test -n "$VSTUDIO_CONFIG"])
+])
 
 dnl Checks for Netlink support.
 AC_DEFUN([OVS_CHECK_NETLINK],
@@ -205,7 +244,7 @@ AC_DEFUN([OVS_CHECK_PYTHON],
         ovs_cv_python=$PYTHON
       else
         ovs_cv_python=no
-        for binary in python python2.4 python2.5; do
+        for binary in python python2.4 python2.5 python2.7; do
           ovs_save_IFS=$IFS; IFS=$PATH_SEPARATOR
           for dir in $PATH; do
             IFS=$ovs_save_IFS
@@ -429,3 +468,12 @@ dnl OVS_CHECK_INCLUDE_NEXT
 AC_DEFUN([OVS_CHECK_INCLUDE_NEXT],
   [AC_REQUIRE([gl_CHECK_NEXT_HEADERS])
    gl_CHECK_NEXT_HEADERS([$1])])
+
+dnl OVS_CHECK_PRAGMA_MESSAGE
+AC_DEFUN([OVS_CHECK_PRAGMA_MESSAGE],
+  [AC_COMPILE_IFELSE([AC_LANG_PROGRAM(
+   [[_Pragma("message(\"Checking for pragma message\")")
+   ]])],
+     [AC_DEFINE(HAVE_PRAGMA_MESSAGE,1,[Define if compiler supports #pragma
+     message directive])])
+  ])

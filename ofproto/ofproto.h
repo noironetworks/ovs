@@ -27,9 +27,11 @@
 #include "flow.h"
 #include "meta-flow.h"
 #include "netflow.h"
+#include "rstp.h"
 #include "smap.h"
 #include "sset.h"
 #include "stp.h"
+#include "lacp.h"
 
 #ifdef  __cplusplus
 extern "C" {
@@ -71,6 +73,9 @@ struct ofproto_ipfix_bridge_exporter_options {
     uint32_t obs_point_id;  /* Bridge-wide Observation Point ID. */
     uint32_t cache_active_timeout;
     uint32_t cache_max_flows;
+    bool enable_tunnel_sampling;
+    bool enable_input_sampling;
+    bool enable_output_sampling;
 };
 
 struct ofproto_ipfix_flow_exporter_options {
@@ -78,6 +83,52 @@ struct ofproto_ipfix_flow_exporter_options {
     struct sset targets;
     uint32_t cache_active_timeout;
     uint32_t cache_max_flows;
+};
+
+struct ofproto_rstp_status {
+    bool enabled;               /* If false, ignore other members. */
+    rstp_identifier root_id;
+    rstp_identifier bridge_id;
+    rstp_identifier designated_id;
+    uint32_t root_path_cost;
+    uint16_t designated_port_id;
+    uint16_t bridge_port_id;
+};
+
+struct ofproto_rstp_settings {
+    rstp_identifier address;
+    uint16_t priority;
+    uint32_t ageing_time;
+    enum rstp_force_protocol_version force_protocol_version;
+    uint16_t bridge_forward_delay;
+    uint16_t bridge_max_age;
+    uint16_t transmit_hold_count;
+};
+
+struct ofproto_port_rstp_status {
+    bool enabled;               /* If false, ignore other members. */
+    uint16_t port_id;
+    enum rstp_port_role role;
+    enum rstp_state state;
+    rstp_identifier designated_bridge_id;
+    uint16_t designated_port_id;
+    uint32_t designated_path_cost;
+    int tx_count;               /* Number of BPDUs transmitted. */
+    int rx_count;               /* Number of valid BPDUs received. */
+    int error_count;            /* Number of bad BPDUs received. */
+    int uptime;
+};
+
+struct ofproto_port_rstp_settings {
+    bool enable;
+    uint16_t port_num;           /* In the range 1-4095, inclusive. */
+    uint8_t priority;
+    uint32_t path_cost;
+    bool admin_edge_port;
+    bool auto_edge;
+    bool mcheck;
+    uint8_t admin_p2p_mac_state;
+    bool admin_port_state;
 };
 
 struct ofproto_stp_settings {
@@ -222,7 +273,7 @@ int ofproto_port_dump_done(struct ofproto_port_dump *);
         )
 
 #define OFPROTO_FLOW_LIMIT_DEFAULT 200000
-#define OFPROTO_MAX_IDLE_DEFAULT 1500
+#define OFPROTO_MAX_IDLE_DEFAULT 10000 /* ms */
 
 const char *ofproto_port_open_type(const char *datapath_type,
                                    const char *port_type);
@@ -254,6 +305,8 @@ int ofproto_set_mcast_snooping(struct ofproto *ofproto,
 int ofproto_port_set_mcast_snooping(struct ofproto *ofproto, void *aux,
                                     bool flood);
 void ofproto_set_threads(int n_handlers, int n_revalidators);
+void ofproto_set_n_dpdk_rxqs(int n_rxqs);
+void ofproto_set_cpu_mask(const char *cmask);
 void ofproto_set_dp_desc(struct ofproto *, const char *dp_desc);
 int ofproto_set_snoops(struct ofproto *, const struct sset *snoops);
 int ofproto_set_netflow(struct ofproto *,
@@ -268,6 +321,9 @@ bool ofproto_get_flow_restore_wait(void);
 int ofproto_set_stp(struct ofproto *, const struct ofproto_stp_settings *);
 int ofproto_get_stp_status(struct ofproto *, struct ofproto_stp_status *);
 
+int ofproto_set_rstp(struct ofproto *, const struct ofproto_rstp_settings *);
+int ofproto_get_rstp_status(struct ofproto *, struct ofproto_rstp_status *);
+
 /* Configuration of ports. */
 void ofproto_port_unregister(struct ofproto *, ofp_port_t ofp_port);
 
@@ -280,6 +336,7 @@ bool ofproto_port_bfd_status_changed(struct ofproto *, ofp_port_t ofp_port);
 int ofproto_port_get_bfd_status(struct ofproto *, ofp_port_t ofp_port,
                                 struct smap *);
 int ofproto_port_is_lacp_current(struct ofproto *, ofp_port_t ofp_port);
+int ofproto_port_get_lacp_stats(const struct ofport *, struct lacp_slave_stats *);
 int ofproto_port_set_stp(struct ofproto *, ofp_port_t ofp_port,
                          const struct ofproto_port_stp_settings *);
 int ofproto_port_get_stp_status(struct ofproto *, ofp_port_t ofp_port,
@@ -289,6 +346,11 @@ int ofproto_port_get_stp_stats(struct ofproto *, ofp_port_t ofp_port,
 int ofproto_port_set_queues(struct ofproto *, ofp_port_t ofp_port,
                             const struct ofproto_port_queue *,
                             size_t n_queues);
+int ofproto_port_get_rstp_status(struct ofproto *, ofp_port_t ofp_port,
+                                struct ofproto_port_rstp_status *);
+
+int ofproto_port_set_rstp(struct ofproto *, ofp_port_t ofp_port,
+        const struct ofproto_port_rstp_settings *);
 
 /* The behaviour of the port regarding VLAN handling */
 enum port_vlan_mode {

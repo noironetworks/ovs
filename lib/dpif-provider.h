@@ -132,8 +132,9 @@ struct dpif_class {
      * the 'close' member function. */
     int (*destroy)(struct dpif *dpif);
 
-    /* Performs periodic work needed by 'dpif', if any is necessary. */
-    void (*run)(struct dpif *dpif);
+    /* Performs periodic work needed by 'dpif', if any is necessary.
+     * Returns true if need to revalidate. */
+    bool (*run)(struct dpif *dpif);
 
     /* Arranges for poll_block() to wake up if the "run" member function needs
      * to be called for 'dpif'. */
@@ -300,6 +301,13 @@ struct dpif_class {
      * */
     int (*handlers_set)(struct dpif *dpif, uint32_t n_handlers);
 
+    /* If 'dpif' creates its own I/O polling threads, refreshes poll threads
+     * configuration.  'n_rxqs' configures the number of rx_queues, which
+     * are distributed among threads.  'cmask' configures the cpu mask
+     * for setting the polling threads' cpu affinity. */
+    int (*poll_threads_set)(struct dpif *dpif, unsigned int n_rxqs,
+                            const char *cmask);
+
     /* Translates OpenFlow queue ID 'queue_id' (in host byte order) into a
      * priority value used for setting packet priority. */
     int (*queue_to_priority)(const struct dpif *dpif, uint32_t queue_id,
@@ -356,9 +364,13 @@ struct dpif_class {
 
     /* Disables upcalls if 'dpif' directly executes upcall functions. */
     void (*disable_upcall)(struct dpif *);
+
+    /* Get datapath version. Caller is responsible for freeing the string
+     * returned.  */
+    char *(*get_datapath_version)(void);
 };
 
-extern const struct dpif_class dpif_linux_class;
+extern const struct dpif_class dpif_netlink_class;
 extern const struct dpif_class dpif_netdev_class;
 
 #ifdef  __cplusplus

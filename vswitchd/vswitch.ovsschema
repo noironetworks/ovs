@@ -1,6 +1,6 @@
 {"name": "Open_vSwitch",
- "version": "7.8.0",
- "cksum": "2676751133 20740",
+ "version": "7.11.1",
+ "cksum": "1038213587 21518",
  "tables": {
    "Open_vSwitch": {
      "columns": {
@@ -49,10 +49,14 @@
          "mutable": false},
        "datapath_type": {
          "type": "string"},
+       "datapath_version": {
+         "type": "string"},
        "datapath_id": {
          "type": {"key": "string", "min": 0, "max": 1},
          "ephemeral": true},
        "stp_enable": {
+         "type": "boolean"},
+       "rstp_enable": {
          "type": "boolean"},
        "mcast_snooping_enable": {
          "type": "boolean"},
@@ -94,6 +98,9 @@
                           "enum": ["set", ["standalone", "secure"]]},
                   "min": 0, "max": 1}},
        "status": {
+         "type": {"key": "string", "value": "string", "min": 0, "max": "unlimited"},
+         "ephemeral": true},
+       "rstp_status": {
          "type": {"key": "string", "value": "string", "min": 0, "max": "unlimited"},
          "ephemeral": true},
        "other_config": {
@@ -155,6 +162,9 @@
          "type": "integer"},
        "bond_downdelay": {
          "type": "integer"},
+       "bond_active_slave": {
+         "type": {"key": {"type": "string"},
+                  "min": 0, "max": 1}},
        "bond_fake_iface": {
          "type": "boolean"},
        "fake_bridge": {
@@ -162,6 +172,12 @@
        "status": {
          "type": {"key": "string", "value": "string", "min": 0, "max": "unlimited"},
          "ephemeral": true},
+       "rstp_status": {
+         "type": {"key": "string", "value": "string", "min": 0, "max": "unlimited"},
+         "ephemeral": true},
+       "rstp_statistics": {
+           "type": {"key": "string", "value": "integer", "min": 0, "max": "unlimited"},
+           "ephemeral": true},
        "statistics": {
          "type": {"key": "string", "value": "integer", "min": 0, "max": "unlimited"},
          "ephemeral": true},
@@ -449,6 +465,9 @@
                           "minInteger": 0,
                           "maxInteger": 4294967295},
                   "min": 0, "max": 1}},
+       "other_config": {
+         "type": {"key": "string", "value": "string",
+                  "min": 0, "max": "unlimited"}},
        "external_ids": {
          "type": {"key": "string", "value": "string",
                   "min": 0, "max": "unlimited"}}}},

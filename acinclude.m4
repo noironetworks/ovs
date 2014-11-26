@@ -22,7 +22,7 @@ AC_DEFUN([OVS_ENABLE_WERROR],
      [], [enable_Werror=no])
    AC_CONFIG_COMMANDS_PRE(
      [if test "X$enable_Werror" = Xyes; then
-        CFLAGS="$CFLAGS -Werror"
+        OVS_CFLAGS="$OVS_CFLAGS -Werror"
       fi])])
 
 dnl OVS_CHECK_LINUX
@@ -134,10 +134,10 @@ AC_DEFUN([OVS_CHECK_LINUX], [
     AC_MSG_RESULT([$kversion])
 
     if test "$version" -ge 3; then
-       if test "$version" = 3 && test "$patchlevel" -le 14; then
+       if test "$version" = 3 && test "$patchlevel" -le 17; then
           : # Linux 3.x
        else
-         AC_ERROR([Linux kernel in $KBUILD is version $kversion, but version newer than 3.14.x is not supported (please refer to the FAQ for advice)])
+         AC_ERROR([Linux kernel in $KBUILD is version $kversion, but version newer than 3.17.x is not supported (please refer to the FAQ for advice)])
        fi
     else
        if test "$version" -le 1 || test "$patchlevel" -le 5 || test "$sublevel" -le 31; then
@@ -172,6 +172,8 @@ AC_DEFUN([OVS_CHECK_DPDK], [
     DPDK_LIB_DIR=$RTE_SDK/lib
     DPDK_LIB=-lintel_dpdk
 
+    ovs_save_CFLAGS="$CFLAGS"
+    ovs_save_LDFLAGS="$LDFLAGS"
     LDFLAGS="$LDFLAGS -L$DPDK_LIB_DIR"
     CFLAGS="$CFLAGS -I$DPDK_INCLUDE"
 
@@ -199,8 +201,12 @@ AC_DEFUN([OVS_CHECK_DPDK], [
     if $found; then :; else
         AC_MSG_ERROR([cannot link with dpdk])
     fi
+    CFLAGS="$ovs_save_CFLAGS"
+    LDFLAGS="$ovs_save_LDFLAGS"
+    OVS_LDFLAGS="$OVS_LDFLAGS -L$DPDK_LIB_DIR"
+    OVS_CFLAGS="$OVS_CFLAGS -I$DPDK_INCLUDE"
 
-    # DPDK 1.7.0 pmd drivers are not linked unless --whole-archive is used.
+    # DPDK 1.7 pmd drivers are not linked unless --whole-archive is used.
     #
     # This happens because the rest of the DPDK code doesn't use any symbol in
     # the pmd driver objects, and the drivers register themselves using an
@@ -208,8 +214,8 @@ AC_DEFUN([OVS_CHECK_DPDK], [
     #
     # These options are specified inside a single -Wl directive to prevent
     # autotools from reordering them.
-    vswitchd_ovs_vswitchd_LDFLAGS=-Wl,--whole-archive,$DPDK_LIB,--no-whole-archive
-    AC_SUBST([vswitchd_ovs_vswitchd_LDFLAGS])
+    DPDK_vswitchd_LDFLAGS=-Wl,--whole-archive,$DPDK_LIB,--no-whole-archive
+    AC_SUBST([DPDK_vswitchd_LDFLAGS])
     AC_DEFINE([DPDK_NETDEV], [1], [System uses the DPDK module.])
   else
     RTE_SDK=
@@ -277,6 +283,8 @@ AC_DEFUN([OVS_CHECK_LINUX_COMPAT], [
                   [OVS_DEFINE([HAVE_CSUM_COPY_DBG])])
 
   OVS_GREP_IFELSE([$KSRC/include/linux/err.h], [ERR_CAST])
+  OVS_GREP_IFELSE([$KSRC/include/linux/err.h], [IS_ERR_OR_NULL])
+  OVS_GREP_IFELSE([$KSRC/include/linux/hash.h], [fast_hash_ops])
 
   OVS_GREP_IFELSE([$KSRC/include/linux/etherdevice.h], [eth_hw_addr_random])
   OVS_GREP_IFELSE([$KSRC/include/linux/etherdevice.h], [ether_addr_copy])
@@ -284,6 +292,8 @@ AC_DEFUN([OVS_CHECK_LINUX_COMPAT], [
   OVS_GREP_IFELSE([$KSRC/include/linux/if_vlan.h], [vlan_set_encap_proto])
 
   OVS_GREP_IFELSE([$KSRC/include/linux/in.h], [ipv4_is_multicast])
+  OVS_GREP_IFELSE([$KSRC/include/net/ip.h], [__ip_select_ident.*dst_entry],
+                  [OVS_DEFINE([HAVE_IP_SELECT_IDENT_USING_DST_ENTRY])])
 
   OVS_GREP_IFELSE([$KSRC/include/linux/netdevice.h], [dev_disable_lro])
   OVS_GREP_IFELSE([$KSRC/include/linux/netdevice.h], [dev_get_stats])
@@ -332,6 +342,8 @@ AC_DEFUN([OVS_CHECK_LINUX_COMPAT], [
   OVS_GREP_IFELSE([$KSRC/include/linux/skbuff.h], [skb_orphan_frags])
   OVS_GREP_IFELSE([$KSRC/include/linux/skbuff.h], [skb_get_hash])
   OVS_GREP_IFELSE([$KSRC/include/linux/skbuff.h], [skb_clear_hash])
+  OVS_GREP_IFELSE([$KSRC/include/linux/skbuff.h], [int.skb_zerocopy(],
+                  [OVS_DEFINE([HAVE_SKB_ZEROCOPY])])
   OVS_GREP_IFELSE([$KSRC/include/linux/skbuff.h], [l4_rxhash])
 
   OVS_GREP_IFELSE([$KSRC/include/linux/types.h], [bool],
@@ -344,8 +356,15 @@ AC_DEFUN([OVS_CHECK_LINUX_COMPAT], [
   OVS_GREP_IFELSE([$KSRC/include/net/checksum.h], [csum_replace4])
   OVS_GREP_IFELSE([$KSRC/include/net/checksum.h], [csum_unfold])
 
+  OVS_GREP_IFELSE([$KSRC/include/net/genetlink.h], [genl_has_listeners])
+  OVS_GREP_IFELSE([$KSRC/include/net/genetlink.h], [mcgrp_offset])
   OVS_GREP_IFELSE([$KSRC/include/net/genetlink.h], [parallel_ops])
+  OVS_GREP_IFELSE([$KSRC/include/net/genetlink.h], [genlmsg_new_unicast])
   OVS_GREP_IFELSE([$KSRC/include/net/gre.h], [gre_cisco_register])
+  OVS_GREP_IFELSE([$KSRC/include/net/gre.h], [gre_handle_offloads])
+  OVS_GREP_IFELSE([$KSRC/include/net/ip_tunnels.h], [iptunnel_xmit.*net],
+                  [OVS_DEFINE([HAVE_IPTUNNEL_XMIT_NET])])
+  OVS_GREP_IFELSE([$KSRC/include/net/ipv6.h], [IP6_FH_F_SKIP_RH])
   OVS_GREP_IFELSE([$KSRC/include/net/netlink.h], [nla_get_be16])
   OVS_GREP_IFELSE([$KSRC/include/net/netlink.h], [nla_put_be16])
   OVS_GREP_IFELSE([$KSRC/include/net/netlink.h], [nla_put_be32])
@@ -357,12 +376,19 @@ AC_DEFUN([OVS_CHECK_LINUX_COMPAT], [
   OVS_GREP_IFELSE([$KSRC/include/linux/if_vlan.h], [ADD_ALL_VLANS_CMD],
                   [OVS_DEFINE([HAVE_VLAN_BUG_WORKAROUND])])
 
-  OVS_GREP_IFELSE([$KSRC/include/linux/percpu.h], [this_cpu_ptr])
-
   OVS_GREP_IFELSE([$KSRC/include/linux/u64_stats_sync.h], [u64_stats_fetch_begin_irq])
 
   OVS_GREP_IFELSE([$KSRC/include/linux/openvswitch.h], [openvswitch_handle_frame_hook],
                   [OVS_DEFINE([HAVE_RHEL_OVS_HOOK])])
+  OVS_GREP_IFELSE([$KSRC/include/net/vxlan.h], [vxlan_xmit_skb])
+  OVS_GREP_IFELSE([$KSRC/include/net/vxlan.h], [bool xnet],
+                  [OVS_DEFINE([HAVE_VXLAN_XMIT_SKB_XNET_ARG])])
+  OVS_GREP_IFELSE([$KSRC/include/net/udp.h], [udp_flow_src_port],
+                  [OVS_DEFINE([HAVE_UDP_FLOW_SRC_PORT])])
+  OVS_GREP_IFELSE([$KSRC/include/linux/skbuff.h], [ignore_df:1],
+                  [OVS_DEFINE([HAVE_IGNORE_DF_RENAME])])
+  OVS_GREP_IFELSE([$KSRC/include/uapi/linux/netdevice.h], [NET_NAME_UNKNOWN],
+                  [OVS_DEFINE([HAVE_NET_NAME_UNKNOWN])])
 
   OVS_CHECK_LOG2_H
 

@@ -152,6 +152,34 @@
         </p>
       </column>
 
+      <column name="other_config" key="n-dpdk-rxqs"
+              type='{"type": "integer", "minInteger": 1}'>
+        <p>
+          Specifies the number of rx queues to be created for each dpdk
+          interface.  If not specified or specified to 0, one rx queue will
+          be created for each dpdk interface by default.
+        </p>
+      </column>
+
+      <column name="other_config" key="pmd-cpu-mask">
+        <p>
+          Specifies CPU mask for setting the cpu affinity of PMD (Poll
+          Mode Driver) threads.  Value should be in the form of hex string,
+          similar to the dpdk EAL '-c COREMASK' option input or the 'taskset'
+          mask input.
+        </p>
+        <p>
+          The lowest order bit corresponds to the first CPU core.  A set bit
+          means the corresponding core is available and a pmd thread will be
+          created and pinned to it.  If the input does not cover all cores,
+          those uncovered cores are considered not set.
+        </p>
+        <p>
+          If not specified, one pmd thread will be created for each numa node
+          and pinned to any available core on the numa node by default.
+        </p>
+      </column>
+
       <column name="other_config" key="n-handler-threads"
               type='{"type": "integer", "minInteger": 1}'>
         <p>
@@ -554,6 +582,56 @@
         column="other-config" key="datapath-id"/> instead.)
       </column>
 
+      <column name="datapath_version">
+        <p>
+          Reports the version number of the Open vSwitch datapath in use.
+          This allows management software to detect and report discrepancies
+          between Open vSwitch userspace and datapath versions.  (The <ref
+          column="ovs_version" table="Open_vSwitch"/> column in the <ref
+          table="Open_vSwitch"/> reports the Open vSwitch userspace version.)
+          The version reported depends on the datapath in use:
+        </p>
+
+        <ul>
+          <li>
+            When the kernel module included in the Open vSwitch source tree is
+            used, this column reports the Open vSwitch version from which the
+            module was taken.
+          </li>
+
+          <li>
+            When the kernel module that is part of the upstream Linux kernel is
+            used, this column reports <code>&lt;unknown&gt;</code>.
+          </li>
+
+          <li>
+            When the datapath is built into the <code>ovs-vswitchd</code>
+            binary, this column reports <code>&lt;built-in&gt;</code>.  A
+            built-in datapath is by definition the same version as the rest of
+            the Open VSwitch userspace.
+          </li>
+
+          <li>
+            Other datapaths (such as the Hyper-V kernel datapath) currently
+            report <code>&lt;unknown&gt;</code>.
+          </li>
+        </ul>
+
+        <p>
+          A version discrepancy between <code>ovs-vswitchd</code> and the
+          datapath in use is not normally cause for alarm.  The Open vSwitch
+          kernel datapaths for Linux and Hyper-V, in particular, are designed
+          for maximum inter-version compatibility: any userspace version works
+          with with any kernel version.  Some reasons do exist to insist on
+          particular user/kernel pairings.  First, newer kernel versions add
+          new features, that can only be used by new-enough userspace, e.g.
+          VXLAN tunneling requires certain minimal userspace and kernel
+          versions.  Second, as an extension to the first reason, some newer
+          kernel versions add new features for enhancing performance that only
+          new-enough userspace versions can take advantage of.
+        </p>
+      </column>
+
       <column name="other_config" key="datapath-id">
         Exactly 16 hex digits to set the OpenFlow datapath ID to a specific
         value.  May not be all-zero.
@@ -608,7 +686,7 @@
       be included in the network to provide automatic backup paths if
       the active links fails.
 
-      <column name="stp_enable">
+      <column name="stp_enable" type='{"type": "boolean"}'>
         Enable spanning tree on the bridge.  By default, STP is disabled
         on bridges.  Bond, internal, and mirror ports are not supported
         and will not participate in the spanning tree.
@@ -690,6 +768,73 @@
         Enable multicast snooping on the bridge. For now, the default
         is disabled.
       </column>
+    </group>
+
+    <group title="Rapid Spanning Tree Configuration">
+      In IEEE Std 802.1D, 1998 Edition, and prior editions of this standard,
+      Clause 8 specified the spanning tree algorithm and protocol (STP).  STP
+      has now been superseded by the Rapid Spanning Tree Protocol (RSTP)
+      specified in Clause 17 of the IEEE Std 802.1D, 2004 Edition.
+      The IEEE 802.1D-2004 Rapid Spanning Tree Algorithm Protocol configures
+      full, simple, and symmetric connectivity throughout a Bridged Local Area
+      Network that comprises individual LANs interconnected by Bridges.
+      Like STP, RSTP is a network protocol that ensures loop-free topologies.
+      It allows redundant links to be included in the network to provide
+      automatic backup paths if the active links fails.
+
+      <column name="rstp_enable" type='{"type": "boolean"}'>
+        Enable Rapid Spanning Tree on the bridge.  By default, RSTP is disabled
+        on bridges.  Bond, internal, and mirror ports are not supported
+        and will not participate in the spanning tree.
+      </column>
+
+      <column name="other_config" key="rstp-address">
+        The bridge's RSTP address (the lower 48 bits of the bridge-id)
+        in the form
+        <var>xx</var>:<var>xx</var>:<var>xx</var>:<var>xx</var>:<var>xx</var>:<var>xx</var>.
+        By default, the address is the MAC address of the bridge.
+      </column>
+
+      <column name="other_config" key="rstp-priority"
+              type='{"type": "integer", "minInteger": 0, "maxInteger": 61440}'>
+        The bridge's relative priority value for determining the root
+        bridge (the upper 16 bits of the bridge-id).  A bridge with the
+        lowest bridge-id is elected the root.  By default, the priority
+        is 0x8000 (32768).  This value needs to be a multiple of 4096,
+        otherwise it's rounded to the nearest inferior one.
+      </column>
+
+      <column name="other_config" key="rstp-ageing-time"
+              type='{"type": "integer", "minInteger": 10, "maxInteger": 1000000}'>
+        The Ageing Time parameter for the Bridge.  The default value
+        is 300 seconds.
+      </column>
+
+      <column name="other_config" key="rstp-force-protocol-version"
+              type='{"type": "integer"}'>
+        The Force Protocol Version parameter for the Bridge.  This
+        can take the value 0 (STP Compatibility mode) or 2
+        (the default, normal operation).
+      </column>
+
+      <column name="other_config" key="rstp-max-age"
+              type='{"type": "integer", "minInteger": 6, "maxInteger": 40}'>
+        The maximum age of the information transmitted by the Bridge
+        when it is the Root Bridge.  The default value is 20.
+      </column>
+
+      <column name="other_config" key="rstp-forward-delay"
+              type='{"type": "integer", "minInteger": 4, "maxInteger": 30}'>
+        The delay used by STP Bridges to transition Root and Designated
+        Ports to Forwarding.  The default value is 15.
+      </column>
+
+      <column name="other_config" key="rstp-transmit-hold-count"
+              type='{"type": "integer", "minInteger": 1, "maxInteger": 10}'>
+        The Transmit Hold Count used by the Port Transmit state machine
+        to limit transmission rate.  The default value is 6.
+      </column>
+
     </group>
 
     <group title="Other Features">
@@ -838,8 +983,8 @@
       <column name="external_ids"/>
     </group>
   </table>
-
-  <table name="Port" table="Port or bond configuration.">
+ 
+ <table name="Port" table="Port or bond configuration.">
     <p>A port within a <ref table="Bridge"/>.</p>
     <p>Most commonly, a port has exactly one ``interface,'' pointed to by its
     <ref column="interfaces"/> column.  Such a port logically
@@ -1202,6 +1347,74 @@
         speed of the link.
       </column>
     </group>
+
+    <group title="Rapid Spanning Tree Configuration">
+      <column name="other_config" key="rstp-enable"
+              type='{"type": "boolean"}'>
+        If rapid spanning tree is enabled on the bridge, member ports are
+        enabled by default (with the exception of bond, internal, and
+        mirror ports which do not work with RSTP).  If this column's
+        value is <code>false</code> rapid spanning tree is disabled on the
+        port.
+      </column>
+
+      <column name="other_config" key="rstp-port-priority"
+              type='{"type": "integer", "minInteger": 0, "maxInteger": 240}'>
+        The port's relative priority value for determining the root
+        port, in multiples of 16.  By default, the port priority is 0x80
+        (128).  Any value in the lower 4 bits is rounded off.  The significant
+        upper 4 bits become the upper 4 bits of the port-id.  A port with the
+        lowest port-id is elected as the root.
+      </column>
+
+      <column name="other_config" key="rstp-port-num"
+              type='{"type": "integer", "minInteger": 1, "maxInteger": 4095}'>
+        The local RSTP port number, used as the lower 12 bits of the port-id.
+        By default the port numbers are assigned automatically, and typically
+        may not correspond to the OpenFlow port numbers.  A port with the
+        lowest port-id is elected as the root.
+      </column>
+
+      <column name="other_config" key="rstp-port-path-cost"
+              type='{"type": "integer"}'>
+        The port path cost.  The Port's contribution, when it is
+        the Root Port, to the Root Path Cost for the Bridge.  By default the
+        cost is automatically calculated from the port's speed.
+      </column>
+
+      <column name="other_config" key="rstp-port-admin-edge"
+              type='{"type": "boolean"}'>
+        The admin edge port parameter for the Port.  Default is
+        <code>false</code>.
+      </column>
+
+      <column name="other_config" key="rstp-port-auto-edge"
+              type='{"type": "boolean"}'>
+        The auto edge port parameter for the Port.  Default is
+        <code>true</code>.
+      </column>
+
+      <column name="other_config" key="rstp-port-mcheck"
+              type='{"type": "boolean"}'>
+        <p>
+          The mcheck port parameter for the Port.  Default is
+          <code>false</code>.  May be set to force the Port Protocol
+          Migration state machine to transmit RST BPDUs for a
+          MigrateTime period, to test whether all STP Bridges on the
+          attached LAN have been removed and the Port can continue to
+          transmit RSTP BPDUs.  Setting mcheck has no effect if the
+          Bridge is operating in STP Compatibility mode.
+        </p>
+        <p>
+          Changing the value from <code>true</code> to
+          <code>false</code> has no effect, but needs to be done if
+          this behavior is to be triggered again by subsequently
+          changing the value from <code>false</code> to
+          <code>true</code>.
+        </p>
+      </column>
+    </group>
+
     <group title="Multicast Snooping">
       <column name="other_config" key="mcast-snooping-flood"
               type='{"type": "boolean"}'>
@@ -1275,6 +1488,13 @@
           STP role of the port.
         </p>
       </column>
+
+      <column name="status" key="bond_active_slave">
+        <p>
+          For a bonded port, record the mac address of the current active slave.
+        </p>
+      </column>
+
     </group>
 
     <group title="Port Statistics">
@@ -2026,7 +2246,8 @@
 	</p>
 
 	<column name="bfd" key="enable" type='{"type": "boolean"}'>
-          True to enable BFD on this <ref table="Interface"/>.
+          True to enable BFD on this <ref table="Interface"/>.  If not
+          specified, BFD will not be enabled by default.
 	</column>
 
 	<column name="bfd" key="min_rx"
@@ -2095,7 +2316,7 @@
 	  default is <code>00:23:20:00:00:01</code>.
 	</column>
 
-	<column name="bfd" key="bfd_remoe_dst_mac">
+	<column name="bfd" key="bfd_remote_dst_mac">
 	  Set to an Ethernet address in the form
 	  <var>xx</var>:<var>xx</var>:<var>xx</var>:<var>xx</var>:<var>xx</var>:<var>xx</var>
 	  to set the MAC used for checking the destination of received BFD packets.
@@ -3912,38 +4133,53 @@
   </table>
 
   <table name="IPFIX">
-    <p>A set of IPFIX collectors.  IPFIX is a protocol that exports a
-    number of details about flows.</p>
+    <p>Configuration for sending packets to IPFIX collectors.</p>
+
+    <p>
+      IPFIX is a protocol that exports a number of details about flows.  The
+      IPFIX implementation in Open vSwitch samples packets at a configurable
+      rate, extracts flow information from those packets, optionally caches and
+      aggregates the flow information, and sends the result to one or more
+      collectors.
+    </p>
+
+    <p>
+      IPFIX in Open vSwitch can be configured two different ways:
+    </p>
+
+    <ul>
+      <li>
+        With <em>per-bridge sampling</em>, Open vSwitch performs IPFIX sampling
+        automatically on all packets that pass through a bridge.  To configure
+        per-bridge sampling, create an <ref table="IPFIX"/> record and point a
+        <ref table="Bridge"/> table's <ref table="Bridge" column="ipfix"/>
+        column to it.  The <ref table="Flow_Sample_Collector_Set"/> table is
+        not used for per-bridge sampling.
+      </li>
+
+      <li>
+        <p>
+          With <em>flow-based sampling</em>, <code>sample</code> actions in the
+          OpenFlow flow table drive IPFIX sampling.  See
+          <code>ovs-ofctl</code>(8) for a description of the
+          <code>sample</code> action.
+        </p>
+
+        <p>
+          Flow-based sampling also requires database configuration: create a
+          <ref table="IPFIX"/> record that describes the IPFIX configuration
+          and a <ref table="Flow_Sample_Collector_Set"/> record that points to
+          the <ref table="Bridge"/> whose flow table holds the
+          <code>sample</code> actions and to <ref table="IPFIX"/> record.  The
+          <ref table="Bridge" column="ipfix"/> in the <ref table="Bridge"/>
+          table is not used for flow-based sampling.
+        </p>
+      </li>
+    </ul>
 
     <column name="targets">
       IPFIX target collectors in the form
       <code><var>ip</var>:<var>port</var></code>.
-    </column>
-
-    <column name="sampling">
-      For per-bridge packet sampling, i.e. when this row is referenced
-      from a <ref table="Bridge"/>, the rate at which packets should
-      be sampled and sent to each target collector.  If not specified,
-      defaults to 400, which means one out of 400 packets, on average,
-      will be sent to each target collector.  Ignored for per-flow
-      sampling, i.e. when this row is referenced from a <ref
-      table="Flow_Sample_Collector_Set"/>.
-    </column>
-
-    <column name="obs_domain_id">
-      For per-bridge packet sampling, i.e. when this row is referenced
-      from a <ref table="Bridge"/>, the IPFIX Observation Domain ID
-      sent in each IPFIX packet.  If not specified, defaults to 0.
-      Ignored for per-flow sampling, i.e. when this row is referenced
-      from a <ref table="Flow_Sample_Collector_Set"/>.
-    </column>
-
-    <column name="obs_point_id">
-      For per-bridge packet sampling, i.e. when this row is referenced
-      from a <ref table="Bridge"/>, the IPFIX Observation Point ID
-      sent in each IPFIX flow record.  If not specified, defaults to
-      0.  Ignored for per-flow sampling, i.e. when this row is
-      referenced from a <ref table="Flow_Sample_Collector_Set"/>.
     </column>
 
     <column name="cache_active_timeout">
@@ -3958,6 +4194,124 @@
       disabled.
     </column>
 
+    <group title="Per-Bridge Sampling">
+      <p>
+        These values affect only per-bridge sampling.  See above for a
+        description of the differences between per-bridge and flow-based
+        sampling.
+      </p>
+
+      <column name="sampling">
+        The rate at which packets should be sampled and sent to each target
+        collector.  If not specified, defaults to 400, which means one out of
+        400 packets, on average, will be sent to each target collector.
+      </column>
+
+      <column name="obs_domain_id">
+        The IPFIX Observation Domain ID sent in each IPFIX packet.  If not
+        specified, defaults to 0.
+      </column>
+
+      <column name="obs_point_id">
+        The IPFIX Observation Point ID sent in each IPFIX flow record.  If not
+        specified, defaults to 0.
+      </column>
+
+      <column name="other_config" key="enable-tunnel-sampling"
+              type='{"type": "boolean"}'>
+        <p>
+          Set to <code>true</code> to enable sampling and reporting tunnel
+          header 7-tuples in IPFIX flow records.  Tunnel sampling is disabled
+          by default.
+        </p>
+
+        <p>
+          The following enterprise entities report the sampled tunnel info:
+        </p>
+
+        <dl>
+          <dt>tunnelType:</dt>
+          <dd>
+            <p>ID: 891, and enterprise ID 6876 (VMware).</p>
+            <p>type: unsigned 8-bit integer.</p>
+            <p>data type semantics: identifier.</p>
+            <p>description: Identifier of the layer 2 network overlay network
+            encapsulation type: 0x01 VxLAN, 0x02 GRE, 0x03 LISP, 0x05 IPsec+GRE,
+            0x07 GENEVE.</p>
+          </dd>
+          <dt>tunnelKey:</dt>
+          <dd>
+            <p>ID: 892, and enterprise ID 6876 (VMware).</p>
+            <p>type: variable-length octetarray.</p>
+            <p>data type semantics: identifier.</p>
+            <p>description: Key which is used for identifying an individual
+            traffic flow within a VxLAN (24-bit VNI), GENEVE (24-bit VNI),
+            GRE (32- or 64-bit key), or LISP (24-bit instance ID) tunnel. The
+            key is encoded in this octetarray as a 3-, 4-, or 8-byte integer
+            ID in network byte order.</p>
+          </dd>
+          <dt>tunnelSourceIPv4Address:</dt>
+          <dd>
+            <p>ID: 893, and enterprise ID 6876 (VMware).</p>
+            <p>type: unsigned 32-bit integer.</p>
+            <p>data type semantics: identifier.</p>
+            <p>description: The IPv4 source address in the tunnel IP packet
+            header.</p>
+          </dd>
+          <dt>tunnelDestinationIPv4Address:</dt>
+          <dd>
+            <p>ID: 894, and enterprise ID 6876 (VMware).</p>
+            <p>type: unsigned 32-bit integer.</p>
+            <p>data type semantics: identifier.</p>
+            <p>description: The IPv4 destination address in the tunnel IP
+            packet header.</p>
+          </dd>
+          <dt>tunnelProtocolIdentifier:</dt>
+          <dd>
+            <p>ID: 895, and enterprise ID 6876 (VMware).</p>
+            <p>type: unsigned 8-bit integer.</p>
+            <p>data type semantics: identifier.</p>
+            <p>description: The value of the protocol number in the tunnel
+            IP packet header. The protocol number identifies the tunnel IP
+            packet payload type.</p>
+          </dd>
+          <dt>tunnelSourceTransportPort:</dt>
+          <dd>
+            <p>ID: 896, and enterprise ID 6876 (VMware).</p>
+            <p>type: unsigned 16-bit integer.</p>
+            <p>data type semantics: identifier.</p>
+            <p>description: The source port identifier in the tunnel transport
+            header. For the transport protocols UDP, TCP, and SCTP, this is
+            the source port number given in the respective header.</p>
+          </dd>
+          <dt>tunnelDestinationTransportPort:</dt>
+          <dd>
+            <p>ID: 897, and enterprise ID 6876 (VMware).</p>
+            <p>type: unsigned 16-bit integer.</p>
+            <p>data type semantics: identifier.</p>
+            <p>description: The destination port identifier in the tunnel
+            transport header. For the transport protocols UDP, TCP, and SCTP,
+            this is the destination port number given in the respective header.
+            </p>
+          </dd>
+        </dl>
+      </column>
+
+      <column name="other_config" key="enable-input-sampling"
+              type='{"type": "boolean"}'>
+        By default, Open vSwitch samples and reports flows at bridge port input
+        in IPFIX flow records.  Set this column to <code>false</code> to
+        disable input sampling.
+      </column>
+
+      <column name="other_config" key="enable-output-sampling"
+              type='{"type": "boolean"}'>
+        By default, Open vSwitch samples and reports flows at bridge port
+        output in IPFIX flow records.  Set this column to <code>false</code> to
+        disable output sampling.
+      </column>
+    </group>
+
     <group title="Common Columns">
       The overall purpose of these columns is described under <code>Common
       Columns</code> at the beginning of this document.
@@ -3967,8 +4321,12 @@
   </table>
 
   <table name="Flow_Sample_Collector_Set">
-    <p>A set of IPFIX collectors of packet samples generated by
-    OpenFlow <code>sample</code> actions.</p>
+    <p>
+      A set of IPFIX collectors of packet samples generated by OpenFlow
+      <code>sample</code> actions.  This table is used only for IPFIX
+      flow-based sampling, not for per-bridge sampling (see the <ref
+      table="IPFIX"/> table for a description of the two forms).
+    </p>
 
     <column name="id">
       The ID of this collector set, unique among the bridge's

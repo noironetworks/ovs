@@ -43,6 +43,41 @@ AC_SYS_LARGEFILE
 LT_INIT([disable-shared])
 m4_pattern_forbid([LT_INIT]) dnl Make autoconf fail if libtool is missing.
 
+# The following explanation may help to understand the use of the
+# version number fields: current, revision, and age.
+#
+# Consider that there are three possible kinds of reactions from
+# users of your library to changes in a shared library:
+#
+# 1. Programs using the previous version may use the new version as drop-in
+#    replacement, and programs using the new version can also work with the
+#    previous one. In other words, no recompiling nor relinking is needed.
+#    In short, there are no changes to any symbols, no symbols removed,
+#    and no symbols added. In this case, bump revision only, don't touch
+#    current nor age.
+#
+# 2. Programs using the previous version may use the new version as drop-in
+#    replacement, but programs using the new version may use APIs not
+#    present in the previous one. In other words, new symbols have been
+#    added and a program linking against the new version may fail with
+#    “unresolved symbols.” If linking against the old version at runtime:
+#    set revision to 0, bump current and age.
+#
+# 3. Programs may need to be changed, recompiled, relinked in order to use
+#    the new version. This is the case when symbols have been modified or
+#    deleted. Bump current, set revision and age to 0.
+
+m4_define([libopenvswitch_lt_current],    [1])
+m4_define([libopenvswitch_lt_revision],   [0])
+m4_define([libopenvswitch_lt_age],        [0])
+
+LT_CURRENT=libopenvswitch_lt_current
+AC_SUBST([LT_CURRENT])
+LT_REVISION=libopenvswitch_lt_revision
+AC_SUBST([LT_REVISION])
+LT_AGE=libopenvswitch_lt_age
+AC_SUBST([LT_AGE])
+
 AC_SEARCH_LIBS([pow], [m])
 AC_SEARCH_LIBS([clock_gettime], [rt])
 AC_SEARCH_LIBS([timer_create], [rt])
@@ -51,6 +86,7 @@ AC_FUNC_STRERROR_R
 
 OVS_CHECK_ESX
 OVS_CHECK_WIN32
+OVS_CHECK_VISUAL_STUDIO_DDK
 OVS_CHECK_COVERAGE
 OVS_CHECK_NDEBUG
 OVS_CHECK_NETLINK
@@ -93,7 +129,13 @@ OVS_CHECK_LINUX_HOST
 AX_FUNC_POSIX_MEMALIGN
 
 OVS_CHECK_INCLUDE_NEXT([stdio.h string.h])
-AC_CONFIG_FILES([lib/stdio.h lib/string.h])
+AC_CONFIG_FILES([
+    lib/stdio.h
+    lib/string.h
+    ovsdb/libovsdb.sym
+    ofproto/libofproto.sym
+    lib/libsflow.sym
+    lib/libopenvswitch.sym])
 
 OVS_ENABLE_OPTION([-Wall])
 OVS_ENABLE_OPTION([-Wextra])
@@ -103,7 +145,6 @@ OVS_ENABLE_OPTION([-Wformat-security])
 OVS_ENABLE_OPTION([-Wno-format-zero-length])
 OVS_ENABLE_OPTION([-Wswitch-enum])
 OVS_ENABLE_OPTION([-Wunused-parameter])
-OVS_ENABLE_OPTION([-Wstrict-aliasing])
 OVS_ENABLE_OPTION([-Wbad-function-cast])
 OVS_ENABLE_OPTION([-Wcast-align])
 OVS_ENABLE_OPTION([-Wstrict-prototypes])
@@ -111,6 +152,7 @@ OVS_ENABLE_OPTION([-Wold-style-definition])
 OVS_ENABLE_OPTION([-Wmissing-prototypes])
 OVS_ENABLE_OPTION([-Wmissing-field-initializers])
 OVS_ENABLE_OPTION([-Wthread-safety])
+OVS_ENABLE_OPTION([-fno-strict-aliasing])
 OVS_CONDITIONAL_CC_OPTION([-Wno-unused], [HAVE_WNO_UNUSED])
 OVS_CONDITIONAL_CC_OPTION([-Wno-unused-parameter], [HAVE_WNO_UNUSED_PARAMETER])
 OVS_ENABLE_WERROR
@@ -120,6 +162,9 @@ AC_ARG_VAR(KARCH, [Kernel Architecture String])
 AC_SUBST(KARCH)
 OVS_CHECK_LINUX
 OVS_CHECK_DPDK
+OVS_CHECK_PRAGMA_MESSAGE
+AC_SUBST([OVS_CFLAGS])
+AC_SUBST([OVS_LDFLAGS])
 
 AC_CONFIG_FILES(Makefile)
 AC_CONFIG_FILES(datapath/Makefile)
@@ -127,6 +172,10 @@ AC_CONFIG_FILES(datapath/linux/Kbuild)
 AC_CONFIG_FILES(datapath/linux/Makefile)
 AC_CONFIG_FILES(datapath/linux/Makefile.main)
 AC_CONFIG_FILES(tests/atlocal)
+AC_CONFIG_FILES(lib/libopenvswitch.pc)
+AC_CONFIG_FILES(lib/libsflow.pc)
+AC_CONFIG_FILES(ofproto/libofproto.pc)
+AC_CONFIG_FILES(ovsdb/libovsdb.pc)
 
 dnl This makes sure that include/openflow gets created in the build directory.
 AC_CONFIG_COMMANDS([include/openflow/openflow.h.stamp])

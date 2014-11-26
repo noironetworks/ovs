@@ -21,11 +21,13 @@
 #include <ntstrsafe.h>
 #include <Strsafe.h>
 
-#include "OvsTypes.h"
-#include "..\include\OvsPub.h"
-#include "OvsUtil.h"
-/*
- * Include openvswitch.h from userspace. Changing the location the file from
- * include/linux is pending discussion.
- */
+#include "Types.h"
+
 #include "..\include\OvsDpInterface.h"
+
+#include "Util.h"
+#include "Netlink/NetlinkError.h"
+#include "Netlink/Netlink.h"
+#include "Netlink/NetlinkProto.h"
+#include "..\include\OvsDpInterfaceExt.h"
+#include "DpInternal.h"

@@ -471,9 +471,15 @@ set_program_name__(const char *argv0, const char *version, const char *date,
 
     assert_single_threaded();
     free(program_name);
+    /* Remove libtool prefix, if it is there */
+    if (strncmp(basename, "lt-", 3) == 0) {
+        char *tmp_name = basename;
+        basename = xstrdup(basename + 3);
+        free(tmp_name);
+    }
     program_name = basename;
-    free(program_version);
 
+    free(program_version);
     if (!strcmp(version, VERSION)) {
         program_version = xasprintf("%s (Open vSwitch) "VERSION"\n"
                                     "Compiled %s %s\n",
@@ -701,29 +707,25 @@ hexit_value(int c)
 }
 
 /* Returns the integer value of the 'n' hexadecimal digits starting at 's', or
- * UINT_MAX if one of those "digits" is not really a hex digit.  If 'ok' is
- * nonnull, '*ok' is set to true if the conversion succeeds or to false if a
- * non-hex digit is detected. */
-unsigned int
+ * UINTMAX_MAX if one of those "digits" is not really a hex digit.  Sets '*ok'
+ * to true if the conversion succeeds or to false if a non-hex digit is
+ * detected. */
+uintmax_t
 hexits_value(const char *s, size_t n, bool *ok)
 {
-    unsigned int value;
+    uintmax_t value;
     size_t i;
 
     value = 0;
     for (i = 0; i < n; i++) {
         int hexit = hexit_value(s[i]);
         if (hexit < 0) {
-            if (ok) {
-                *ok = false;
-            }
-            return UINT_MAX;
+            *ok = false;
+            return UINTMAX_MAX;
         }
         value = (value << 4) + hexit;
     }
-    if (ok) {
-        *ok = true;
-    }
+    *ok = true;
     return value;
 }
 
@@ -949,7 +951,7 @@ english_list_delimiter(size_t index, size_t total)
 }
 
 /* Returns the number of trailing 0-bits in 'n'.  Undefined if 'n' == 0. */
-#if __GNUC__ >= 4
+#if __GNUC__ >= 4 || _MSC_VER
 /* Defined inline in util.h. */
 #else
 /* Returns the number of trailing 0-bits in 'n'.  Undefined if 'n' == 0. */
@@ -1025,8 +1027,9 @@ const uint8_t count_1bits_8[256] = {
 
 /* Returns true if the 'n' bytes starting at 'p' are zeros. */
 bool
-is_all_zeros(const uint8_t *p, size_t n)
+is_all_zeros(const void *p_, size_t n)
 {
+    const uint8_t *p = p_;
     size_t i;
 
     for (i = 0; i < n; i++) {
@@ -1039,8 +1042,9 @@ is_all_zeros(const uint8_t *p, size_t n)
 
 /* Returns true if the 'n' bytes starting at 'p' are 0xff. */
 bool
-is_all_ones(const uint8_t *p, size_t n)
+is_all_ones(const void *p_, size_t n)
 {
+    const uint8_t *p = p_;
     size_t i;
 
     for (i = 0; i < n; i++) {
@@ -1270,6 +1274,35 @@ bitwise_is_all_zeros(const void *p_, unsigned int len, unsigned int ofs,
 
     return true;
 }
+
+/* Scans the bits in 'p' that have bit offsets 'start' through 'end'
+ * (inclusive) for the first bit with value 'target'.  If one is found, returns
+ * its offset, otherwise 'end'.  'p' is 'len' bytes long.
+ *
+ * If you consider all of 'p' to be a single unsigned integer in network byte
+ * order, then bit N is the bit with value 2**N.  That is, bit 0 is the bit
+ * with value 1 in p[len - 1], bit 1 is the bit with value 2, bit 2 is the bit
+ * with value 4, ..., bit 8 is the bit with value 1 in p[len - 2], and so on.
+ *
+ * Required invariant:
+ *   start <= end
+ */
+unsigned int
+bitwise_scan(const void *p_, unsigned int len, bool target, unsigned int start,
+             unsigned int end)
+{
+    const uint8_t *p = p_;
+    unsigned int ofs;
+
+    for (ofs = start; ofs < end; ofs++) {
+        bool bit = (p[len - (ofs / 8 + 1)] & (1u << (ofs % 8))) != 0;
+        if (bit == target) {
+            break;
+        }
+    }
+    return ofs;
+}
+
 
 /* Copies the 'n_bits' low-order bits of 'value' into the 'n_bits' bits
  * starting at bit 'dst_ofs' in 'dst', which is 'dst_len' bytes long.
@@ -1580,34 +1613,13 @@ scan_chars(const char *s, const struct scan_spec *spec, va_list *args)
     return s + n;
 }
 
-/* This is an implementation of the standard sscanf() function, with the
- * following exceptions:
- *
- *   - It returns true if the entire format was successfully scanned and
- *     converted, false if any conversion failed.
- *
- *   - The standard doesn't define sscanf() behavior when an out-of-range value
- *     is scanned, e.g. if a "%"PRIi8 conversion scans "-1" or "0x1ff".  Some
- *     implementations consider this an error and stop scanning.  This
- *     implementation never considers an out-of-range value an error; instead,
- *     it stores the least-significant bits of the converted value in the
- *     destination, e.g. the value 255 for both examples earlier.
- *
- *   - Only single-byte characters are supported, that is, the 'l' modifier
- *     on %s, %[, and %c is not supported.  The GNU extension 'a' modifier is
- *     also not supported.
- *
- *   - %p is not supported.
- */
-bool
-ovs_scan(const char *s, const char *format, ...)
+static bool
+ovs_scan__(const char *s, int *n, const char *format, va_list *args)
 {
     const char *const start = s;
     bool ok = false;
     const char *p;
-    va_list args;
 
-    va_start(args, format);
     p = format;
     while (*p != '\0') {
         struct scan_spec spec;
@@ -1702,24 +1714,24 @@ ovs_scan(const char *s, const char *format, ...)
         }
         switch (c) {
         case 'd':
-            s = scan_int(s, &spec, 10, &args);
+            s = scan_int(s, &spec, 10, args);
             break;
 
         case 'i':
-            s = scan_int(s, &spec, 0, &args);
+            s = scan_int(s, &spec, 0, args);
             break;
 
         case 'o':
-            s = scan_int(s, &spec, 8, &args);
+            s = scan_int(s, &spec, 8, args);
             break;
 
         case 'u':
-            s = scan_int(s, &spec, 10, &args);
+            s = scan_int(s, &spec, 10, args);
             break;
 
         case 'x':
         case 'X':
-            s = scan_int(s, &spec, 16, &args);
+            s = scan_int(s, &spec, 16, args);
             break;
 
         case 'e':
@@ -1727,24 +1739,24 @@ ovs_scan(const char *s, const char *format, ...)
         case 'g':
         case 'E':
         case 'G':
-            s = scan_float(s, &spec, &args);
+            s = scan_float(s, &spec, args);
             break;
 
         case 's':
-            s = scan_string(s, &spec, &args);
+            s = scan_string(s, &spec, args);
             break;
 
         case '[':
-            s = scan_set(s, &spec, &p, &args);
+            s = scan_set(s, &spec, &p, args);
             break;
 
         case 'c':
-            s = scan_chars(s, &spec, &args);
+            s = scan_chars(s, &spec, args);
             break;
 
         case 'n':
             if (spec.type != SCAN_DISCARD) {
-                *va_arg(args, int *) = s - start;
+                *va_arg(*args, int *) = s - start;
             }
             break;
         }
@@ -1753,11 +1765,64 @@ ovs_scan(const char *s, const char *format, ...)
             goto exit;
         }
     }
-    ok = true;
+    if (n) {
+        *n = s - start;
+    }
 
+    ok = true;
 exit:
-    va_end(args);
     return ok;
+}
+
+/* This is an implementation of the standard sscanf() function, with the
+ * following exceptions:
+ *
+ *   - It returns true if the entire format was successfully scanned and
+ *     converted, false if any conversion failed.
+ *
+ *   - The standard doesn't define sscanf() behavior when an out-of-range value
+ *     is scanned, e.g. if a "%"PRIi8 conversion scans "-1" or "0x1ff".  Some
+ *     implementations consider this an error and stop scanning.  This
+ *     implementation never considers an out-of-range value an error; instead,
+ *     it stores the least-significant bits of the converted value in the
+ *     destination, e.g. the value 255 for both examples earlier.
+ *
+ *   - Only single-byte characters are supported, that is, the 'l' modifier
+ *     on %s, %[, and %c is not supported.  The GNU extension 'a' modifier is
+ *     also not supported.
+ *
+ *   - %p is not supported.
+ */
+bool
+ovs_scan(const char *s, const char *format, ...)
+{
+    va_list args;
+    bool res;
+
+    va_start(args, format);
+    res = ovs_scan__(s, NULL, format, &args);
+    va_end(args);
+    return res;
+}
+
+/*
+ * This function is similar to ocs_scan(), extra parameter `n` is added to
+ * return number of scanned characters.
+ */
+bool
+ovs_scan_len(const char *s, int *n, const char *format, ...)
+{
+    va_list args;
+    bool success;
+    int n1;
+
+    va_start(args, format);
+    success = ovs_scan__(s + *n, &n1, format, &args);
+    va_end(args);
+    if (success) {
+        *n = *n + n1;
+    }
+    return success;
 }
 
 void

@@ -18,7 +18,7 @@ openvswitch_sources += \
 openvswitch_headers += \
 	linux/compat/gso.h \
 	linux/compat/include/asm/hash.h \
-	linux/compat/include/asm/percpu.h \
+	linux/compat/include/linux/percpu.h \
 	linux/compat/include/linux/bug.h \
 	linux/compat/include/linux/compiler.h \
 	linux/compat/include/linux/compiler-gcc.h \
@@ -41,6 +41,7 @@ openvswitch_headers += \
 	linux/compat/include/linux/kernel.h \
 	linux/compat/include/linux/list.h \
 	linux/compat/include/linux/log2.h \
+	linux/compat/include/linux/mpls.h \
 	linux/compat/include/linux/net.h \
 	linux/compat/include/linux/random.h \
 	linux/compat/include/linux/netdevice.h \
@@ -70,8 +71,10 @@ openvswitch_headers += \
 	linux/compat/include/net/ip.h \
 	linux/compat/include/net/ip_tunnels.h \
 	linux/compat/include/net/ipv6.h \
+	linux/compat/include/net/mpls.h \
 	linux/compat/include/net/net_namespace.h \
 	linux/compat/include/net/netlink.h \
+	linux/compat/include/net/udp.h \
 	linux/compat/include/net/sock.h \
 	linux/compat/include/net/vxlan.h \
 	linux/compat/include/net/ivxlan.h \

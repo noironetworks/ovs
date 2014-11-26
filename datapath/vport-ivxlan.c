@@ -121,6 +121,8 @@ static inline void ivxlan_parse_header(struct ovs_tunnel_info *tun_info, struct 
 		tun_info->tunnel.ivxlan_flags |= IVXLAN_DL;
 	if (ivxh->u1.word1.forward_exception)
 		tun_info->tunnel.ivxlan_flags |= IVXLAN_FE;
+        //printk(KERN_ERR "parse: flags %x, epg %d\n", tun_info->tunnel.ivxlan_flags,
+        //       tun_info->tunnel.ivxlan_sepg);
 }
 
 /* Called with rcu_read_lock and BH disabled from vxlan_udp_encap_recv. */
@@ -155,7 +157,9 @@ static struct vxlanhdr *ivxlan_udp_encap_parse_hdr(struct sock *sk, struct sk_bu
 	iph = ip_hdr(skb);
 	key = cpu_to_be64(ntohl(ivxh->vx_vni) >> 8);
         /* MUST not zero tun_info */
-        ovs_flow_tun_info_init(&tun_info, iph, key, TUNNEL_KEY, NULL, 0);    
+        ovs_flow_tun_info_init(&tun_info, iph,
+                               udp_hdr(skb)->source, udp_hdr(skb)->dest,
+                               key, TUNNEL_KEY, NULL, 0);    
 	ovs_vport_receive(vport, skb, &tun_info);
 
 	return NULL;
@@ -179,6 +183,8 @@ static void ivxlan_construct_hdr(struct sk_buff *skb, __be32 vni)
 		ivxh->u1.word1.dont_learn_addr_to_tep = 1;
 	if (tun_key->ivxlan_flags & IVXLAN_FE)
 		ivxh->u1.word1.forward_exception = 1;
+        //printk(KERN_ERR "construct: flags %x, epg %d\n", tun_key->ivxlan_flags,
+        //       tun_key->ivxlan_sepg);
 }
 
 /* Called with rcu_read_lock and BH disabled. */
@@ -277,8 +283,6 @@ static int ivxlan_tnl_send(struct vport *vport, struct sk_buff *skb)
 	__be16 src_port;
 	__be32 saddr;
 	__be16 df;
-	int port_min;
-	int port_max;
 	int err;
 
 	if (unlikely(!OVS_CB(skb)->egress_tun_info)) {
@@ -302,11 +306,10 @@ static int ivxlan_tnl_send(struct vport *vport, struct sk_buff *skb)
 	}
 
 	df = tun_key->tun_flags & TUNNEL_DONT_FRAGMENT ? htons(IP_DF) : 0;
+	skb->ignore_df = 1;
 
-	skb->local_df = 1;
+        src_port = udp_flow_src_port(net, skb, 0, 0, true);
 
-	inet_get_local_port_range(net, &port_min, &port_max);
-	src_port = vxlan_src_port(port_min, port_max, skb);
 	if (tun_key->ivxlan_sepg == 0)
 	    tun_key->ivxlan_sepg = ivxlan_port->ivxlan_sepg;
 	err = vxlan_xmit_skb(ivxlan_port->vs, rt, skb,

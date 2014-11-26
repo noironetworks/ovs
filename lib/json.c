@@ -461,6 +461,7 @@ json_hash_object(const struct shash *object, size_t basis)
         basis = hash_string(node->name, basis);
         basis = json_hash(node->data, basis);
     }
+    free(nodes);
     return basis;
 }
 
@@ -745,13 +746,14 @@ static const char *
 json_lex_4hex(const char *cp, const char *end, int *valuep)
 {
     unsigned int value;
+    bool ok;
 
     if (cp + 4 > end) {
         return "quoted string ends within \\u escape";
     }
 
-    value = hexits_value(cp, 4, NULL);
-    if (value == UINT_MAX) {
+    value = hexits_value(cp, 4, &ok);
+    if (!ok) {
         return "malformed \\u escape";
     }
     if (!value) {

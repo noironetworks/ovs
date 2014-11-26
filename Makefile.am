@@ -11,11 +11,13 @@ SUBDIRS = datapath
 
 AM_CPPFLAGS = $(SSL_CFLAGS)
 AM_LDFLAGS = $(SSL_LDFLAGS)
+AM_LDFLAGS += $(OVS_LDFLAGS)
 
 if WIN32
 AM_CPPFLAGS += -I $(top_srcdir)/include/windows
 AM_CPPFLAGS += -I $(top_srcdir)/datapath-windows/include
 AM_CPPFLAGS += $(PTHREAD_INCLUDES)
+AM_CPPFLAGS += $(MSVC_CFLAGS)
 AM_LDFLAGS += $(PTHREAD_LDFLAGS)
 endif
 
@@ -28,6 +30,7 @@ AM_CPPFLAGS += $(SSL_INCLUDES)
 
 AM_CFLAGS = -Wstrict-prototypes
 AM_CFLAGS += $(WARNING_FLAGS)
+AM_CFLAGS += $(OVS_CFLAGS)
 
 if NDEBUG
 AM_CPPFLAGS += -DNDEBUG
@@ -59,30 +62,36 @@ CLEAN_LOCAL =
 DISTCLEANFILES =
 PYCOV_CLEAN_FILES = build-aux/check-structs,cover
 EXTRA_DIST = \
-	CONTRIBUTING \
-	CodingStyle \
-	DESIGN \
-	FAQ \
-	INSTALL \
-	INSTALL.Debian \
-        INSTALL.DPDK \
-	INSTALL.Fedora \
-	INSTALL.KVM \
-	INSTALL.Libvirt \
-	INSTALL.NetBSD \
-	INSTALL.RHEL \
-	INSTALL.SSL \
-	INSTALL.XenServer \
-	INSTALL.userspace \
-	INSTALL.Windows \
-	IntegrationGuide \
+	CONTRIBUTING.md \
+	CodingStyle.md \
+	DESIGN.md \
+	FAQ.md \
+	INSTALL.md \
+	INSTALL.Debian.md \
+	INSTALL.Docker.md \
+	INSTALL.DPDK.md \
+	INSTALL.Fedora.md \
+	INSTALL.KVM.md \
+	INSTALL.Libvirt.md \
+	INSTALL.NetBSD.md \
+	INSTALL.RHEL.md \
+	INSTALL.SSL.md \
+	INSTALL.XenServer.md \
+	INSTALL.userspace.md \
+	INSTALL.Windows.md \
+	IntegrationGuide.md \
 	NOTICE \
-	OPENFLOW-1.1+ \
-	PORTING \
-	README-lisp \
-	REPORTING-BUGS \
-	TODO \
-	WHY-OVS \
+	OPENFLOW-1.1+.md \
+	PORTING.md \
+	README.md \
+	README-lisp.md \
+	README-native-tunneling.md \
+	REPORTING-BUGS.md \
+	TODO.md \
+	.travis.yml \
+	.travis/build.sh \
+	.travis/prepare.sh \
+	WHY-OVS.md \
 	boot.sh \
 	build-aux/cccl \
 	build-aux/sodepends.pl \
@@ -117,8 +126,10 @@ scripts_SCRIPTS =
 scripts_DATA =
 SUFFIXES =
 check_DATA =
+pkgconfig_DATA =
 
 scriptsdir = $(pkgdatadir)/scripts
+pkgconfigdir = $(libdir)/pkgconfig
 
 # This ensures that files added to EXTRA_DIST are always distributed,
 # even if they are inside an Automake if...endif conditional block that is
@@ -131,7 +142,7 @@ ro_shell = printf '\043 Generated automatically -- do not modify!    -*- buffer-
 
 SUFFIXES += .in
 .in:
-	$(PERL) $(srcdir)/build-aux/soexpand.pl -I$(srcdir) < $< | \
+	$(AM_V_GEN)$(PERL) $(srcdir)/build-aux/soexpand.pl -I$(srcdir) < $< | \
 	    sed \
 		-e 's,[@]PKIDIR[@],$(PKIDIR),g' \
                 -e 's,[@]LOGDIR[@],$(LOGDIR),g' \
@@ -150,7 +161,7 @@ SUFFIXES += .in
 	@if head -n 1 $@.tmp | grep '#!' > /dev/null; then \
 	    chmod +x $@.tmp; \
 	fi
-	$(AM_V_GEN) mv $@.tmp $@
+	$(AM_V_at) mv $@.tmp $@
 
 .PHONY: clean-pycov
 clean-pycov:
@@ -217,7 +228,7 @@ printf-check:
 	then \
 	    echo "See above for list of violations of the rule that"; \
 	    echo "'z', 't', 'j', 'hh' printf() type modifiers are"; \
-	    echo "forbidden.  See CodingStyle for replacements."; \
+	    echo "forbidden.  See CodingStyle.md for replacements."; \
 	    exit 1; \
 	fi
 .PHONY: printf-check
@@ -286,6 +297,16 @@ $(srcdir)/manpages.mk: $(MAN_ROOTS) build-aux/sodepends.pl
 		mv $(@F).tmp $@; \
 	fi
 CLEANFILES += manpage-dep-check
+
+if VSTUDIO_DDK
+ALL_LOCAL += ovsext_make
+ovsext_make: datapath-windows/ovsext.sln
+	MSBuild.exe datapath-windows/ovsext.sln /target:Build /property:Configuration="$(VSTUDIO_CONFIG)"
+
+CLEAN_LOCAL += ovsext_clean
+ovsext_clean: datapath-windows/ovsext.sln
+	MSBuild.exe datapath-windows/ovsext.sln /target:Clean /property:Configuration="$(VSTUDIO_CONFIG)"
+endif
 
 dist-hook: $(DIST_HOOKS)
 all-local: $(ALL_LOCAL)

@@ -38,9 +38,12 @@
 #include "packet-dpif.h"
 #include "packets.h"
 #include "poll-loop.h"
+#include "route-table.h"
 #include "shash.h"
 #include "sset.h"
 #include "timeval.h"
+#include "tnl-arp-cache.h"
+#include "tnl-ports.h"
 #include "util.h"
 #include "valgrind.h"
 #include "vlog.h"
@@ -59,8 +62,8 @@ COVERAGE_DEFINE(dpif_purge);
 COVERAGE_DEFINE(dpif_execute_with_help);
 
 static const struct dpif_class *base_dpif_classes[] = {
-#ifdef __linux__
-    &dpif_linux_class,
+#if defined(__linux__) || defined(_WIN32)
+    &dpif_netlink_class,
 #endif
     &dpif_netdev_class,
 };
@@ -113,6 +116,10 @@ dp_initialize(void)
             dp_register_provider(base_dpif_classes[i]);
         }
         dpctl_unixctl_register();
+        tnl_port_map_init();
+        tnl_arp_cache_init();
+        route_table_register();
+
         ovsthread_once_done(&once);
     }
 }
@@ -402,12 +409,13 @@ dpif_close(struct dpif *dpif)
 }
 
 /* Performs periodic work needed by 'dpif'. */
-void
+bool
 dpif_run(struct dpif *dpif)
 {
     if (dpif->dpif_class->run) {
-        dpif->dpif_class->run(dpif);
+        return dpif->dpif_class->run(dpif);
     }
+    return false;
 }
 
 /* Arranges for poll_block() to wake up when dp_run() needs to be called for
@@ -991,17 +999,19 @@ struct dpif_execute_helper_aux {
  * meaningful. */
 static void
 dpif_execute_helper_cb(void *aux_, struct dpif_packet **packets, int cnt,
-                       struct pkt_metadata *md,
                        const struct nlattr *action, bool may_steal OVS_UNUSED)
 {
     struct dpif_execute_helper_aux *aux = aux_;
     int type = nl_attr_type(action);
-    struct ofpbuf * packet = &packets[0]->ofpbuf;
+    struct ofpbuf *packet = &packets[0]->ofpbuf;
+    struct pkt_metadata *md = &packets[0]->md;
 
     ovs_assert(cnt == 1);
 
     switch ((enum ovs_action_attr)type) {
     case OVS_ACTION_ATTR_OUTPUT:
+    case OVS_ACTION_ATTR_TUNNEL_PUSH:
+    case OVS_ACTION_ATTR_TUNNEL_POP:
     case OVS_ACTION_ATTR_USERSPACE:
     case OVS_ACTION_ATTR_RECIRC: {
         struct dpif_execute execute;
@@ -1026,6 +1036,7 @@ dpif_execute_helper_cb(void *aux_, struct dpif_packet **packets, int cnt,
         execute.packet = packet;
         execute.md = *md;
         execute.needs_help = false;
+        execute.probe = false;
         aux->error = dpif_execute(aux->dpif, &execute);
         log_execute_message(aux->dpif, &execute, true, aux->error);
 
@@ -1041,6 +1052,7 @@ dpif_execute_helper_cb(void *aux_, struct dpif_packet **packets, int cnt,
     case OVS_ACTION_ATTR_PUSH_MPLS:
     case OVS_ACTION_ATTR_POP_MPLS:
     case OVS_ACTION_ATTR_SET:
+    case OVS_ACTION_ATTR_SET_MASKED:
     case OVS_ACTION_ATTR_SAMPLE:
     case OVS_ACTION_ATTR_UNSPEC:
     case __OVS_ACTION_ATTR_MAX:
@@ -1062,15 +1074,17 @@ dpif_execute_with_help(struct dpif *dpif, struct dpif_execute *execute)
     COVERAGE_INC(dpif_execute_with_help);
 
     packet.ofpbuf = *execute->packet;
+    packet.md = execute->md;
     pp = &packet;
 
-    odp_execute_actions(&aux, &pp, 1, false, &execute->md, execute->actions,
+    odp_execute_actions(&aux, &pp, 1, false, execute->actions,
                         execute->actions_len, dpif_execute_helper_cb);
 
     /* Even though may_steal is set to false, some actions could modify or
      * reallocate the ofpbuf memory. We need to pass those changes to the
      * caller */
     *execute->packet = packet.ofpbuf;
+    execute->md = packet.md;
 
     return aux.error;
 }
@@ -1151,11 +1165,11 @@ dpif_operate(struct dpif *dpif, struct dpif_op **ops, size_t n_ops)
                     struct dpif_flow_get *get = &op->u.flow_get;
 
                     COVERAGE_INC(dpif_flow_get);
-                    log_flow_get_message(dpif, get, error);
-
                     if (error) {
                         memset(get->flow, 0, sizeof *get->flow);
                     }
+                    log_flow_get_message(dpif, get, error);
+
                     break;
                 }
 
@@ -1299,6 +1313,24 @@ dpif_print_packet(struct dpif *dpif, struct dpif_upcall *upcall)
     }
 }
 
+/* If 'dpif' creates its own I/O polling threads, refreshes poll threads
+ * configuration. */
+int
+dpif_poll_threads_set(struct dpif *dpif, unsigned int n_rxqs,
+                      const char *cmask)
+{
+    int error = 0;
+
+    if (dpif->dpif_class->poll_threads_set) {
+        error = dpif->dpif_class->poll_threads_set(dpif, n_rxqs, cmask);
+        if (error) {
+            log_operation(dpif, "poll_threads_set", error);
+        }
+    }
+
+    return error;
+}
+
 /* Polls for an upcall from 'dpif' for an upcall handler.  Since there
  * there can be multiple poll loops, 'handler_id' is needed as index to
  * identify the corresponding poll loop.  If successful, stores the upcall
@@ -1355,6 +1387,22 @@ dpif_recv_wait(struct dpif *dpif, uint32_t handler_id)
     if (dpif->dpif_class->recv_wait) {
         dpif->dpif_class->recv_wait(dpif, handler_id);
     }
+}
+
+/*
+ * Return the datapath version. Caller is responsible for freeing
+ * the string.
+ */
+char *
+dpif_get_dp_version(const struct dpif *dpif)
+{
+    char *version = NULL;
+
+    if (dpif->dpif_class->get_datapath_version) {
+        version = dpif->dpif_class->get_datapath_version();
+    }
+
+    return version;
 }
 
 /* Obtains the NetFlow engine type and engine ID for 'dpif' into '*engine_type'
@@ -1483,7 +1531,7 @@ static void
 log_flow_put_message(struct dpif *dpif, const struct dpif_flow_put *put,
                      int error)
 {
-    if (should_log_flow_message(error)) {
+    if (should_log_flow_message(error) && !(put->flags & DPIF_FP_PROBE)) {
         struct ds s;
 
         ds_init(&s);
@@ -1523,7 +1571,7 @@ log_flow_del_message(struct dpif *dpif, const struct dpif_flow_del *del,
  * called after the dpif_provider's '->execute' function, which is allowed to
  * modify execute->packet and execute->md.  In practice, though:
  *
- *     - dpif-linux doesn't modify execute->packet or execute->md.
+ *     - dpif-netlink doesn't modify execute->packet or execute->md.
  *
  *     - dpif-netdev does modify them but it is less likely to have problems
  *       because it is built into ovs-vswitchd and cannot have version skew,
@@ -1535,7 +1583,8 @@ static void
 log_execute_message(struct dpif *dpif, const struct dpif_execute *execute,
                     bool subexecute, int error)
 {
-    if (!(error ? VLOG_DROP_WARN(&error_rl) : VLOG_DROP_DBG(&dpmsg_rl))) {
+    if (!(error ? VLOG_DROP_WARN(&error_rl) : VLOG_DROP_DBG(&dpmsg_rl))
+        && !execute->probe) {
         struct ds ds = DS_EMPTY_INITIALIZER;
         char *packet;
 
@@ -1568,4 +1617,11 @@ log_flow_get_message(const struct dpif *dpif, const struct dpif_flow_get *get,
                          &get->flow->stats,
                          get->flow->actions, get->flow->actions_len);
     }
+}
+
+bool
+dpif_supports_tnl_push_pop(const struct dpif *dpif)
+{
+   return !strcmp(dpif->dpif_class->type, "netdev") ||
+          !strcmp(dpif->dpif_class->type, "dummy");
 }

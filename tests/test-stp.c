@@ -15,7 +15,7 @@
  */
 
 #include <config.h>
-
+#undef NDEBUG
 #include "stp.h"
 #include <assert.h>
 #include <ctype.h>
@@ -24,9 +24,9 @@
 #include <stdarg.h>
 #include <stdlib.h>
 #include "ofpbuf.h"
+#include "ovstest.h"
 #include "packets.h"
 #include "vlog.h"
-#include "ovstest.h"
 
 struct bpdu {
     int port_no;
@@ -316,10 +316,9 @@ simulate(struct test_case *tc, int granularity)
     }
 }
 
-static void
+NO_RETURN static void
 err(const char *message, ...)
-    PRINTF_FORMAT(1, 2)
-    NO_RETURN;
+    PRINTF_FORMAT(1, 2);
 
 static void
 err(const char *message, ...)
@@ -666,6 +665,7 @@ test_stp_main(int argc, char *argv[])
         free(bridge);
     }
     free(tc);
+    fclose(input_file);
 }
 
 OVSTEST_REGISTER("test-stp", test_stp_main);

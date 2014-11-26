@@ -19,6 +19,7 @@
 
 #include <stdbool.h>
 #include <stdint.h>
+#include <stdlib.h>
 #include "ovs-rcu.h"
 #include "util.h"
 
@@ -46,10 +47,19 @@
  * 'size', or update the 'priority' value of an entry, but only if that does
  * not change the ordering of the entries.  Writers will never change the 'ptr'
  * values, or decrement the 'size' on a copy that readers have access to.
+ *
+ * Most modifications are internally staged at the 'temp' vector, from which
+ * they can be published at 'impl' by calling pvector_publish().  This saves
+ * unnecessary memory allocations when many changes are done back-to-back.
+ * 'temp' may contain NULL pointers and it may be in unsorted order.  It is
+ * sorted before it is published at 'impl', which also removes the NULLs from
+ * the published vector.
+ *
+ * Clients should not use priority INT_MIN.
  */
 
 struct pvector_entry {
-    unsigned int priority;
+    int priority;
     void *ptr;
 };
 
@@ -66,20 +76,24 @@ struct pvector_impl {
 /* Concurrent priority vector. */
 struct pvector {
     OVSRCU_TYPE(struct pvector_impl *) impl;
+    struct pvector_impl *temp;
 };
 
 /* Initialization. */
 void pvector_init(struct pvector *);
 void pvector_destroy(struct pvector *);
 
-/* Count. */
+/* Insertion and deletion.  These work on 'temp'.  */
+void pvector_insert(struct pvector *, void *, int priority);
+void pvector_change_priority(struct pvector *, void *, int priority);
+void pvector_remove(struct pvector *, void *);
+
+/* Make the modified pvector available for iteration. */
+static inline void pvector_publish(struct pvector *);
+
+/* Count.  These operate on the published pvector. */
 static inline size_t pvector_count(const struct pvector *);
 static inline bool pvector_is_empty(const struct pvector *);
-
-/* Insertion and deletion. */
-void pvector_insert(struct pvector *, void *, unsigned int);
-void pvector_change_priority(struct pvector *, void *, unsigned int);
-void pvector_remove(struct pvector *, void *);
 
 /* Iteration.
  *
@@ -135,20 +149,27 @@ static inline struct pvector_cursor pvector_cursor_init(const struct pvector *,
                                                         size_t n_ahead,
                                                         size_t obj_size);
 static inline void *pvector_cursor_next(struct pvector_cursor *,
-                                        int64_t stop_at_priority,
+                                        int stop_at_priority,
                                         size_t n_ahead, size_t obj_size);
 static inline void pvector_cursor_lookahead(const struct pvector_cursor *,
                                             int n, size_t size);
 
 #define PVECTOR_FOR_EACH(PTR, PVECTOR)                                  \
     for (struct pvector_cursor cursor__ = pvector_cursor_init(PVECTOR, 0, 0); \
-         ((PTR) = pvector_cursor_next(&cursor__, -1, 0, 0)) != NULL; )
+         ((PTR) = pvector_cursor_next(&cursor__, INT_MIN, 0, 0)) != NULL; )
 
 /* Loop while priority is higher than 'PRIORITY' and prefetch objects
  * of size 'SZ' 'N' objects ahead from the current object. */
 #define PVECTOR_FOR_EACH_PRIORITY(PTR, PRIORITY, N, SZ, PVECTOR)        \
     for (struct pvector_cursor cursor__ = pvector_cursor_init(PVECTOR, N, SZ); \
          ((PTR) = pvector_cursor_next(&cursor__, PRIORITY, N, SZ)) != NULL; )
+
+#define PVECTOR_CURSOR_FOR_EACH(PTR, CURSOR, PVECTOR)                \
+    for (*(CURSOR) = pvector_cursor_init(PVECTOR, 0, 0);             \
+         ((PTR) = pvector_cursor_next(CURSOR, INT_MIN, 0, 0)) != NULL; )
+
+#define PVECTOR_CURSOR_FOR_EACH_CONTINUE(PTR, CURSOR)                   \
+    for (; ((PTR) = pvector_cursor_next(CURSOR, INT_MIN, 0, 0)) != NULL; )
 
 
 /* Inline implementations. */
@@ -176,7 +197,7 @@ pvector_cursor_init(const struct pvector *pvec,
 }
 
 static inline void *pvector_cursor_next(struct pvector_cursor *cursor,
-                                        int64_t stop_at_priority,
+                                        int stop_at_priority,
                                         size_t n_ahead, size_t obj_size)
 {
     if (++cursor->entry_idx < cursor->size &&
@@ -205,6 +226,16 @@ static inline size_t pvector_count(const struct pvector *pvec)
 static inline bool pvector_is_empty(const struct pvector *pvec)
 {
     return pvector_count(pvec) == 0;
+}
+
+void pvector_publish__(struct pvector *);
+
+/* Make the modified pvector available for iteration. */
+static inline void pvector_publish(struct pvector *pvec)
+{
+    if (pvec->temp) {
+        pvector_publish__(pvec);
+    }
 }
 
 #endif /* pvector.h */

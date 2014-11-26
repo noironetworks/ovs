@@ -1,4 +1,4 @@
-/* Copyright (c) 2008, 2011, 2012, 2013 The Board of Trustees of The Leland Stanford
+/* Copyright (c) 2008, 2011, 2012, 2013, 2014 The Board of Trustees of The Leland Stanford
  * Junior University
  *
  * We are making the OpenFlow specification and associated documentation
@@ -52,7 +52,7 @@
 #ifndef OPENFLOW_11_H
 #define OPENFLOW_11_H 1
 
-#include "openflow/openflow-common.h"
+#include <openflow/openflow-common.h>
 
 /* OpenFlow 1.1 uses 32-bit port numbers.  Open vSwitch, for now, uses OpenFlow
  * 1.0 port numbers internally.  We map them to OpenFlow 1.0 as follows:
@@ -340,7 +340,7 @@ struct ofp11_flow_mod {
                                     output group. A value of OFPG11_ANY
                                     indicates no restriction. */
     ovs_be16 flags;              /* One of OFPFF_*. */
-    uint8_t pad[2];
+    ovs_be16 importance;         /* Eviction precedence (OF1.4+). */
     /* Followed by an ofp11_match structure. */
     /* Followed by an instruction set. */
 };
@@ -451,11 +451,12 @@ struct ofp11_flow_stats {
     ovs_be16 idle_timeout;     /* Number of seconds idle before expiration. */
     ovs_be16 hard_timeout;     /* Number of seconds before expiration. */
     ovs_be16 flags;            /* OF 1.3: Set of OFPFF*. */
-    uint8_t  pad2[4];          /* Align to 64-bits. */
+    ovs_be16 importance;       /* Eviction precedence (OF1.4+). */
+    uint8_t  pad2[2];          /* Align to 64-bits. */
     ovs_be64 cookie;           /* Opaque controller-issued identifier. */
     ovs_be64 packet_count;     /* Number of packets in flow. */
     ovs_be64 byte_count;       /* Number of bytes in flow. */
-    /* Open Flow version specific match */
+    /* OpenFlow version specific match */
     /* struct ofp11_instruction instructions[0];  Instruction set. */
 };
 OFP_ASSERT(sizeof(struct ofp11_flow_stats) == 48);

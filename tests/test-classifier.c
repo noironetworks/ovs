@@ -26,26 +26,24 @@
  */
 
 #include <config.h>
+#undef NDEBUG
+#include "classifier.h"
+#include <assert.h>
 #include <errno.h>
 #include <limits.h>
 #include "byte-order.h"
+#include "classifier-private.h"
 #include "command-line.h"
 #include "flow.h"
 #include "ofp-util.h"
+#include "ovstest.h"
 #include "packets.h"
 #include "random.h"
 #include "unaligned.h"
-#include "ovstest.h"
-#undef NDEBUG
-#include <assert.h>
-
-/* We need access to classifier internal definitions to be able to fully
- * test them.  The alternative would be to expose them all in the classifier
- * API. */
-#include "classifier.c"
+#include "util.h"
 
 /* Fields in a rule. */
-#define CLS_FIELDS                                                  \
+#define CLS_FIELDS                        \
     /*        struct flow    all-caps */  \
     /*        member name    name     */  \
     /*        -----------    -------- */  \
@@ -109,8 +107,7 @@ test_rule_destroy(struct test_rule *rule)
     }
 }
 
-static struct test_rule *make_rule(int wc_fields, unsigned int priority,
-                                   int value_pat);
+static struct test_rule *make_rule(int wc_fields, int priority, int value_pat);
 static void free_rule(struct test_rule *);
 static struct test_rule *clone_rule(const struct test_rule *);
 
@@ -157,7 +154,7 @@ tcls_insert(struct tcls *tcls, const struct test_rule *rule)
         const struct cls_rule *pos = &tcls->rules[i]->cls_rule;
         if (cls_rule_equal(pos, &rule->cls_rule)) {
             /* Exact match. */
-            free_rule(tcls->rules[i]);
+            ovsrcu_postpone(free_rule, tcls->rules[i]);
             tcls->rules[i] = clone_rule(rule);
             return tcls->rules[i];
         } else if (pos->priority < rule->cls_rule.priority) {
@@ -311,9 +308,11 @@ static ovs_be16 dl_type_values[]
 static ovs_be16 tp_src_values[] = { CONSTANT_HTONS(49362),
                                     CONSTANT_HTONS(80) };
 static ovs_be16 tp_dst_values[] = { CONSTANT_HTONS(6667), CONSTANT_HTONS(22) };
-static uint8_t dl_src_values[][6] = { { 0x00, 0x02, 0xe3, 0x0f, 0x80, 0xa4 },
+static uint8_t dl_src_values[][ETH_ADDR_LEN] = {
+                                      { 0x00, 0x02, 0xe3, 0x0f, 0x80, 0xa4 },
                                       { 0x5e, 0x33, 0x7f, 0x5f, 0x1e, 0x99 } };
-static uint8_t dl_dst_values[][6] = { { 0x4a, 0x27, 0x71, 0xae, 0x64, 0xc1 },
+static uint8_t dl_dst_values[][ETH_ADDR_LEN] = {
+                                      { 0x4a, 0x27, 0x71, 0xae, 0x64, 0xc1 },
                                       { 0xff, 0xff, 0xff, 0xff, 0xff, 0xff } };
 static uint8_t nw_proto_values[] = { IPPROTO_TCP, IPPROTO_ICMP };
 static uint8_t nw_dscp_values[] = { 48, 0 };
@@ -406,7 +405,7 @@ compare_classifiers(struct classifier *cls, struct tcls *tcls)
 
     assert(classifier_count(cls) == tcls->n_rules);
     for (i = 0; i < confidence; i++) {
-        struct cls_rule *cr0, *cr1, *cr2;
+        const struct cls_rule *cr0, *cr1, *cr2;
         struct flow flow;
         struct flow_wildcards wc;
         unsigned int x;
@@ -454,9 +453,11 @@ destroy_classifier(struct classifier *cls)
 {
     struct test_rule *rule;
 
-    CLS_FOR_EACH_SAFE (rule, cls_rule, cls) {
-        classifier_remove(cls, &rule->cls_rule);
-        free_rule(rule);
+    classifier_defer(cls);
+    CLS_FOR_EACH (rule, cls_rule, cls) {
+        if (classifier_remove(cls, &rule->cls_rule)) {
+            ovsrcu_postpone(free_rule, rule);
+        }
     }
     classifier_destroy(cls);
 }
@@ -465,13 +466,13 @@ static void
 pvector_verify(const struct pvector *pvec)
 {
     void *ptr OVS_UNUSED;
-    unsigned int priority, prev_priority = UINT_MAX;
+    int prev_priority = INT_MAX;
 
     PVECTOR_FOR_EACH (ptr, pvec) {
-        priority = cursor__.vector[cursor__.entry_idx].priority;
+        int priority = cursor__.vector[cursor__.entry_idx].priority;
         if (priority > prev_priority) {
-            VLOG_ABORT("Priority vector is out of order (%u > %u)",
-                       priority, prev_priority);
+            ovs_abort(0, "Priority vector is out of order (%u > %u)",
+                      priority, prev_priority);
         }
         prev_priority = priority;
     }
@@ -496,6 +497,7 @@ trie_verify(const rcu_trie_ptr *trie, unsigned int ofs, unsigned int n_bits)
 
 static void
 verify_tries(struct classifier *cls)
+    OVS_NO_THREAD_SAFETY_ANALYSIS
 {
     unsigned int n_rules = 0;
     int i;
@@ -504,14 +506,13 @@ verify_tries(struct classifier *cls)
         n_rules += trie_verify(&cls->tries[i].root, 0,
                                cls->tries[i].field->n_bits);
     }
-    ovs_mutex_lock(&cls->mutex);
     assert(n_rules <= cls->n_rules);
-    ovs_mutex_unlock(&cls->mutex);
 }
 
 static void
 check_tables(const struct classifier *cls, int n_tables, int n_rules,
              int n_dups)
+    OVS_NO_THREAD_SAFETY_ANALYSIS
 {
     const struct cls_subtable *table;
     struct test_rule *test_rule;
@@ -523,7 +524,7 @@ check_tables(const struct classifier *cls, int n_tables, int n_rules,
     pvector_verify(&cls->subtables);
     CMAP_FOR_EACH (table, cmap_node, &cls->subtables_map) {
         const struct cls_match *head;
-        unsigned int max_priority = 0;
+        int max_priority = INT_MIN;
         unsigned int max_count = 0;
         bool found = false;
         const struct cls_subtable *iter;
@@ -532,26 +533,23 @@ check_tables(const struct classifier *cls, int n_tables, int n_rules,
         PVECTOR_FOR_EACH (iter, &cls->subtables) {
             if (iter == table) {
                 if (found) {
-                    VLOG_ABORT("Subtable %p duplicated in 'subtables'.",
-                               table);
+                    ovs_abort(0, "Subtable %p duplicated in 'subtables'.",
+                              table);
                 }
                 found = true;
             }
         }
         if (!found) {
-            VLOG_ABORT("Subtable %p not found from 'subtables'.", table);
+            ovs_abort(0, "Subtable %p not found from 'subtables'.", table);
         }
 
         assert(!cmap_is_empty(&table->rules));
-
-        ovs_mutex_lock(&cls->mutex);
         assert(trie_verify(&table->ports_trie, 0, table->ports_mask_len)
-               == (table->ports_mask_len ? table->n_rules : 0));
-        ovs_mutex_unlock(&cls->mutex);
+               == (table->ports_mask_len ? cmap_count(&table->rules) : 0));
 
         found_tables++;
         CMAP_FOR_EACH (head, cmap_node, &table->rules) {
-            unsigned int prev_priority = UINT_MAX;
+            int prev_priority = INT_MAX;
             const struct cls_match *rule;
 
             if (head->priority > max_priority) {
@@ -562,25 +560,19 @@ check_tables(const struct classifier *cls, int n_tables, int n_rules,
             }
 
             found_rules++;
-            ovs_mutex_lock(&cls->mutex);
-            LIST_FOR_EACH (rule, list, &head->list) {
+            RCULIST_FOR_EACH (rule, list, &head->list) {
                 assert(rule->priority < prev_priority);
                 assert(rule->priority <= table->max_priority);
 
                 prev_priority = rule->priority;
                 found_rules++;
                 found_dups++;
-                ovs_mutex_unlock(&cls->mutex);
                 assert(classifier_find_rule_exactly(cls, rule->cls_rule)
                        == rule->cls_rule);
-                ovs_mutex_lock(&cls->mutex);
             }
-            ovs_mutex_unlock(&cls->mutex);
         }
-        ovs_mutex_lock(&cls->mutex);
         assert(table->max_priority == max_priority);
         assert(table->max_count == max_count);
-        ovs_mutex_unlock(&cls->mutex);
     }
 
     assert(found_tables == cmap_count(&cls->subtables_map));
@@ -596,7 +588,7 @@ check_tables(const struct classifier *cls, int n_tables, int n_rules,
 }
 
 static struct test_rule *
-make_rule(int wc_fields, unsigned int priority, int value_pat)
+make_rule(int wc_fields, int priority, int value_pat)
 {
     const struct cls_field *f;
     struct test_rule *rule;
@@ -641,7 +633,9 @@ make_rule(int wc_fields, unsigned int priority, int value_pat)
     }
 
     rule = xzalloc(sizeof *rule);
-    cls_rule_init(&rule->cls_rule, &match, wc_fields ? priority : UINT_MAX);
+    cls_rule_init(&rule->cls_rule, &match, wc_fields
+                  ? (priority == INT_MIN ? priority + 1 : priority)
+                  : INT_MAX);
     return rule;
 }
 
@@ -664,11 +658,11 @@ free_rule(struct test_rule *rule)
 }
 
 static void
-shuffle(unsigned int *p, size_t n)
+shuffle(int *p, size_t n)
 {
     for (; n > 1; n--, p++) {
-        unsigned int *q = &p[random_range(n)];
-        unsigned int tmp = *p;
+        int *q = &p[random_range(n)];
+        int tmp = *p;
         *p = *q;
         *q = tmp;
     }
@@ -752,7 +746,7 @@ test_single_rule(int argc OVS_UNUSED, char *argv[] OVS_UNUSED)
         assert(tcls_is_empty(&tcls));
         compare_classifiers(&cls, &tcls);
 
-        free_rule(rule);
+        ovsrcu_postpone(free_rule, rule);
         classifier_destroy(&cls);
         tcls_destroy(&tcls);
     }
@@ -789,9 +783,11 @@ test_rule_replacement(int argc OVS_UNUSED, char *argv[] OVS_UNUSED)
 
         assert(test_rule_from_cls_rule(
                    classifier_replace(&cls, &rule2->cls_rule)) == rule1);
-        free_rule(rule1);
+        ovsrcu_postpone(free_rule, rule1);
         compare_classifiers(&cls, &tcls);
         check_tables(&cls, 1, 1, 0);
+        classifier_defer(&cls);
+        classifier_remove(&cls, &rule2->cls_rule);
 
         tcls_destroy(&tcls);
         destroy_classifier(&cls);
@@ -927,11 +923,11 @@ test_many_rules_in_one_list (int argc OVS_UNUSED, char *argv[] OVS_UNUSED)
                 check_tables(&cls, n > 0, n, n - 1);
             }
 
+            classifier_defer(&cls);
             for (i = 0; i < N_RULES; i++) {
-                if (rules[i]->cls_rule.cls_match) {
-                    classifier_remove(&cls, &rules[i]->cls_rule);
+                if (classifier_remove(&cls, &rules[i]->cls_rule)) {
+                    ovsrcu_postpone(free_rule, rules[i]);
                 }
-                free_rule(rules[i]);
             }
             classifier_destroy(&cls);
             tcls_destroy(&tcls);
@@ -995,7 +991,7 @@ test_many_rules_in_one_table(int argc OVS_UNUSED, char *argv[] OVS_UNUSED)
         tcls_init(&tcls);
 
         for (i = 0; i < N_RULES; i++) {
-            unsigned int priority = random_uint32();
+            int priority = random_range(INT_MAX);
 
             do {
                 value_pats[i] = random_uint32() & value_mask;
@@ -1014,7 +1010,7 @@ test_many_rules_in_one_table(int argc OVS_UNUSED, char *argv[] OVS_UNUSED)
             tcls_remove(&tcls, tcls_rules[i]);
             classifier_remove(&cls, &rules[i]->cls_rule);
             compare_classifiers(&cls, &tcls);
-            free_rule(rules[i]);
+            ovsrcu_postpone(free_rule, rules[i]);
 
             check_tables(&cls, i < N_RULES - 1, N_RULES - (i + 1), 0);
         }
@@ -1042,13 +1038,13 @@ test_many_rules_in_n_tables(int n_tables)
     }
 
     for (iteration = 0; iteration < 30; iteration++) {
-        unsigned int priorities[MAX_RULES];
+        int priorities[MAX_RULES];
         struct classifier cls;
         struct tcls tcls;
 
         random_set_seed(iteration + 1);
         for (i = 0; i < MAX_RULES; i++) {
-            priorities[i] = i * 129;
+            priorities[i] = (i * 129) & INT_MAX;
         }
         shuffle(priorities, ARRAY_SIZE(priorities));
 
@@ -1058,7 +1054,7 @@ test_many_rules_in_n_tables(int n_tables)
 
         for (i = 0; i < MAX_RULES; i++) {
             struct test_rule *rule;
-            unsigned int priority = priorities[i];
+            int priority = priorities[i];
             int wcf = wcfs[random_range(n_tables)];
             int value_pat = random_uint32() & ((1u << CLS_N_FIELDS) - 1);
             rule = make_rule(wcf, priority, value_pat);
@@ -1074,10 +1070,10 @@ test_many_rules_in_n_tables(int n_tables)
 
             target = clone_rule(tcls.rules[random_range(tcls.n_rules)]);
 
-            CLS_FOR_EACH_TARGET_SAFE (rule, cls_rule, &cls,
-                                      &target->cls_rule) {
-                classifier_remove(&cls, &rule->cls_rule);
-                free_rule(rule);
+            CLS_FOR_EACH_TARGET (rule, cls_rule, &cls, &target->cls_rule) {
+                if (classifier_remove(&cls, &rule->cls_rule)) {
+                    ovsrcu_postpone(free_rule, rule);
+                }
             }
 
             tcls_delete_matches(&tcls, &target->cls_rule);
@@ -1403,21 +1399,21 @@ test_minimask_combine(int argc OVS_UNUSED, char *argv[] OVS_UNUSED)
 
 static const struct command commands[] = {
     /* Classifier tests. */
-    {"empty", 0, 0, test_empty},
-    {"destroy-null", 0, 0, test_destroy_null},
-    {"single-rule", 0, 0, test_single_rule},
-    {"rule-replacement", 0, 0, test_rule_replacement},
-    {"many-rules-in-one-list", 0, 0, test_many_rules_in_one_list},
-    {"many-rules-in-one-table", 0, 0, test_many_rules_in_one_table},
-    {"many-rules-in-two-tables", 0, 0, test_many_rules_in_two_tables},
-    {"many-rules-in-five-tables", 0, 0, test_many_rules_in_five_tables},
+    {"empty", NULL, 0, 0, test_empty},
+    {"destroy-null", NULL, 0, 0, test_destroy_null},
+    {"single-rule", NULL, 0, 0, test_single_rule},
+    {"rule-replacement", NULL, 0, 0, test_rule_replacement},
+    {"many-rules-in-one-list", NULL, 0, 0, test_many_rules_in_one_list},
+    {"many-rules-in-one-table", NULL, 0, 0, test_many_rules_in_one_table},
+    {"many-rules-in-two-tables", NULL, 0, 0, test_many_rules_in_two_tables},
+    {"many-rules-in-five-tables", NULL, 0, 0, test_many_rules_in_five_tables},
 
     /* Miniflow and minimask tests. */
-    {"miniflow", 0, 0, test_miniflow},
-    {"minimask_has_extra", 0, 0, test_minimask_has_extra},
-    {"minimask_combine", 0, 0, test_minimask_combine},
+    {"miniflow", NULL, 0, 0, test_miniflow},
+    {"minimask_has_extra", NULL, 0, 0, test_minimask_has_extra},
+    {"minimask_combine", NULL, 0, 0, test_minimask_combine},
 
-    {NULL, 0, 0, NULL},
+    {NULL, NULL, 0, 0, NULL},
 };
 
 static void

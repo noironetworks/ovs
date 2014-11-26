@@ -137,10 +137,10 @@ static const struct vsctl_command_syntax *get_all_commands(void);
 static struct ovsdb_idl *the_idl;
 static struct ovsdb_idl_txn *the_idl_txn;
 
-static void vsctl_exit(int status) NO_RETURN;
-static void vsctl_fatal(const char *, ...) PRINTF_FORMAT(1, 2) NO_RETURN;
+NO_RETURN static void vsctl_exit(int status);
+NO_RETURN static void vsctl_fatal(const char *, ...) PRINTF_FORMAT(1, 2);
 static char *default_db(void);
-static void usage(void) NO_RETURN;
+NO_RETURN static void usage(void);
 static void parse_options(int argc, char *argv[], struct shash *local_options);
 static bool might_write_to_db(char **argv);
 
@@ -2744,9 +2744,11 @@ get_row (struct vsctl_context *ctx,
     const struct ovsdb_idl_row *row;
     struct uuid uuid;
 
+    row = NULL;
     if (uuid_from_string(&uuid, record_id)) {
         row = ovsdb_idl_get_row_for_uuid(ctx->idl, table->class, &uuid);
-    } else {
+    }
+    if (!row) {
         int i;
 
         for (i = 0; i < ARRAY_SIZE(table->row_ids); i++) {
@@ -2987,12 +2989,12 @@ pre_parse_column_key_value(struct vsctl_context *ctx,
 }
 
 static void
-check_mutable(const struct vsctl_table_class *table,
+check_mutable(const struct ovsdb_idl_row *row,
               const struct ovsdb_idl_column *column)
 {
-    if (!column->mutable) {
+    if (!ovsdb_idl_is_mutable(row, column)) {
         vsctl_fatal("cannot modify read-only column %s in table %s",
-                    column->name, table->class->name);
+                    column->name, row->table->class->name);
     }
 }
 
@@ -3339,10 +3341,7 @@ pre_cmd_set(struct vsctl_context *ctx)
 
     table = pre_get_table(ctx, table_name);
     for (i = 3; i < ctx->argc; i++) {
-        const struct ovsdb_idl_column *column;
-
-        column = pre_parse_column_key_value(ctx, ctx->argv[i], table);
-        check_mutable(table, column);
+        pre_parse_column_key_value(ctx, ctx->argv[i], table);
     }
 }
 
@@ -3361,6 +3360,7 @@ set_column(const struct vsctl_table_class *table,
     if (!value_string) {
         vsctl_fatal("%s: missing value", arg);
     }
+    check_mutable(row, column);
 
     if (key_string) {
         union ovsdb_atom key, value;
@@ -3431,7 +3431,6 @@ pre_cmd_add(struct vsctl_context *ctx)
 
     table = pre_get_table(ctx, table_name);
     pre_get_column(ctx, table, column_name, &column);
-    check_mutable(table, column);
 }
 
 static void
@@ -3454,6 +3453,7 @@ cmd_add(struct vsctl_context *ctx)
     if (!row) {
         return;
     }
+    check_mutable(row, column);
 
     type = &column->type;
     ovsdb_datum_clone(&old, ovsdb_idl_read(row, column), &column->type);
@@ -3492,7 +3492,6 @@ pre_cmd_remove(struct vsctl_context *ctx)
 
     table = pre_get_table(ctx, table_name);
     pre_get_column(ctx, table, column_name, &column);
-    check_mutable(table, column);
 }
 
 static void
@@ -3515,6 +3514,7 @@ cmd_remove(struct vsctl_context *ctx)
     if (!row) {
         return;
     }
+    check_mutable(row, column);
 
     type = &column->type;
     ovsdb_datum_clone(&old, ovsdb_idl_read(row, column), &column->type);
@@ -3528,11 +3528,15 @@ cmd_remove(struct vsctl_context *ctx)
         rm_type.n_max = UINT_MAX;
         error = ovsdb_datum_from_string(&rm, &rm_type,
                                         ctx->argv[i], ctx->symtab);
-        if (error && ovsdb_type_is_map(&rm_type)) {
-            free(error);
-            rm_type.value.type = OVSDB_TYPE_VOID;
-            die_if_error(ovsdb_datum_from_string(&rm, &rm_type,
-                                                 ctx->argv[i], ctx->symtab));
+        if (error) {
+            if (ovsdb_type_is_map(&rm_type)) {
+                rm_type.value.type = OVSDB_TYPE_VOID;
+                free(error);
+                die_if_error(ovsdb_datum_from_string(
+                                 &rm, &rm_type, ctx->argv[i], ctx->symtab));
+            } else {
+                vsctl_fatal("%s", error);
+            }
         }
         ovsdb_datum_subtract(&old, type, &rm, &rm_type);
         ovsdb_datum_destroy(&rm, &rm_type);
@@ -3562,7 +3566,6 @@ pre_cmd_clear(struct vsctl_context *ctx)
         const struct ovsdb_idl_column *column;
 
         pre_get_column(ctx, table, ctx->argv[i], &column);
-        check_mutable(table, column);
     }
 }
 
@@ -3588,6 +3591,7 @@ cmd_clear(struct vsctl_context *ctx)
         struct ovsdb_datum datum;
 
         die_if_error(get_column(table, ctx->argv[i], &column));
+        check_mutable(row, column);
 
         type = &column->type;
         if (type->n_min > 0) {

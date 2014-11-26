@@ -216,8 +216,8 @@
 #include "cmap.h"
 #include "match.h"
 #include "meta-flow.h"
-#include "ovs-thread.h"
 #include "pvector.h"
+#include "rculist.h"
 
 #ifdef __cplusplus
 extern "C" {
@@ -243,8 +243,7 @@ enum {
 
 /* A flow classifier. */
 struct classifier {
-    struct ovs_mutex mutex;
-    int n_rules OVS_GUARDED;        /* Total number of rules. */
+    int n_rules;                    /* Total number of rules. */
     uint8_t n_flow_segments;
     uint8_t flow_segments[CLS_MAX_INDICES]; /* Flow segment boundaries to use
                                              * for staged lookup. */
@@ -253,106 +252,111 @@ struct classifier {
     struct cmap partitions;         /* Contains "struct cls_partition"s. */
     struct cls_trie tries[CLS_MAX_TRIES]; /* Prefix tries. */
     unsigned int n_tries;
+    bool publish;                   /* Make changes visible to lookups? */
 };
 
 /* A rule to be inserted to the classifier. */
 struct cls_rule {
+    struct rculist node;         /* In struct cls_subtable 'rules_list'. */
+    int priority;                /* Larger numbers are higher priorities. */
+    struct cls_match *cls_match; /* NULL if not in a classifier. */
     struct minimatch match;      /* Matching rule. */
-    unsigned int priority;       /* Larger numbers are higher priorities. */
-    struct cls_match *cls_match; /* NULL if rule is not in a classifier. */
 };
 
-void cls_rule_init(struct cls_rule *, const struct match *,
-                   unsigned int priority);
+void cls_rule_init(struct cls_rule *, const struct match *, int priority);
 void cls_rule_init_from_minimatch(struct cls_rule *, const struct minimatch *,
-                                  unsigned int priority);
+                                  int priority);
 void cls_rule_clone(struct cls_rule *, const struct cls_rule *);
 void cls_rule_move(struct cls_rule *dst, struct cls_rule *src);
 void cls_rule_destroy(struct cls_rule *);
-
 bool cls_rule_equal(const struct cls_rule *, const struct cls_rule *);
 uint32_t cls_rule_hash(const struct cls_rule *, uint32_t basis);
-
 void cls_rule_format(const struct cls_rule *, struct ds *);
-
 bool cls_rule_is_catchall(const struct cls_rule *);
-
 bool cls_rule_is_loose_match(const struct cls_rule *rule,
                              const struct minimatch *criteria);
 
+/* Constructor/destructor.  Must run single-threaded. */
 void classifier_init(struct classifier *, const uint8_t *flow_segments);
 void classifier_destroy(struct classifier *);
+
+/* Modifiers.  Caller MUST exclude concurrent calls from other threads. */
 bool classifier_set_prefix_fields(struct classifier *,
                                   const enum mf_field_id *trie_fields,
                                   unsigned int n_trie_fields);
+void classifier_insert(struct classifier *, const struct cls_rule *);
+const struct cls_rule *classifier_replace(struct classifier *,
+                                          const struct cls_rule *);
+const struct cls_rule *classifier_remove(struct classifier *,
+                                         const struct cls_rule *);
+static inline void classifier_defer(struct classifier *);
+static inline void classifier_publish(struct classifier *);
 
-bool classifier_is_empty(const struct classifier *);
-int classifier_count(const struct classifier *);
-void classifier_insert(struct classifier *, struct cls_rule *);
-struct cls_rule *classifier_replace(struct classifier *, struct cls_rule *);
-
-void classifier_remove(struct classifier *, struct cls_rule *);
-struct cls_rule *classifier_lookup(const struct classifier *,
-                                   const struct flow *,
-                                   struct flow_wildcards *);
-bool classifier_lookup_miniflow_batch(const struct classifier *cls,
-                                      const struct miniflow **flows,
-                                      struct cls_rule **rules, size_t len);
+/* Lookups.  These are RCU protected and may run concurrently with modifiers
+ * and each other. */
+const struct cls_rule *classifier_lookup(const struct classifier *,
+                                         const struct flow *,
+                                         struct flow_wildcards *);
 bool classifier_rule_overlaps(const struct classifier *,
                               const struct cls_rule *);
-
-struct cls_rule *classifier_find_rule_exactly(const struct classifier *,
-                                              const struct cls_rule *);
-
-struct cls_rule *classifier_find_match_exactly(const struct classifier *,
-                                               const struct match *,
-                                               unsigned int priority);
+const struct cls_rule *classifier_find_rule_exactly(const struct classifier *,
+                                                    const struct cls_rule *);
+const struct cls_rule *classifier_find_match_exactly(const struct classifier *,
+                                                     const struct match *,
+                                                     int priority);
+bool classifier_is_empty(const struct classifier *);
+int classifier_count(const struct classifier *);
 
-/* Iteration. */
-
+/* Iteration.
+ *
+ * Iteration is lockless and RCU-protected.  Concurrent threads may perform all
+ * kinds of concurrent modifications without ruining the iteration.  Obviously,
+ * any modifications may or may not be visible to the concurrent iterator, but
+ * all the rules not deleted are visited by the iteration.  The iterating
+ * thread may also modify the classifier rules itself.
+ *
+ * 'TARGET' iteration only iterates rules matching the 'TARGET' criteria.
+ * Rather than looping through all the rules and skipping ones that can't
+ * match, 'TARGET' iteration skips whole subtables, if the 'TARGET' happens to
+ * be more specific than the subtable. */
 struct cls_cursor {
     const struct classifier *cls;
     const struct cls_subtable *subtable;
     const struct cls_rule *target;
-    struct cmap_cursor subtables;
-    struct cmap_cursor rules;
-    struct cls_rule *rule;
-    bool safe;
+    struct pvector_cursor subtables;
+    const struct cls_rule *rule;
 };
 
-/* Iteration requires mutual exclusion of writers.  We do this by taking
- * a mutex for the duration of the iteration, except for the
- * 'SAFE' variant, where we release the mutex for the body of the loop. */
 struct cls_cursor cls_cursor_start(const struct classifier *cls,
-                                   const struct cls_rule *target,
-                                   bool safe);
-
+                                   const struct cls_rule *target);
 void cls_cursor_advance(struct cls_cursor *);
 
-#define CLS_FOR_EACH(RULE, MEMBER, CLS) \
+#define CLS_FOR_EACH(RULE, MEMBER, CLS)             \
     CLS_FOR_EACH_TARGET(RULE, MEMBER, CLS, NULL)
 #define CLS_FOR_EACH_TARGET(RULE, MEMBER, CLS, TARGET)                  \
-    for (struct cls_cursor cursor__ = cls_cursor_start(CLS, TARGET, false); \
+    for (struct cls_cursor cursor__ = cls_cursor_start(CLS, TARGET);    \
          (cursor__.rule                                                 \
-          ? (ASSIGN_CONTAINER(RULE, cursor__.rule, MEMBER),            \
-             true)                                                      \
-          : false);                                                     \
-         cls_cursor_advance(&cursor__))
-
-/* These forms allows classifier_remove() to be called within the loop. */
-#define CLS_FOR_EACH_SAFE(RULE, MEMBER, CLS) \
-    CLS_FOR_EACH_TARGET_SAFE(RULE, MEMBER, CLS, NULL)
-#define CLS_FOR_EACH_TARGET_SAFE(RULE, MEMBER, CLS, TARGET)             \
-    for (struct cls_cursor cursor__ = cls_cursor_start(CLS, TARGET, true); \
-         (cursor__.rule                                                 \
-          ? (ASSIGN_CONTAINER(RULE, cursor__.rule, MEMBER),            \
+          ? (INIT_CONTAINER(RULE, cursor__.rule, MEMBER),               \
              cls_cursor_advance(&cursor__),                             \
              true)                                                      \
           : false);                                                     \
-        )                                                               \
+        )
 
 #ifdef __cplusplus
 }
 #endif
 
+
+static inline void
+classifier_defer(struct classifier *cls)
+{
+    cls->publish = false;
+}
+
+static inline void
+classifier_publish(struct classifier *cls)
+{
+    cls->publish = true;
+    pvector_publish(&cls->subtables);
+}
 #endif /* classifier.h */

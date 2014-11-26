@@ -16,10 +16,15 @@
 
 #include <config.h>
 #include "cmap.h"
+#include "coverage.h"
+#include "bitmap.h"
 #include "hash.h"
 #include "ovs-rcu.h"
 #include "random.h"
 #include "util.h"
+
+COVERAGE_DEFINE(cmap_expand);
+COVERAGE_DEFINE(cmap_shrink);
 
 /* Optimistic Concurrent Cuckoo Hash
  * =================================
@@ -52,6 +57,10 @@
  * of about 93%.  The current implementation is conservative, expanding the
  * hash table when it is over 85% full.
  *
+ * When the load factor is below 20%, the hash table will be shrinked by half.
+ * This is to reduce the memory utilization of the hash table and to avoid
+ * the hash table occupying the top of heap chunk which prevents the trimming
+ * of heap.
  *
  * Hash Functions
  * ==============
@@ -134,7 +143,7 @@ struct cmap_bucket {
      * The slots are in no particular order.  A null pointer indicates that a
      * pair is unused.  In-use slots are not necessarily in the earliest
      * slots. */
-    atomic_uint32_t hashes[CMAP_K];
+    uint32_t hashes[CMAP_K];
     struct cmap_node nodes[CMAP_K];
 
     /* Padding to make cmap_bucket exactly one cache line long. */
@@ -149,40 +158,35 @@ BUILD_ASSERT_DECL(sizeof(struct cmap_bucket) == CACHE_LINE_SIZE);
  * values waste memory; larger values increase the average insertion time. */
 #define CMAP_MAX_LOAD ((uint32_t) (UINT32_MAX * .85))
 
+/* Default minimum load factor (as a fraction of UINT32_MAX + 1) before
+ * shrinking a cmap.  Currently, the value is chosen to be 20%, this
+ * means cmap will have a 40% load factor after shrink. */
+#define CMAP_MIN_LOAD ((uint32_t) (UINT32_MAX * .20))
+
 /* The implementation of a concurrent hash map. */
 struct cmap_impl {
     unsigned int n;             /* Number of in-use elements. */
     unsigned int max_n;         /* Max elements before enlarging. */
+    unsigned int min_n;         /* Min elements before shrinking. */
     uint32_t mask;              /* Number of 'buckets', minus one. */
     uint32_t basis;             /* Basis for rehashing client's hash values. */
 
     /* Padding to make cmap_impl exactly one cache line long. */
-    uint8_t pad[CACHE_LINE_SIZE - sizeof(unsigned int) * 4];
+    uint8_t pad[CACHE_LINE_SIZE - sizeof(unsigned int) * 5];
 
     struct cmap_bucket buckets[];
 };
 BUILD_ASSERT_DECL(sizeof(struct cmap_impl) == CACHE_LINE_SIZE);
 
-static uint32_t cmap_get_hash__(const atomic_uint32_t *hash,
-                                memory_order order)
-{
-    uint32_t hash__;
-
-    atomic_read_explicit(CONST_CAST(ATOMIC(uint32_t) *, hash), &hash__, order);
-    return hash__;
-}
-
-#define cmap_get_hash(HASH) \
-    cmap_get_hash__(HASH, memory_order_acquire)
-#define cmap_get_hash_protected(HASH) \
-    cmap_get_hash__(HASH, memory_order_relaxed)
-
 static struct cmap_impl *cmap_rehash(struct cmap *, uint32_t mask);
+
+/* Explicit inline keywords in utility functions seem to be necessary
+ * to prevent performance regression on cmap_find(). */
 
 /* Given a rehashed value 'hash', returns the other hash for that rehashed
  * value.  This is symmetric: other_hash(other_hash(x)) == x.  (See also "Hash
  * Functions" at the top of this file.) */
-static uint32_t
+static inline uint32_t
 other_hash(uint32_t hash)
 {
     return (hash << 16) | (hash >> 16);
@@ -190,13 +194,14 @@ other_hash(uint32_t hash)
 
 /* Returns the rehashed value for 'hash' within 'impl'.  (See also "Hash
  * Functions" at the top of this file.) */
-static uint32_t
+static inline uint32_t
 rehash(const struct cmap_impl *impl, uint32_t hash)
 {
     return hash_finish(impl->basis, hash);
 }
 
-static struct cmap_impl *
+/* Not always without the inline keyword. */
+static inline struct cmap_impl *
 cmap_get_impl(const struct cmap *cmap)
 {
     return ovsrcu_get(struct cmap_impl *, &cmap->impl);
@@ -206,6 +211,12 @@ static uint32_t
 calc_max_n(uint32_t mask)
 {
     return ((uint64_t) (mask + 1) * CMAP_K * CMAP_MAX_LOAD) >> 32;
+}
+
+static uint32_t
+calc_min_n(uint32_t mask)
+{
+    return ((uint64_t) (mask + 1) * CMAP_K * CMAP_MIN_LOAD) >> 32;
 }
 
 static struct cmap_impl *
@@ -219,6 +230,7 @@ cmap_impl_create(uint32_t mask)
                              + (mask + 1) * sizeof *impl->buckets);
     impl->n = 0;
     impl->max_n = calc_max_n(mask);
+    impl->min_n = calc_min_n(mask);
     impl->mask = mask;
     impl->basis = random_uint32();
 
@@ -240,7 +252,7 @@ void
 cmap_destroy(struct cmap *cmap)
 {
     if (cmap) {
-        free_cacheline(cmap_get_impl(cmap));
+        ovsrcu_postpone(free_cacheline, cmap_get_impl(cmap));
     }
 }
 
@@ -258,17 +270,19 @@ cmap_is_empty(const struct cmap *cmap)
     return cmap_count(cmap) == 0;
 }
 
-static uint32_t
-read_counter(struct cmap_bucket *bucket)
+static inline uint32_t
+read_counter(const struct cmap_bucket *bucket_)
 {
+    struct cmap_bucket *bucket = CONST_CAST(struct cmap_bucket *, bucket_);
     uint32_t counter;
 
     atomic_read_explicit(&bucket->counter, &counter, memory_order_acquire);
+
     return counter;
 }
 
-static uint32_t
-read_even_counter(struct cmap_bucket *bucket)
+static inline uint32_t
+read_even_counter(const struct cmap_bucket *bucket)
 {
     uint32_t counter;
 
@@ -279,10 +293,59 @@ read_even_counter(struct cmap_bucket *bucket)
     return counter;
 }
 
-static bool
-counter_changed(struct cmap_bucket *b, uint32_t c)
+static inline bool
+counter_changed(const struct cmap_bucket *b_, uint32_t c)
 {
-    return OVS_UNLIKELY(read_counter(b) != c);
+    struct cmap_bucket *b = CONST_CAST(struct cmap_bucket *, b_);
+    uint32_t counter;
+
+    /* Need to make sure the counter read is not moved up, before the hash and
+     * cmap_node_next().  Using atomic_read_explicit with memory_order_acquire
+     * would allow prior reads to be moved after the barrier.
+     * atomic_thread_fence prevents all following memory accesses from moving
+     * prior to preceding loads. */
+    atomic_thread_fence(memory_order_acquire);
+    atomic_read_relaxed(&b->counter, &counter);
+
+    return OVS_UNLIKELY(counter != c);
+}
+
+static inline const struct cmap_node *
+cmap_find_in_bucket(const struct cmap_bucket *bucket, uint32_t hash)
+{
+    for (int i = 0; i < CMAP_K; i++) {
+        if (bucket->hashes[i] == hash) {
+            return cmap_node_next(&bucket->nodes[i]);
+        }
+    }
+    return NULL;
+}
+
+static inline const struct cmap_node *
+cmap_find__(const struct cmap_bucket *b1, const struct cmap_bucket *b2,
+            uint32_t hash)
+{
+    uint32_t c1, c2;
+    const struct cmap_node *node;
+
+    do {
+        do {
+            c1 = read_even_counter(b1);
+            node = cmap_find_in_bucket(b1, hash);
+        } while (OVS_UNLIKELY(counter_changed(b1, c1)));
+        if (node) {
+            break;
+        }
+        do {
+            c2 = read_even_counter(b2);
+            node = cmap_find_in_bucket(b2, hash);
+        } while (OVS_UNLIKELY(counter_changed(b2, c2)));
+        if (node) {
+            break;
+        }
+    } while (OVS_UNLIKELY(counter_changed(b1, c1)));
+
+    return node;
 }
 
 /* Searches 'cmap' for an element with the specified 'hash'.  If one or more is
@@ -294,48 +357,102 @@ counter_changed(struct cmap_bucket *b, uint32_t c)
  * not changing, then cmap_find_protected() is slightly faster.
  *
  * CMAP_FOR_EACH_WITH_HASH is usually more convenient. */
-struct cmap_node *
+const struct cmap_node *
 cmap_find(const struct cmap *cmap, uint32_t hash)
 {
-    struct cmap_impl *impl = cmap_get_impl(cmap);
+    const struct cmap_impl *impl = cmap_get_impl(cmap);
     uint32_t h1 = rehash(impl, hash);
     uint32_t h2 = other_hash(h1);
-    struct cmap_bucket *b1;
-    struct cmap_bucket *b2;
-    uint32_t c1, c2;
+
+    return cmap_find__(&impl->buckets[h1 & impl->mask],
+                       &impl->buckets[h2 & impl->mask],
+                       hash);
+}
+
+/* Looks up multiple 'hashes', when the corresponding bit in 'map' is 1,
+ * and sets the corresponding pointer in 'nodes', if the hash value was
+ * found from the 'cmap'.  In other cases the 'nodes' values are not changed,
+ * i.e., no NULL pointers are stored there.
+ * Returns a map where a bit is set to 1 if the corresponding 'nodes' pointer
+ * was stored, 0 otherwise.
+ * Generally, the caller wants to use CMAP_NODE_FOR_EACH to verify for
+ * hash collisions. */
+unsigned long
+cmap_find_batch(const struct cmap *cmap, unsigned long map,
+                uint32_t hashes[], const struct cmap_node *nodes[])
+{
+    const struct cmap_impl *impl = cmap_get_impl(cmap);
+    unsigned long result = map;
     int i;
+    uint32_t h1s[sizeof map * CHAR_BIT];
+    const struct cmap_bucket *b1s[sizeof map * CHAR_BIT];
+    const struct cmap_bucket *b2s[sizeof map * CHAR_BIT];
+    uint32_t c1s[sizeof map * CHAR_BIT];
 
-retry:
-    b1 = &impl->buckets[h1 & impl->mask];
-    c1 = read_even_counter(b1);
-    for (i = 0; i < CMAP_K; i++) {
-        struct cmap_node *node = cmap_node_next(&b1->nodes[i]);
+    /* Compute hashes and prefetch 1st buckets. */
+    ULONG_FOR_EACH_1(i, map) {
+        h1s[i] = rehash(impl, hashes[i]);
+        b1s[i] = &impl->buckets[h1s[i] & impl->mask];
+        OVS_PREFETCH(b1s[i]);
+    }
+    /* Lookups, Round 1. Only look up at the first bucket. */
+    ULONG_FOR_EACH_1(i, map) {
+        uint32_t c1;
+        const struct cmap_bucket *b1 = b1s[i];
+        const struct cmap_node *node;
 
-        if (node && cmap_get_hash(&b1->hashes[i]) == hash) {
-            if (counter_changed(b1, c1)) {
-                goto retry;
-            }
-            return node;
+        do {
+            c1 = read_even_counter(b1);
+            node = cmap_find_in_bucket(b1, hashes[i]);
+        } while (OVS_UNLIKELY(counter_changed(b1, c1)));
+
+        if (!node) {
+            /* Not found (yet); Prefetch the 2nd bucket. */
+            b2s[i] = &impl->buckets[other_hash(h1s[i]) & impl->mask];
+            OVS_PREFETCH(b2s[i]);
+            c1s[i] = c1; /* We may need to check this after Round 2. */
+            continue;
         }
+        /* Found. */
+        ULONG_SET0(map, i); /* Ignore this on round 2. */
+        OVS_PREFETCH(node);
+        nodes[i] = node;
     }
+    /* Round 2. Look into the 2nd bucket, if needed. */
+    ULONG_FOR_EACH_1(i, map) {
+        uint32_t c2;
+        const struct cmap_bucket *b2 = b2s[i];
+        const struct cmap_node *node;
 
-    b2 = &impl->buckets[h2 & impl->mask];
-    c2 = read_even_counter(b2);
-    for (i = 0; i < CMAP_K; i++) {
-        struct cmap_node *node = cmap_node_next(&b2->nodes[i]);
+        do {
+            c2 = read_even_counter(b2);
+            node = cmap_find_in_bucket(b2, hashes[i]);
+        } while (OVS_UNLIKELY(counter_changed(b2, c2)));
 
-        if (node && cmap_get_hash(&b2->hashes[i]) == hash) {
-            if (counter_changed(b2, c2)) {
-                goto retry;
+        if (!node) {
+            /* Not found, but the node may have been moved from b2 to b1 right
+             * after we finished with b1 earlier.  We just got a clean reading
+             * of the 2nd bucket, so we check the counter of the 1st bucket
+             * only.  However, we need to check both buckets again, as the
+             * entry may be moved again to the 2nd bucket.  Basically, we
+             * need to loop as long as it takes to get stable readings of
+             * both buckets.  cmap_find__() does that, and now that we have
+             * fetched both buckets we can just use it. */
+            if (OVS_UNLIKELY(counter_changed(b1s[i], c1s[i]))) {
+                node = cmap_find__(b1s[i], b2s[i], hashes[i]);
+                if (node) {
+                    goto found;
+                }
             }
-            return node;
+            /* Not found. */
+            ULONG_SET0(result, i); /* Fix the result. */
+            continue;
         }
+found:
+        OVS_PREFETCH(node);
+        nodes[i] = node;
     }
-
-    if (counter_changed(b1, c1) || counter_changed(b2, c2)) {
-        goto retry;
-    }
-    return NULL;
+    return result;
 }
 
 static int
@@ -344,9 +461,7 @@ cmap_find_slot_protected(struct cmap_bucket *b, uint32_t hash)
     int i;
 
     for (i = 0; i < CMAP_K; i++) {
-        struct cmap_node *node = cmap_node_next_protected(&b->nodes[i]);
-
-        if (node && cmap_get_hash_protected(&b->hashes[i]) == hash) {
+        if (b->hashes[i] == hash && cmap_node_next_protected(&b->nodes[i])) {
             return i;
         }
     }
@@ -360,10 +475,8 @@ cmap_find_bucket_protected(struct cmap_impl *impl, uint32_t hash, uint32_t h)
     int i;
 
     for (i = 0; i < CMAP_K; i++) {
-        struct cmap_node *node = cmap_node_next_protected(&b->nodes[i]);
-
-        if (node && cmap_get_hash_protected(&b->hashes[i]) == hash) {
-            return node;
+        if (b->hashes[i] == hash) {
+            return cmap_node_next_protected(&b->nodes[i]);
         }
     }
     return NULL;
@@ -409,7 +522,7 @@ cmap_set_bucket(struct cmap_bucket *b, int i,
     atomic_read_explicit(&b->counter, &c, memory_order_acquire);
     atomic_store_explicit(&b->counter, c + 1, memory_order_release);
     ovsrcu_set(&b->nodes[i].next, node); /* Also atomic. */
-    atomic_store_explicit(&b->hashes[i], hash, memory_order_release);
+    b->hashes[i] = hash;
     atomic_store_explicit(&b->counter, c + 2, memory_order_release);
 }
 
@@ -423,9 +536,9 @@ cmap_insert_dup(struct cmap_node *new_node, uint32_t hash,
     int i;
 
     for (i = 0; i < CMAP_K; i++) {
-        struct cmap_node *node = cmap_node_next_protected(&b->nodes[i]);
+        if (b->hashes[i] == hash) {
+            struct cmap_node *node = cmap_node_next_protected(&b->nodes[i]);
 
-        if (cmap_get_hash_protected(&b->hashes[i]) == hash) {
             if (node) {
                 struct cmap_node *p;
 
@@ -490,7 +603,7 @@ cmap_insert_bucket(struct cmap_node *node, uint32_t hash,
 static struct cmap_bucket *
 other_bucket_protected(struct cmap_impl *impl, struct cmap_bucket *b, int slot)
 {
-    uint32_t h1 = rehash(impl, cmap_get_hash_protected(&b->hashes[slot]));
+    uint32_t h1 = rehash(impl, b->hashes[slot]);
     uint32_t h2 = other_hash(h1);
     uint32_t b_idx = b - impl->buckets;
     uint32_t other_h = (h1 & impl->mask) == b_idx ? h2 : h1;
@@ -607,9 +720,10 @@ cmap_insert_bfs(struct cmap_impl *impl, struct cmap_node *new_node,
                 for (k = path->n + 1; k > 0; k--) {
                     int slot = slots[k - 1];
 
-                    cmap_set_bucket(buckets[k], slots[k],
-                                    cmap_node_next_protected(&buckets[k - 1]->nodes[slot]),
-                                    cmap_get_hash_protected(&buckets[k - 1]->hashes[slot]));
+                    cmap_set_bucket(
+                        buckets[k], slots[k],
+                        cmap_node_next_protected(&buckets[k - 1]->nodes[slot]),
+                        buckets[k - 1]->hashes[slot]);
                 }
 
                 /* Finally, replace the first node on the path by
@@ -654,8 +768,10 @@ cmap_try_insert(struct cmap_impl *impl, struct cmap_node *node, uint32_t hash)
 /* Inserts 'node', with the given 'hash', into 'cmap'.  The caller must ensure
  * that 'cmap' cannot change concurrently (from another thread).  If duplicates
  * are undesirable, the caller must have already verified that 'cmap' does not
- * contain a duplicate of 'node'. */
-void
+ * contain a duplicate of 'node'.
+ *
+ * Returns the current number of nodes in the cmap after the insertion. */
+size_t
 cmap_insert(struct cmap *cmap, struct cmap_node *node, uint32_t hash)
 {
     struct cmap_impl *impl = cmap_get_impl(cmap);
@@ -663,13 +779,14 @@ cmap_insert(struct cmap *cmap, struct cmap_node *node, uint32_t hash)
     ovsrcu_set_hidden(&node->next, NULL);
 
     if (OVS_UNLIKELY(impl->n >= impl->max_n)) {
+        COVERAGE_INC(cmap_expand);
         impl = cmap_rehash(cmap, (impl->mask << 1) | 1);
     }
 
     while (OVS_UNLIKELY(!cmap_try_insert(impl, node, hash))) {
         impl = cmap_rehash(cmap, impl->mask);
     }
-    impl->n++;
+    return ++impl->n;
 }
 
 static bool
@@ -705,28 +822,17 @@ cmap_replace__(struct cmap_impl *impl, struct cmap_node *node,
     }
 }
 
-/* Removes 'node' from 'cmap'.  The caller must ensure that 'cmap' cannot
- * change concurrently (from another thread).
- *
- * 'node' must not be destroyed or modified or inserted back into 'cmap' or
- * into any other concurrent hash map while any other thread might be accessing
- * it.  One correct way to do this is to free it from an RCU callback with
- * ovsrcu_postpone(). */
-void
-cmap_remove(struct cmap *cmap, struct cmap_node *node, uint32_t hash)
-{
-    cmap_replace(cmap, node, NULL, hash);
-    cmap_get_impl(cmap)->n--;
-}
-
 /* Replaces 'old_node' in 'cmap' with 'new_node'.  The caller must
  * ensure that 'cmap' cannot change concurrently (from another thread).
  *
  * 'old_node' must not be destroyed or modified or inserted back into 'cmap' or
  * into any other concurrent hash map while any other thread might be accessing
  * it.  One correct way to do this is to free it from an RCU callback with
- * ovsrcu_postpone(). */
-void
+ * ovsrcu_postpone().
+ *
+ * Returns the current number of nodes in the cmap after the replacement.  The
+ * number of nodes decreases by one if 'new_node' is NULL. */
+size_t
 cmap_replace(struct cmap *cmap, struct cmap_node *old_node,
              struct cmap_node *new_node, uint32_t hash)
 {
@@ -738,6 +844,15 @@ cmap_replace(struct cmap *cmap, struct cmap_node *old_node,
     ok = cmap_replace__(impl, old_node, new_node, hash, h1)
         || cmap_replace__(impl, old_node, new_node, hash, h2);
     ovs_assert(ok);
+
+    if (!new_node) {
+        impl->n--;
+        if (OVS_UNLIKELY(impl->n < impl->min_n)) {
+            COVERAGE_INC(cmap_shrink);
+            impl = cmap_rehash(cmap, impl->mask >> 1);
+        }
+    }
+    return impl->n;
 }
 
 static bool
@@ -753,9 +868,7 @@ cmap_try_rehash(const struct cmap_impl *old, struct cmap_impl *new)
              * unique */
             struct cmap_node *node = cmap_node_next_protected(&b->nodes[i]);
 
-            if (node &&
-                !cmap_try_insert(new, node,
-                                 cmap_get_hash_protected(&b->hashes[i]))) {
+            if (node && !cmap_try_insert(new, node, b->hashes[i])) {
                 return false;
             }
         }

@@ -1,4 +1,4 @@
-/* Copyright (c) 2009, 2010, 2011, 2012, 2013 Nicira, Inc.
+/* Copyright (c) 2009, 2010, 2011, 2012, 2013, 2014 Nicira, Inc.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -143,17 +143,16 @@ struct xlate_in {
     struct ofpbuf *odp_actions;
 };
 
-void xlate_ofproto_set(struct ofproto_dpif *, const char *name,
-                       struct dpif *, struct rule_dpif *miss_rule,
-                       struct rule_dpif *no_packet_in_rule,
+void xlate_ofproto_set(struct ofproto_dpif *, const char *name, struct dpif *,
                        const struct mac_learning *, struct stp *,
-                       const struct mcast_snooping *,
+                       struct rstp *, const struct mcast_snooping *,
                        const struct mbridge *, const struct dpif_sflow *,
                        const struct dpif_ipfix *, const struct netflow *,
-                       enum ofp_config_flags, bool forward_bpdu,
+                       bool forward_bpdu,
                        bool has_in_band, bool enable_recirc,
                        bool variable_length_userdata,
-                       size_t mpls_label_stack_length);
+                       size_t mpls_label_stack_length,
+                       bool masked_set_action);
 void xlate_remove_ofproto(struct ofproto_dpif *);
 
 void xlate_bundle_set(struct ofproto_dpif *, struct ofbundle *,
@@ -167,16 +166,21 @@ void xlate_ofport_set(struct ofproto_dpif *, struct ofbundle *,
                       struct ofport_dpif *, ofp_port_t, odp_port_t,
                       const struct netdev *, const struct cfm *,
                       const struct bfd *, struct ofport_dpif *peer,
-                      int stp_port_no, const struct ofproto_port_queue *qdscp,
+                      int stp_port_no,
+                      const struct rstp_port *rstp_port,
+                      const struct ofproto_port_queue *qdscp,
                       size_t n_qdscp, enum ofputil_port_config,
                       enum ofputil_port_state, bool is_tunnel,
                       bool may_enable);
 void xlate_ofport_remove(struct ofport_dpif *);
 
-int xlate_receive(const struct dpif_backer *, const struct flow *,
-                  struct ofproto_dpif **, struct dpif_ipfix **,
-                  struct dpif_sflow **, struct netflow **,
-                  ofp_port_t *ofp_in_port);
+struct ofproto_dpif * xlate_lookup_ofproto(const struct dpif_backer *,
+                                           const struct flow *,
+                                           ofp_port_t *ofp_in_port);
+int xlate_lookup(const struct dpif_backer *, const struct flow *,
+                 struct ofproto_dpif **, struct dpif_ipfix **,
+                 struct dpif_sflow **, struct netflow **,
+                 ofp_port_t *ofp_in_port);
 
 void xlate_actions(struct xlate_in *, struct xlate_out *);
 void xlate_in_init(struct xlate_in *, struct ofproto_dpif *,
@@ -189,8 +193,7 @@ void xlate_out_copy(struct xlate_out *dst, const struct xlate_out *src);
 int xlate_send_packet(const struct ofport_dpif *, struct ofpbuf *);
 
 struct xlate_cache *xlate_cache_new(void);
-void xlate_push_stats(struct xlate_cache *, bool may_learn,
-                      const struct dpif_flow_stats *);
+void xlate_push_stats(struct xlate_cache *, const struct dpif_flow_stats *);
 void xlate_cache_clear(struct xlate_cache *);
 void xlate_cache_delete(struct xlate_cache *);
 

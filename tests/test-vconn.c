@@ -15,7 +15,9 @@
  */
 
 #include <config.h>
+#undef NDEBUG
 #include "vconn.h"
+#include <assert.h>
 #include <errno.h>
 #include <inttypes.h>
 #include <signal.h>
@@ -27,6 +29,7 @@
 #include "ofp-util.h"
 #include "ofpbuf.h"
 #include "openflow/openflow.h"
+#include "ovstest.h"
 #include "poll-loop.h"
 #include "socket-util.h"
 #include "stream.h"
@@ -34,10 +37,6 @@
 #include "timeval.h"
 #include "util.h"
 #include "vlog.h"
-#include "ovstest.h"
-
-#undef NDEBUG
-#include <assert.h>
 
 struct fake_pvconn {
     const char *type;
@@ -433,15 +432,15 @@ test_send_invalid_version_hello(int argc OVS_UNUSED, char *argv[])
 }
 
 static const struct command commands[] = {
-    {"refuse-connection", 1, 1, test_refuse_connection},
-    {"accept-then-close", 1, 1, test_accept_then_close},
-    {"read-hello", 1, 1, test_read_hello},
-    {"send-plain-hello", 1, 1, test_send_plain_hello},
-    {"send-long-hello", 1, 1, test_send_long_hello},
-    {"send-echo-hello", 1, 1, test_send_echo_hello},
-    {"send-short-hello", 1, 1, test_send_short_hello},
-    {"send-invalid-version-hello", 1, 1, test_send_invalid_version_hello},
-    {NULL, 0, 0, NULL},
+    {"refuse-connection", NULL, 1, 1, test_refuse_connection},
+    {"accept-then-close", NULL, 1, 1, test_accept_then_close},
+    {"read-hello", NULL, 1, 1, test_read_hello},
+    {"send-plain-hello", NULL, 1, 1, test_send_plain_hello},
+    {"send-long-hello", NULL, 1, 1, test_send_long_hello},
+    {"send-echo-hello", NULL, 1, 1, test_send_echo_hello},
+    {"send-short-hello", NULL, 1, 1, test_send_short_hello},
+    {"send-invalid-version-hello", NULL, 1, 1, test_send_invalid_version_hello},
+    {NULL, NULL, 0, 0, NULL},
 };
 
 static void

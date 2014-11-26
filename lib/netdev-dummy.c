@@ -109,6 +109,7 @@ struct netdev_dummy {
 
     FILE *tx_pcap, *rxq_pcap OVS_GUARDED;
 
+    struct in_addr address, netmask;
     struct list rxes OVS_GUARDED; /* List of child "netdev_rxq_dummy"s. */
 };
 
@@ -625,11 +626,11 @@ netdev_dummy_alloc(void)
 static int
 netdev_dummy_construct(struct netdev *netdev_)
 {
-    static atomic_uint next_n = ATOMIC_VAR_INIT(0xaa550000);
+    static atomic_count next_n = ATOMIC_COUNT_INIT(0xaa550000);
     struct netdev_dummy *netdev = netdev_dummy_cast(netdev_);
     unsigned int n;
 
-    atomic_add(&next_n, 1, &n);
+    n = atomic_count_inc(&next_n);
 
     ovs_mutex_init(&netdev->mutex);
     ovs_mutex_lock(&netdev->mutex);
@@ -694,6 +695,33 @@ netdev_dummy_get_config(const struct netdev *netdev_, struct smap *args)
     dummy_packet_conn_get_config(&netdev->conn, args);
 
     ovs_mutex_unlock(&netdev->mutex);
+    return 0;
+}
+
+static int
+netdev_dummy_get_in4(const struct netdev *netdev_,
+                     struct in_addr *address, struct in_addr *netmask)
+{
+    struct netdev_dummy *netdev = netdev_dummy_cast(netdev_);
+
+    ovs_mutex_lock(&netdev->mutex);
+    *address = netdev->address;
+    *netmask = netdev->netmask;
+    ovs_mutex_unlock(&netdev->mutex);
+    return 0;
+}
+
+static int
+netdev_dummy_set_in4(struct netdev *netdev_, struct in_addr address,
+                     struct in_addr netmask)
+{
+    struct netdev_dummy *netdev = netdev_dummy_cast(netdev_);
+
+    ovs_mutex_lock(&netdev->mutex);
+    netdev->address = address;
+    netdev->netmask = netmask;
+    ovs_mutex_unlock(&netdev->mutex);
+
     return 0;
 }
 
@@ -808,6 +836,7 @@ netdev_dummy_rxq_recv(struct netdev_rxq *rxq_, struct dpif_packet **arr,
 
     /* This performs a (sometimes unnecessary) copy */
     arr[0] = dpif_packet_clone_from_ofpbuf(packet);
+    dpif_packet_set_dp_hash(arr[0], 0);
     ofpbuf_delete(packet);
     *c = 1;
     return 0;
@@ -846,8 +875,8 @@ netdev_dummy_rxq_drain(struct netdev_rxq *rxq_)
 }
 
 static int
-netdev_dummy_send(struct netdev *netdev, struct dpif_packet **pkts, int cnt,
-                  bool may_steal)
+netdev_dummy_send(struct netdev *netdev, int qid OVS_UNUSED,
+                  struct dpif_packet **pkts, int cnt, bool may_steal)
 {
     struct netdev_dummy *dev = netdev_dummy_cast(netdev);
     int error = 0;
@@ -969,18 +998,6 @@ netdev_dummy_get_stats(const struct netdev *netdev, struct netdev_stats *stats)
 }
 
 static int
-netdev_dummy_set_stats(struct netdev *netdev, const struct netdev_stats *stats)
-{
-    struct netdev_dummy *dev = netdev_dummy_cast(netdev);
-
-    ovs_mutex_lock(&dev->mutex);
-    dev->stats = *stats;
-    ovs_mutex_unlock(&dev->mutex);
-
-    return 0;
-}
-
-static int
 netdev_dummy_get_ifindex(const struct netdev *netdev)
 {
     struct netdev_dummy *dev = netdev_dummy_cast(netdev);
@@ -1043,6 +1060,11 @@ static const struct netdev_class dummy_class = {
     netdev_dummy_get_config,
     netdev_dummy_set_config,
     NULL,                       /* get_tunnel_config */
+    NULL,                       /* build header */
+    NULL,                       /* push header */
+    NULL,                       /* pop header */
+    NULL,                       /* get_numa_id */
+    NULL,                       /* set_multiq */
 
     netdev_dummy_send,          /* send */
     NULL,                       /* send_wait */
@@ -1056,7 +1078,6 @@ static const struct netdev_class dummy_class = {
     NULL,                       /* get_carrier_resets */
     NULL,                       /* get_miimon */
     netdev_dummy_get_stats,
-    netdev_dummy_set_stats,
 
     NULL,                       /* get_features */
     NULL,                       /* set_advertisements */
@@ -1075,7 +1096,7 @@ static const struct netdev_class dummy_class = {
     NULL,                       /* queue_dump_done */
     NULL,                       /* dump_queue_stats */
 
-    NULL,                       /* get_in4 */
+    netdev_dummy_get_in4,       /* get_in4 */
     NULL,                       /* set_in4 */
     NULL,                       /* get_in6 */
     NULL,                       /* add_router */
@@ -1324,10 +1345,40 @@ netdev_dummy_conn_state(struct unixctl_conn *conn, int argc,
     ds_destroy(&s);
 }
 
+static void
+netdev_dummy_ip4addr(struct unixctl_conn *conn, int argc OVS_UNUSED,
+                     const char *argv[], void *aux OVS_UNUSED)
+{
+    struct netdev *netdev = netdev_from_name(argv[1]);
+
+    if (netdev && is_dummy_class(netdev->netdev_class)) {
+        struct in_addr ip;
+        uint16_t plen;
+
+        if (ovs_scan(argv[2], IP_SCAN_FMT"/%"SCNi16,
+                     IP_SCAN_ARGS(&ip.s_addr), &plen)) {
+            struct in_addr mask;
+
+            mask.s_addr = be32_prefix_mask(plen);
+            netdev_dummy_set_in4(netdev, ip, mask);
+            unixctl_command_reply(conn, "OK");
+        } else {
+            unixctl_command_reply(conn, "Invalid parameters");
+        }
+
+        netdev_close(netdev);
+    } else {
+        unixctl_command_reply_error(conn, "Unknown Dummy Interface");
+        netdev_close(netdev);
+        return;
+    }
+
+}
+
 void
 netdev_dummy_register(bool override)
 {
-    unixctl_command_register("netdev-dummy/receive", "NAME PACKET|FLOW...",
+    unixctl_command_register("netdev-dummy/receive", "name packet|flow...",
                              2, INT_MAX, netdev_dummy_receive, NULL);
     unixctl_command_register("netdev-dummy/set-admin-state",
                              "[netdev] up|down", 1, 2,
@@ -1335,6 +1386,10 @@ netdev_dummy_register(bool override)
     unixctl_command_register("netdev-dummy/conn-state",
                              "[netdev]", 0, 1,
                              netdev_dummy_conn_state, NULL);
+    unixctl_command_register("netdev-dummy/ip4addr",
+                             "[netdev] ipaddr/mask-prefix-len", 2, 2,
+                             netdev_dummy_ip4addr, NULL);
+
 
     if (override) {
         struct sset types;

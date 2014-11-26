@@ -22,6 +22,8 @@
 #include "connectivity.h"
 #include "netdev.h"
 #include "list.h"
+#include "ovs-numa.h"
+#include "packets.h"
 #include "seq.h"
 #include "shash.h"
 #include "smap.h"
@@ -29,6 +31,8 @@
 #ifdef  __cplusplus
 extern "C" {
 #endif
+
+#define NETDEV_NUMA_UNSPEC OVS_NUMA_UNSPEC
 
 /* A network device (e.g. an Ethernet device).
  *
@@ -49,6 +53,7 @@ struct netdev {
     uint64_t change_seq;
 
     /* The following are protected by 'netdev_mutex' (internal to netdev.c). */
+    int n_txq;
     int n_rxq;
     int ref_cnt;                        /* Times this devices was opened. */
     struct shash_node *node;            /* Pointer to element in global map. */
@@ -250,9 +255,40 @@ struct netdev_class {
     const struct netdev_tunnel_config *
         (*get_tunnel_config)(const struct netdev *netdev);
 
+    /* Build Partial Tunnel header.  Ethernet and ip header is already built,
+     * build_header() is suppose build protocol specific part of header. */
+    int (*build_header)(const struct netdev *, struct ovs_action_push_tnl *data);
+
+    /* build_header() can not build entire header for all packets for given
+     * flow.  Push header is called for packet to build header specific to
+     * a packet on actual transmit.  It uses partial header build by
+     * build_header() which is passed as data. */
+    int (*push_header)(const struct netdev *netdev,
+                       struct dpif_packet **buffers, int cnt,
+                       const struct ovs_action_push_tnl *data);
+
+    /* Pop tunnel header from packet, build tunnel metadata and resize packet
+     * for further processing. */
+    int  (*pop_header)(struct netdev *netdev,
+                       struct dpif_packet **buffers, int cnt);
+
+    /* Returns the id of the numa node the 'netdev' is on.  If there is no
+     * such info, returns NETDEV_NUMA_UNSPEC. */
+    int (*get_numa_id)(const struct netdev *netdev);
+
+    /* Configures the number of tx queues and rx queues of 'netdev'.
+     * Return 0 if successful, otherwise a positive errno value.
+     *
+     * On error, the tx queue and rx queue configuration is indeterminant.
+     * Caller should make decision on whether to restore the previous or
+     * the default configuration.  Also, caller must make sure there is no
+     * other thread accessing the queues at the same time. */
+    int (*set_multiq)(struct netdev *netdev, unsigned int n_txq,
+                      unsigned int n_rxq);
+
     /* Sends buffers on 'netdev'.
-     * Returns 0 if successful (for every buffer), otherwise a positive errno value.
-     * Returns EAGAIN without blocking if one or more packets cannot be
+     * Returns 0 if successful (for every buffer), otherwise a positive errno
+     * value.  Returns EAGAIN without blocking if one or more packets cannot be
      * queued immediately. Returns EMSGSIZE if a partial packet was transmitted
      * or if a packet is too big or too small to transmit on the device.
      *
@@ -261,9 +297,11 @@ struct netdev_class {
      *
      * To retain ownership of 'buffers' caller can set may_steal to false.
      *
-     * The network device is expected to maintain a packet transmission queue,
-     * so that the caller does not ordinarily have to do additional queuing of
-     * packets.
+     * The network device is expected to maintain one or more packet
+     * transmission queues, so that the caller does not ordinarily have to
+     * do additional queuing of packets.  'qid' specifies the queue to use
+     * and can be ignored if the implementation does not support multiple
+     * queues.
      *
      * May return EOPNOTSUPP if a network device does not implement packet
      * transmission through this interface.  This function may be set to null
@@ -271,29 +309,33 @@ struct netdev_class {
      * network device from being usefully used by the netdev-based "userspace
      * datapath".  It will also prevent the OVS implementation of bonding from
      * working properly over 'netdev'.) */
-    int (*send)(struct netdev *netdev, struct dpif_packet **buffers, int cnt,
-                bool may_steal);
+    int (*send)(struct netdev *netdev, int qid, struct dpif_packet **buffers,
+                int cnt, bool may_steal);
 
     /* Registers with the poll loop to wake up from the next call to
      * poll_block() when the packet transmission queue for 'netdev' has
      * sufficient room to transmit a packet with netdev_send().
      *
-     * The network device is expected to maintain a packet transmission queue,
-     * so that the caller does not ordinarily have to do additional queuing of
-     * packets.  Thus, this function is unlikely to ever be useful.
+     * The network device is expected to maintain one or more packet
+     * transmission queues, so that the caller does not ordinarily have to
+     * do additional queuing of packets.  'qid' specifies the queue to use
+     * and can be ignored if the implementation does not support multiple
+     * queues.
      *
      * May be null if not needed, such as for a network device that does not
      * implement packet transmission through the 'send' member function. */
-    void (*send_wait)(struct netdev *netdev);
+    void (*send_wait)(struct netdev *netdev, int qid);
 
     /* Sets 'netdev''s Ethernet address to 'mac' */
-    int (*set_etheraddr)(struct netdev *netdev, const uint8_t mac[6]);
+    int (*set_etheraddr)(struct netdev *netdev,
+                         const uint8_t mac[ETH_ADDR_LEN]);
 
     /* Retrieves 'netdev''s Ethernet address into 'mac'.
      *
      * This address will be advertised as 'netdev''s MAC address through the
      * OpenFlow protocol, among other uses. */
-    int (*get_etheraddr)(const struct netdev *netdev, uint8_t mac[6]);
+    int (*get_etheraddr)(const struct netdev *netdev,
+                         uint8_t mac[ETH_ADDR_LEN]);
 
     /* Retrieves 'netdev''s MTU into '*mtup'.
      *
@@ -358,14 +400,6 @@ struct netdev_class {
      * set the values of the unsupported statistics to all-1-bits
      * (UINT64_MAX). */
     int (*get_stats)(const struct netdev *netdev, struct netdev_stats *);
-
-    /* Sets the device stats for 'netdev' to 'stats'.
-     *
-     * Most network devices won't support this feature and will set this
-     * function pointer to NULL, which is equivalent to returning EOPNOTSUPP.
-     *
-     * Some network devices might only allow setting their stats to 0. */
-    int (*set_stats)(struct netdev *netdev, const struct netdev_stats *);
 
     /* Stores the features supported by 'netdev' into each of '*current',
      * '*advertised', '*supported', and '*peer'.  Each value is a bitmap of
@@ -639,7 +673,7 @@ struct netdev_class {
      * This function may be set to null if it would always return EOPNOTSUPP
      * anyhow. */
     int (*arp_lookup)(const struct netdev *netdev, ovs_be32 ip,
-                      uint8_t mac[6]);
+                      uint8_t mac[ETH_ADDR_LEN]);
 
     /* Retrieves the current set of flags on 'netdev' into '*old_flags'.  Then,
      * turns off the flags that are set to 1 in 'off' and turns on the flags
@@ -691,12 +725,15 @@ struct netdev_class {
 int netdev_register_provider(const struct netdev_class *);
 int netdev_unregister_provider(const char *type);
 
-extern const struct netdev_class netdev_linux_class;
-extern const struct netdev_class netdev_internal_class;
-extern const struct netdev_class netdev_tap_class;
 #if defined(__FreeBSD__) || defined(__NetBSD__)
 extern const struct netdev_class netdev_bsd_class;
+#elif defined(_WIN32)
+extern const struct netdev_class netdev_windows_class;
+#else
+extern const struct netdev_class netdev_linux_class;
 #endif
+extern const struct netdev_class netdev_internal_class;
+extern const struct netdev_class netdev_tap_class;
 
 #ifdef  __cplusplus
 }

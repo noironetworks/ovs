@@ -106,7 +106,7 @@ static size_t n_criteria, allocated_criteria;
 
 static const struct command *get_all_commands(void);
 
-static void usage(void) NO_RETURN;
+NO_RETURN static void usage(void);
 static void parse_options(int argc, char *argv[]);
 
 static bool recv_flow_stats_reply(struct vconn *, ovs_be32 send_xid,
@@ -171,6 +171,7 @@ parse_options(int argc, char *argv[])
         {"rsort", optional_argument, NULL, OPT_RSORT},
         {"unixctl",     required_argument, NULL, OPT_UNIXCTL},
         {"help", no_argument, NULL, 'h'},
+        {"option", no_argument, NULL, 'o'},
         DAEMON_LONG_OPTIONS,
         OFP_VERSION_LONG_OPTIONS,
         VLOG_LONG_OPTIONS,
@@ -239,6 +240,10 @@ parse_options(int argc, char *argv[])
 
         case 'h':
             usage();
+
+        case 'o':
+            print_options(long_options);
+            exit(EXIT_SUCCESS);
 
         case OPT_STRICT:
             strict = true;
@@ -334,9 +339,11 @@ usage(void)
            "                              print packets received from SWITCH\n"
            "  snoop SWITCH                snoop on SWITCH and its controller\n"
            "  add-group SWITCH GROUP      add group described by GROUP\n"
-           "  add-group SWITCH FILE       add group from FILE\n"
+           "  add-groups SWITCH FILE      add group from FILE\n"
            "  mod-group SWITCH GROUP      modify specific group\n"
            "  del-groups SWITCH [GROUP]   delete matching GROUPs\n"
+           "  insert-buckets SWITCH [GROUP] add buckets to GROUP\n"
+           "  remove-buckets SWITCH [GROUP] remove buckets from GROUP\n"
            "  dump-group-features SWITCH  print group features\n"
            "  dump-groups SWITCH [GROUP]  print group description\n"
            "  dump-group-stats SWITCH [GROUP]  print group statistics\n"
@@ -984,8 +991,8 @@ compare_flows(const void *afs_, const void *bfs_)
         int ret;
 
         if (!f) {
-            unsigned int a_pri = afs->priority;
-            unsigned int b_pri = bfs->priority;
+            int a_pri = afs->priority;
+            int b_pri = bfs->priority;
             ret = a_pri < b_pri ? -1 : a_pri > b_pri;
         } else {
             bool ina, inb;
@@ -1018,7 +1025,8 @@ static void
 ofctl_dump_flows(int argc, char *argv[])
 {
     if (!n_criteria) {
-        return ofctl_dump_flows__(argc, argv, false);
+        ofctl_dump_flows__(argc, argv, false);
+        return;
     } else {
         struct ofputil_flow_stats *fses;
         size_t n_fses, allocated_fses;
@@ -1077,7 +1085,7 @@ ofctl_dump_flows(int argc, char *argv[])
 static void
 ofctl_dump_aggregate(int argc, char *argv[])
 {
-    return ofctl_dump_flows__(argc, argv, true);
+    ofctl_dump_flows__(argc, argv, true);
 }
 
 static void
@@ -2077,19 +2085,22 @@ ofctl_benchmark(int argc OVS_UNUSED, char *argv[])
 
 static void
 ofctl_group_mod__(const char *remote, struct ofputil_group_mod *gms,
-                 size_t n_gms)
+                  size_t n_gms, enum ofputil_protocol usable_protocols)
 {
+    enum ofputil_protocol protocol;
     struct ofputil_group_mod *gm;
+    enum ofp_version version;
     struct ofpbuf *request;
 
     struct vconn *vconn;
     size_t i;
 
-    open_vconn(remote, &vconn);
+    protocol = open_vconn_for_flow_mod(remote, &vconn, usable_protocols);
+    version = ofputil_protocol_to_ofp_version(protocol);
 
     for (i = 0; i < n_gms; i++) {
         gm = &gms[i];
-        request = ofputil_encode_group_mod(vconn_get_version(vconn), gm);
+        request = ofputil_encode_group_mod(version, gm);
         if (request) {
             transact_noreply(vconn, request);
         }
@@ -2107,13 +2118,17 @@ ofctl_group_mod_file(int argc OVS_UNUSED, char *argv[], uint16_t command)
     enum ofputil_protocol usable_protocols;
     size_t n_gms = 0;
     char *error;
+    int i;
 
     error = parse_ofp_group_mod_file(argv[2], command, &gms, &n_gms,
                                      &usable_protocols);
     if (error) {
         ovs_fatal(0, "%s", error);
     }
-    ofctl_group_mod__(argv[1], gms, n_gms);
+    ofctl_group_mod__(argv[1], gms, n_gms, usable_protocols);
+    for (i = 0; i < n_gms; i++) {
+        ofputil_bucket_list_destroy(&gms[i].buckets);
+    }
     free(gms);
 }
 
@@ -2132,7 +2147,8 @@ ofctl_group_mod(int argc, char *argv[], uint16_t command)
         if (error) {
             ovs_fatal(0, "%s", error);
         }
-        ofctl_group_mod__(argv[1], &gm, 1);
+        ofctl_group_mod__(argv[1], &gm, 1, usable_protocols);
+        ofputil_bucket_list_destroy(&gm.buckets);
     }
 }
 
@@ -2158,6 +2174,18 @@ static void
 ofctl_del_groups(int argc, char *argv[])
 {
     ofctl_group_mod(argc, argv, OFPGC11_DELETE);
+}
+
+static void
+ofctl_insert_bucket(int argc, char *argv[])
+{
+    ofctl_group_mod(argc, argv, OFPGC15_INSERT_BUCKET);
+}
+
+static void
+ofctl_remove_bucket(int argc, char *argv[])
+{
+    ofctl_group_mod(argc, argv, OFPGC15_REMOVE_BUCKET);
 }
 
 static void
@@ -2233,6 +2261,12 @@ ofctl_help(int argc OVS_UNUSED, char *argv[] OVS_UNUSED)
 {
     usage();
 }
+
+static void
+ofctl_list_commands(int argc OVS_UNUSED, char *argv[] OVS_UNUSED)
+{
+    print_commands(get_all_commands());
+}
 
 /* replace-flows and diff-flows commands. */
 
@@ -2247,6 +2281,7 @@ struct fte_version {
     ovs_be64 cookie;
     uint16_t idle_timeout;
     uint16_t hard_timeout;
+    uint16_t importance;
     uint16_t flags;
     struct ofpact *ofpacts;
     size_t ofpacts_len;
@@ -2272,6 +2307,7 @@ fte_version_equals(const struct fte_version *a, const struct fte_version *b)
     return (a->cookie == b->cookie
             && a->idle_timeout == b->idle_timeout
             && a->hard_timeout == b->hard_timeout
+            && a->importance == b->importance
             && ofpacts_equal(a->ofpacts, a->ofpacts_len,
                              b->ofpacts, b->ofpacts_len));
 }
@@ -2297,6 +2333,9 @@ fte_version_format(const struct fte *fte, int index, struct ds *s)
     }
     if (version->hard_timeout != OFP_FLOW_PERMANENT) {
         ds_put_format(s, " hard_timeout=%"PRIu16, version->hard_timeout);
+    }
+    if (version->importance != 0) {
+        ds_put_format(s, " importance=%"PRIu16, version->importance);
     }
 
     ds_put_cstr(s, " actions=");
@@ -2329,9 +2368,10 @@ fte_free_all(struct classifier *cls)
 {
     struct fte *fte;
 
-    CLS_FOR_EACH_SAFE (fte, rule, cls) {
+    classifier_defer(cls);
+    CLS_FOR_EACH (fte, rule, cls) {
         classifier_remove(cls, &fte->rule);
-        fte_free(fte);
+        ovsrcu_postpone(fte_free, fte);
     }
     classifier_destroy(cls);
 }
@@ -2343,7 +2383,7 @@ fte_free_all(struct classifier *cls)
  * Takes ownership of 'version'. */
 static void
 fte_insert(struct classifier *cls, const struct match *match,
-           unsigned int priority, struct fte_version *version, int index)
+           int priority, struct fte_version *version, int index)
 {
     struct fte *old, *fte;
 
@@ -2353,10 +2393,10 @@ fte_insert(struct classifier *cls, const struct match *match,
 
     old = fte_from_cls_rule(classifier_replace(cls, &fte->rule));
     if (old) {
-        fte_version_free(old->versions[index]);
         fte->versions[!index] = old->versions[!index];
-        cls_rule_destroy(&old->rule);
-        free(old);
+        old->versions[!index] = NULL;
+
+        ovsrcu_postpone(fte_free, old);
     }
 }
 
@@ -2379,6 +2419,7 @@ read_flows_from_file(const char *filename, struct classifier *cls, int index)
     ds_init(&s);
     usable_protocols = OFPUTIL_P_ANY;
     line_number = 0;
+    classifier_defer(cls);
     while (!ds_get_preprocessed_line(&s, file, &line_number)) {
         struct fte_version *version;
         struct ofputil_flow_mod fm;
@@ -2395,6 +2436,7 @@ read_flows_from_file(const char *filename, struct classifier *cls, int index)
         version->cookie = fm.new_cookie;
         version->idle_timeout = fm.idle_timeout;
         version->hard_timeout = fm.hard_timeout;
+        version->importance = fm.importance;
         version->flags = fm.flags & (OFPUTIL_FF_SEND_FLOW_REM
                                      | OFPUTIL_FF_EMERG);
         version->ofpacts = fm.ofpacts;
@@ -2402,6 +2444,7 @@ read_flows_from_file(const char *filename, struct classifier *cls, int index)
 
         fte_insert(cls, &fm.match, fm.priority, version, index);
     }
+    classifier_publish(cls);
     ds_destroy(&s);
 
     if (file != stdin) {
@@ -2490,6 +2533,7 @@ read_flows_from_switch(struct vconn *vconn,
 
     reply = NULL;
     ofpbuf_init(&ofpacts, 0);
+    classifier_defer(cls);
     while (recv_flow_stats_reply(vconn, send_xid, &reply, &fs, &ofpacts)) {
         struct fte_version *version;
 
@@ -2497,12 +2541,14 @@ read_flows_from_switch(struct vconn *vconn,
         version->cookie = fs.cookie;
         version->idle_timeout = fs.idle_timeout;
         version->hard_timeout = fs.hard_timeout;
+        version->importance = fs.importance;
         version->flags = 0;
         version->ofpacts_len = fs.ofpacts_len;
         version->ofpacts = xmemdup(fs.ofpacts, fs.ofpacts_len);
 
         fte_insert(cls, &fs.match, fs.priority, version, index);
     }
+    classifier_publish(cls);
     ofpbuf_uninit(&ofpacts);
 }
 
@@ -2524,6 +2570,7 @@ fte_make_flow_mod(const struct fte *fte, int index, uint16_t command,
     fm.command = command;
     fm.idle_timeout = version->idle_timeout;
     fm.hard_timeout = version->hard_timeout;
+    fm.importance = version->importance;
     fm.buffer_id = UINT32_MAX;
     fm.out_port = OFPP_ANY;
     fm.flags = version->flags;
@@ -2878,6 +2925,11 @@ ofctl_parse_nxm__(bool oxm, enum ofp_version version)
 
             puts(out);
             free(out);
+
+            if (verbosity > 0) {
+                ovs_hex_dump(stdout, ofpbuf_data(&nx_match),
+                             ofpbuf_size(&nx_match), 0, false);
+            }
         } else {
             printf("nx_pull_match() returned error %s\n",
                    ofperr_get_name(error));
@@ -2894,7 +2946,7 @@ ofctl_parse_nxm__(bool oxm, enum ofp_version version)
 static void
 ofctl_parse_nxm(int argc OVS_UNUSED, char *argv[] OVS_UNUSED)
 {
-    return ofctl_parse_nxm__(false, 0);
+    ofctl_parse_nxm__(false, 0);
 }
 
 /* "parse-oxm VERSION": reads a series of OXM nx_match specifications as
@@ -2909,7 +2961,7 @@ ofctl_parse_oxm(int argc OVS_UNUSED, char *argv[])
         ovs_fatal(0, "%s: not a valid version for OXM", argv[1]);
     }
 
-    return ofctl_parse_nxm__(true, version);
+    ofctl_parse_nxm__(true, version);
 }
 
 static void
@@ -3432,71 +3484,119 @@ ofctl_encode_hello(int argc OVS_UNUSED, char *argv[])
 }
 
 static const struct command all_commands[] = {
-    { "show", 1, 1, ofctl_show },
-    { "monitor", 1, 3, ofctl_monitor },
-    { "snoop", 1, 1, ofctl_snoop },
-    { "dump-desc", 1, 1, ofctl_dump_desc },
-    { "dump-tables", 1, 1, ofctl_dump_tables },
-    { "dump-table-features", 1, 1, ofctl_dump_table_features },
-    { "dump-flows", 1, 2, ofctl_dump_flows },
-    { "dump-aggregate", 1, 2, ofctl_dump_aggregate },
-    { "queue-stats", 1, 3, ofctl_queue_stats },
-    { "queue-get-config", 2, 2, ofctl_queue_get_config },
-    { "add-flow", 2, 2, ofctl_add_flow },
-    { "add-flows", 2, 2, ofctl_add_flows },
-    { "mod-flows", 2, 2, ofctl_mod_flows },
-    { "del-flows", 1, 2, ofctl_del_flows },
-    { "replace-flows", 2, 2, ofctl_replace_flows },
-    { "diff-flows", 2, 2, ofctl_diff_flows },
-    { "add-meter", 2, 2, ofctl_add_meter },
-    { "mod-meter", 2, 2, ofctl_mod_meter },
-    { "del-meter", 2, 2, ofctl_del_meters },
-    { "del-meters", 1, 1, ofctl_del_meters },
-    { "dump-meter", 2, 2, ofctl_dump_meters },
-    { "dump-meters", 1, 1, ofctl_dump_meters },
-    { "meter-stats", 1, 2, ofctl_meter_stats },
-    { "meter-features", 1, 1, ofctl_meter_features },
-    { "packet-out", 4, INT_MAX, ofctl_packet_out },
-    { "dump-ports", 1, 2, ofctl_dump_ports },
-    { "dump-ports-desc", 1, 2, ofctl_dump_ports_desc },
-    { "mod-port", 3, 3, ofctl_mod_port },
-    { "mod-table", 3, 3, ofctl_mod_table },
-    { "get-frags", 1, 1, ofctl_get_frags },
-    { "set-frags", 2, 2, ofctl_set_frags },
-    { "probe", 1, 1, ofctl_probe },
-    { "ping", 1, 2, ofctl_ping },
-    { "benchmark", 3, 3, ofctl_benchmark },
+    { "show", "switch",
+      1, 1, ofctl_show },
+    { "monitor", "switch [misslen] [invalid_ttl] [watch:[...]]",
+      1, 3, ofctl_monitor },
+    { "snoop", "switch",
+      1, 1, ofctl_snoop },
+    { "dump-desc", "switch",
+      1, 1, ofctl_dump_desc },
+    { "dump-tables", "switch",
+      1, 1, ofctl_dump_tables },
+    { "dump-table-features", "switch",
+      1, 1, ofctl_dump_table_features },
+    { "dump-flows", "switch",
+      1, 2, ofctl_dump_flows },
+    { "dump-aggregate", "switch",
+      1, 2, ofctl_dump_aggregate },
+    { "queue-stats", "switch [port [queue]]",
+      1, 3, ofctl_queue_stats },
+    { "queue-get-config", "switch port",
+      2, 2, ofctl_queue_get_config },
+    { "add-flow", "switch flow",
+      2, 2, ofctl_add_flow },
+    { "add-flows", "switch file",
+      2, 2, ofctl_add_flows },
+    { "mod-flows", "switch flow",
+      2, 2, ofctl_mod_flows },
+    { "del-flows", "switch [flow]",
+      1, 2, ofctl_del_flows },
+    { "replace-flows", "switch file",
+      2, 2, ofctl_replace_flows },
+    { "diff-flows", "source1 source2",
+      2, 2, ofctl_diff_flows },
+    { "add-meter", "switch meter",
+      2, 2, ofctl_add_meter },
+    { "mod-meter", "switch meter",
+      2, 2, ofctl_mod_meter },
+    { "del-meter", "switch meter",
+      2, 2, ofctl_del_meters },
+    { "del-meters", "switch",
+      1, 1, ofctl_del_meters },
+    { "dump-meter", "switch meter",
+      2, 2, ofctl_dump_meters },
+    { "dump-meters", "switch",
+      1, 1, ofctl_dump_meters },
+    { "meter-stats", "switch [meter]",
+      1, 2, ofctl_meter_stats },
+    { "meter-features", "switch",
+      1, 1, ofctl_meter_features },
+    { "packet-out", "switch in_port actions packet...",
+      4, INT_MAX, ofctl_packet_out },
+    { "dump-ports", "switch [port]",
+      1, 2, ofctl_dump_ports },
+    { "dump-ports-desc", "switch [port]",
+      1, 2, ofctl_dump_ports_desc },
+    { "mod-port", "switch iface act",
+      3, 3, ofctl_mod_port },
+    { "mod-table", "switch mod",
+      3, 3, ofctl_mod_table },
+    { "get-frags", "switch",
+      1, 1, ofctl_get_frags },
+    { "set-frags", "switch frag_mode",
+      2, 2, ofctl_set_frags },
+    { "probe", "target",
+      1, 1, ofctl_probe },
+    { "ping", "target [n]",
+      1, 2, ofctl_ping },
+    { "benchmark", "target n count",
+      3, 3, ofctl_benchmark },
 
-    { "ofp-parse", 1, 1, ofctl_ofp_parse },
-    { "ofp-parse-pcap", 1, INT_MAX, ofctl_ofp_parse_pcap },
+    { "ofp-parse", "file",
+      1, 1, ofctl_ofp_parse },
+    { "ofp-parse-pcap", "pcap",
+      1, INT_MAX, ofctl_ofp_parse_pcap },
 
-    { "add-group", 1, 2, ofctl_add_group },
-    { "add-groups", 1, 2, ofctl_add_groups },
-    { "mod-group", 1, 2, ofctl_mod_group },
-    { "del-groups", 1, 2, ofctl_del_groups },
-    { "dump-groups", 1, 2, ofctl_dump_group_desc },
-    { "dump-group-stats", 1, 2, ofctl_dump_group_stats },
-    { "dump-group-features", 1, 1, ofctl_dump_group_features },
-    { "help", 0, INT_MAX, ofctl_help },
+    { "add-group", "switch group",
+      1, 2, ofctl_add_group },
+    { "add-groups", "switch file",
+      1, 2, ofctl_add_groups },
+    { "mod-group", "switch group",
+      1, 2, ofctl_mod_group },
+    { "del-groups", "switch [group]",
+      1, 2, ofctl_del_groups },
+    { "insert-buckets", "switch [group]",
+      1, 2, ofctl_insert_bucket },
+    { "remove-buckets", "switch [group]",
+      1, 2, ofctl_remove_bucket },
+    { "dump-groups", "switch [group]",
+      1, 2, ofctl_dump_group_desc },
+    { "dump-group-stats", "switch [group]",
+      1, 2, ofctl_dump_group_stats },
+    { "dump-group-features", "switch",
+      1, 1, ofctl_dump_group_features },
+    { "help", NULL, 0, INT_MAX, ofctl_help },
+    { "list-commands", NULL, 0, INT_MAX, ofctl_list_commands },
 
     /* Undocumented commands for testing. */
-    { "parse-flow", 1, 1, ofctl_parse_flow },
-    { "parse-flows", 1, 1, ofctl_parse_flows },
-    { "parse-nx-match", 0, 0, ofctl_parse_nxm },
-    { "parse-nxm", 0, 0, ofctl_parse_nxm },
-    { "parse-oxm", 1, 1, ofctl_parse_oxm },
-    { "parse-actions", 1, 1, ofctl_parse_actions },
-    { "parse-instructions", 1, 1, ofctl_parse_instructions },
-    { "parse-ofp10-match", 0, 0, ofctl_parse_ofp10_match },
-    { "parse-ofp11-match", 0, 0, ofctl_parse_ofp11_match },
-    { "parse-pcap", 1, 1, ofctl_parse_pcap },
-    { "check-vlan", 2, 2, ofctl_check_vlan },
-    { "print-error", 1, 1, ofctl_print_error },
-    { "encode-error-reply", 2, 2, ofctl_encode_error_reply },
-    { "ofp-print", 1, 2, ofctl_ofp_print },
-    { "encode-hello", 1, 1, ofctl_encode_hello },
+    { "parse-flow", NULL, 1, 1, ofctl_parse_flow },
+    { "parse-flows", NULL, 1, 1, ofctl_parse_flows },
+    { "parse-nx-match", NULL, 0, 0, ofctl_parse_nxm },
+    { "parse-nxm", NULL, 0, 0, ofctl_parse_nxm },
+    { "parse-oxm", NULL, 1, 1, ofctl_parse_oxm },
+    { "parse-actions", NULL, 1, 1, ofctl_parse_actions },
+    { "parse-instructions", NULL, 1, 1, ofctl_parse_instructions },
+    { "parse-ofp10-match", NULL, 0, 0, ofctl_parse_ofp10_match },
+    { "parse-ofp11-match", NULL, 0, 0, ofctl_parse_ofp11_match },
+    { "parse-pcap", NULL, 1, 1, ofctl_parse_pcap },
+    { "check-vlan", NULL, 2, 2, ofctl_check_vlan },
+    { "print-error", NULL, 1, 1, ofctl_print_error },
+    { "encode-error-reply", NULL, 2, 2, ofctl_encode_error_reply },
+    { "ofp-print", NULL, 1, 2, ofctl_ofp_print },
+    { "encode-hello", NULL, 1, 1, ofctl_encode_hello },
 
-    { NULL, 0, 0, NULL },
+    { NULL, NULL, 0, 0, NULL },
 };
 
 static const struct command *get_all_commands(void)

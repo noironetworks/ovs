@@ -68,7 +68,9 @@ static void vxlan_rcv(struct vxlan_sock *vs, struct sk_buff *skb, __be32 vx_vni)
 	/* Save outer tunnel values */
 	iph = ip_hdr(skb);
 	key = cpu_to_be64(ntohl(vx_vni) >> 8);
-	ovs_flow_tun_info_init(&tun_info, iph, key, TUNNEL_KEY, NULL, 0);
+	ovs_flow_tun_info_init(&tun_info, iph,
+			       udp_hdr(skb)->source, udp_hdr(skb)->dest,
+			       key, TUNNEL_KEY, NULL, 0);
 
 	ovs_vport_receive(vport, skb, &tun_info);
 }
@@ -147,8 +149,6 @@ static int vxlan_tnl_send(struct vport *vport, struct sk_buff *skb)
 	__be16 src_port;
 	__be32 saddr;
 	__be16 df;
-	int port_min;
-	int port_max;
 	int err;
 
 	if (unlikely(!OVS_CB(skb)->egress_tun_info)) {
@@ -170,10 +170,9 @@ static int vxlan_tnl_send(struct vport *vport, struct sk_buff *skb)
 	}
 
 	df = tun_key->tun_flags & TUNNEL_DONT_FRAGMENT ? htons(IP_DF) : 0;
-	skb->local_df = 1;
+	skb->ignore_df = 1;
 
-	inet_get_local_port_range(net, &port_min, &port_max);
-	src_port = vxlan_src_port(port_min, port_max, skb);
+	src_port = udp_flow_src_port(net, skb, 0, 0, true);
 
 	err = vxlan_xmit_skb(vxlan_port->vs, rt, skb,
 			     saddr, tun_key->ipv4_dst,
@@ -187,6 +186,22 @@ error:
 	return err;
 }
 
+static int vxlan_get_egress_tun_info(struct vport *vport, struct sk_buff *skb,
+				     struct ovs_tunnel_info *egress_tun_info)
+{
+	struct net *net = ovs_dp_get_net(vport->dp);
+	struct vxlan_port *vxlan_port = vxlan_vport(vport);
+	__be16 dst_port = inet_sport(vxlan_port->vs->sock->sk);
+	__be16 src_port;
+
+	src_port = udp_flow_src_port(net, skb, 0, 0, true);
+
+	return ovs_tunnel_get_egress_info(egress_tun_info, net,
+					  OVS_CB(skb)->egress_tun_info,
+					  IPPROTO_UDP, skb->mark,
+					  src_port, dst_port);
+}
+
 static const char *vxlan_get_name(const struct vport *vport)
 {
 	struct vxlan_port *vxlan_port = vxlan_vport(vport);
@@ -194,10 +209,11 @@ static const char *vxlan_get_name(const struct vport *vport)
 }
 
 const struct vport_ops ovs_vxlan_vport_ops = {
-	.type		= OVS_VPORT_TYPE_VXLAN,
-	.create		= vxlan_tnl_create,
-	.destroy	= vxlan_tnl_destroy,
-	.get_name	= vxlan_get_name,
-	.get_options	= vxlan_get_options,
-	.send		= vxlan_tnl_send,
+	.type			= OVS_VPORT_TYPE_VXLAN,
+	.create			= vxlan_tnl_create,
+	.destroy		= vxlan_tnl_destroy,
+	.get_name		= vxlan_get_name,
+	.get_options		= vxlan_get_options,
+	.send			= vxlan_tnl_send,
+	.get_egress_tun_info	= vxlan_get_egress_tun_info,
 };

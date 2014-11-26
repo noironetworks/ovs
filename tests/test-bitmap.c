@@ -15,13 +15,12 @@
  */
 
 #include <config.h>
+#undef NDEBUG
 #include "bitmap.h"
+#include <assert.h>
+#include "command-line.h"
 #include "ovstest.h"
 #include "timeval.h"
-#include "command-line.h"
-
-#undef NDEBUG
-#include <assert.h>
 
 enum { MAX_BITS = 20 * BITMAP_ULONG_BITS };
 
@@ -56,6 +55,9 @@ test_bitmap_equal(void)
     assert(!bitmap_equal(a, b, 11 * BITMAP_ULONG_BITS - 1));
     assert(!bitmap_equal(a, b,
                          11 * BITMAP_ULONG_BITS - (BITMAP_ULONG_BITS - 1)));
+
+    free(b);
+    free(a);
 }
 
 /* Tests bitmap_scan. */
@@ -79,12 +81,12 @@ test_bitmap_scan(void)
     bitmap_set1(a, MAX_BITS - 1);
     assert(bitmap_scan(a, true, 0, MAX_BITS) == MAX_BITS - 1);
     bitmap_set1(a, MAX_BITS - BITMAP_ULONG_BITS + 1);
-    assert(bitmap_scan(a, true, 0, MAX_BITS - 1)
+    assert(bitmap_scan(a, true, 3, MAX_BITS)
            == MAX_BITS - BITMAP_ULONG_BITS + 1);
     bitmap_set1(a, BITMAP_ULONG_BITS - 1);
-    assert(bitmap_scan(a, true, 0, MAX_BITS - 1) == BITMAP_ULONG_BITS - 1);
+    assert(bitmap_scan(a, true, 7, MAX_BITS - 1) == BITMAP_ULONG_BITS - 1);
     bitmap_set1(a, 0);
-    assert(bitmap_scan(a, true, 0, MAX_BITS - 1) == 0);
+    assert(bitmap_scan(a, true, 0, MAX_BITS - 7) == 0);
 
     bitmap_set_multiple(a, 0, MAX_BITS, true);
 
@@ -101,12 +103,14 @@ test_bitmap_scan(void)
     bitmap_set0(a, MAX_BITS - 1);
     assert(bitmap_scan(a, false, 0, MAX_BITS) == MAX_BITS - 1);
     bitmap_set0(a, MAX_BITS - BITMAP_ULONG_BITS + 1);
-    assert(bitmap_scan(a, false, 0, MAX_BITS - 1)
+    assert(bitmap_scan(a, false, 3, MAX_BITS)
            == MAX_BITS - BITMAP_ULONG_BITS + 1);
     bitmap_set0(a, BITMAP_ULONG_BITS - 1);
-    assert(bitmap_scan(a, false, 0, MAX_BITS - 1) == BITMAP_ULONG_BITS - 1);
+    assert(bitmap_scan(a, false, 7, MAX_BITS - 1) == BITMAP_ULONG_BITS - 1);
     bitmap_set0(a, 0);
-    assert(bitmap_scan(a, false, 0, MAX_BITS - 1) == 0);
+    assert(bitmap_scan(a, false, 0, MAX_BITS - 7) == 0);
+
+    free(a);
 }
 
 static void
@@ -145,9 +149,9 @@ run_benchmarks(int argc OVS_UNUSED, char *argv[])
 }
 
 static const struct command commands[] = {
-    {"check", 0, 0, run_tests},
-    {"benchmark", 1, 1, run_benchmarks},
-    {NULL, 0, 0, NULL},
+    {"check", NULL, 0, 0, run_tests},
+    {"benchmark", NULL, 1, 1, run_benchmarks},
+    {NULL, NULL, 0, 0, NULL},
 };
 
 static void

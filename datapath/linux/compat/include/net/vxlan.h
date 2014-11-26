@@ -4,9 +4,10 @@
 #include <linux/skbuff.h>
 #include <linux/netdevice.h>
 #include <linux/udp.h>
+#include <net/gre.h>
 
 #include <linux/version.h>
-#if LINUX_VERSION_CODE >= KERNEL_VERSION(3,12,0)
+#ifdef USE_KERNEL_TUNNEL_API
 #include_next <net/vxlan.h>
 
 
@@ -20,8 +21,19 @@ static inline int rpl_vxlan_xmit_skb(struct vxlan_sock *vs,
 		return -ENOSYS;
 	}
 
+#ifdef HAVE_VXLAN_XMIT_SKB_XNET_ARG
+	return vxlan_xmit_skb(vs, rt, skb, src, dst, tos, ttl, df,
+			      src_port, dst_port, vni, false);
+#else
+#ifndef HAVE_IPTUNNEL_XMIT_NET
 	return vxlan_xmit_skb(vs, rt, skb, src, dst, tos, ttl, df,
 			      src_port, dst_port, vni);
+#else
+	return vxlan_xmit_skb(NULL, vs, rt, skb, src, dst, tos, ttl, df,
+			      src_port, dst_port, vni);
+#endif
+
+#endif
 }
 
 #define vxlan_xmit_skb rpl_vxlan_xmit_skb

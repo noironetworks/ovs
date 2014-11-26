@@ -113,7 +113,7 @@
  *
  *      In Open vSwitch userspace, "struct flow" is the typical way to describe
  *      a flow, but the datapath interface uses a different data format to
- *      allow ABI forward- and backward-compatibility.  datapath/README
+ *      allow ABI forward- and backward-compatibility.  datapath/README.md
  *      describes the rationale and design.  Refer to OVS_KEY_ATTR_* and
  *      "struct ovs_key_*" in include/odp-netlink.h for details.
  *      lib/odp-util.h defines several functions for working with these flows.
@@ -421,7 +421,7 @@ int dpif_create(const char *name, const char *type, struct dpif **);
 int dpif_create_and_open(const char *name, const char *type, struct dpif **);
 void dpif_close(struct dpif *);
 
-void dpif_run(struct dpif *);
+bool dpif_run(struct dpif *);
 void dpif_wait(struct dpif *);
 
 const char *dpif_name(const struct dpif *);
@@ -511,7 +511,8 @@ void dpif_flow_stats_format(const struct dpif_flow_stats *, struct ds *);
 enum dpif_flow_put_flags {
     DPIF_FP_CREATE = 1 << 0,    /* Allow creating a new flow. */
     DPIF_FP_MODIFY = 1 << 1,    /* Allow modifying an existing flow. */
-    DPIF_FP_ZERO_STATS = 1 << 2 /* Zero the stats of an existing flow. */
+    DPIF_FP_ZERO_STATS = 1 << 2, /* Zero the stats of an existing flow. */
+    DPIF_FP_PROBE = 1 << 3      /* Suppress error messages, if any. */
 };
 
 int dpif_flow_flush(struct dpif *);
@@ -662,6 +663,7 @@ struct dpif_execute {
     const struct nlattr *actions;   /* Actions to execute on packet. */
     size_t actions_len;             /* Length of 'actions' in bytes. */
     bool needs_help;
+    bool probe;                     /* Suppress error messages. */
 
     /* Input, but possibly modified as a side effect of execution. */
     struct ofpbuf *packet;          /* Packet to execute. */
@@ -736,6 +738,7 @@ struct dpif_upcall {
 
     /* DPIF_UC_ACTION only. */
     struct nlattr *userdata;    /* Argument to OVS_ACTION_ATTR_USERSPACE. */
+    struct nlattr *out_tun_key;    /* Output tunnel key. */
 };
 
 /* A callback to process an upcall, currently implemented only by dpif-netdev.
@@ -768,6 +771,8 @@ void dpif_register_upcall_cb(struct dpif *, upcall_callback *, void *aux);
 
 int dpif_recv_set(struct dpif *, bool enable);
 int dpif_handlers_set(struct dpif *, uint32_t n_handlers);
+int dpif_poll_threads_set(struct dpif *, unsigned int n_rxqs,
+                          const char *cmask);
 int dpif_recv(struct dpif *, uint32_t handler_id, struct dpif_upcall *,
               struct ofpbuf *);
 void dpif_recv_purge(struct dpif *);
@@ -785,6 +790,8 @@ void dpif_get_netflow_ids(const struct dpif *,
 int dpif_queue_to_priority(const struct dpif *, uint32_t queue_id,
                            uint32_t *priority);
 
+char *dpif_get_dp_version(const struct dpif *);
+bool dpif_supports_tnl_push_pop(const struct dpif *);
 #ifdef  __cplusplus
 }
 #endif

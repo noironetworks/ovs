@@ -16,8 +16,6 @@
  * 02110-1301, USA
  */
 
-#include <linux/version.h>
-#if LINUX_VERSION_CODE < KERNEL_VERSION(3,12,0)
 
 #define pr_fmt(fmt) KBUILD_MODNAME ": " fmt
 
@@ -37,7 +35,8 @@
 #include "compat.h"
 #include "gso.h"
 
-int iptunnel_xmit(struct rtable *rt,
+#ifndef USE_KERNEL_TUNNEL_API
+int iptunnel_xmit(struct sock *sk, struct rtable *rt,
 		  struct sk_buff *skb,
 		  __be32 src, __be32 dst, __u8 proto,
 		  __u8 tos, __u8 ttl, __be16 df, bool xnet)
@@ -70,7 +69,12 @@ int iptunnel_xmit(struct rtable *rt,
 	iph->daddr	=	dst;
 	iph->saddr	=	src;
 	iph->ttl	=	ttl;
+
+#ifdef HAVE_IP_SELECT_IDENT_USING_DST_ENTRY
 	__ip_select_ident(iph, &rt_dst(rt), (skb_shinfo(skb)->gso_segs ?: 1) - 1);
+#else
+	__ip_select_ident(iph, skb_shinfo(skb)->gso_segs ?: 1);
+#endif
 
 	err = ip_local_out(skb);
 	if (unlikely(net_xmit_eval(err)))
@@ -112,4 +116,4 @@ int iptunnel_pull_header(struct sk_buff *skb, int hdr_len, __be16 inner_proto)
 	return 0;
 }
 
-#endif /* 3.12 */
+#endif

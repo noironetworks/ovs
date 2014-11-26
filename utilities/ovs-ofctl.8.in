@@ -385,6 +385,18 @@ Deletes entries from \fIswitch\fR's group table.  With only a
 \fIswitch\fR argument, deletes all groups.  Otherwise, deletes the group
 for each group entry.
 .
+.IP "\fBinsert\-buckets \fIswitch group\fR"
+.IQ "\fBinsert\-buckets \fIswitch \fB\- < \fIfile\fR"
+Add buckets to an existing group present in the \fIswitch\fR's group table.
+If no \fIcommand_bucket_id\fR is present in the group specification then all
+buckets of the group are removed.
+.
+.IP "\fBremove\-buckets \fIswitch group\fR"
+.IQ "\fBremove\-buckets \fIswitch \fB\- < \fIfile\fR"
+Remove buckets to an existing group present in the \fIswitch\fR's group table.
+If no \fIcommand_bucket_id\fR is present in the group specification then all
+buckets of the group are removed.
+.
 .SS "OpenFlow Switch Monitoring Commands"
 .
 .IP "\fBsnoop \fIswitch\fR"
@@ -537,8 +549,8 @@ if it also specifies particular L2 and L3 protocol types.  For
 example, if the L2 protocol type \fBdl_type\fR is wildcarded, then L3
 fields \fBnw_src\fR, \fBnw_dst\fR, and \fBnw_proto\fR must also be
 wildcarded.  Similarly, if \fBdl_type\fR or \fBnw_proto\fR (the L3
-protocol type) is wildcarded, so must be \fBtp_dst\fR and
-\fBtp_src\fR, which are L4 fields.  \fBovs\-ofctl\fR will warn about
+protocol type) is wildcarded, so must be the L4 fields \fBtcp_dst\fR and
+\fBtcp_src\fR.  \fBovs\-ofctl\fR will warn about
 flows not in normal form.
 .PP
 The following field assignments describe how a flow matches a packet.
@@ -688,21 +700,27 @@ When \fBdl_type\fR is wildcarded or set to a value other than 0x0800 or
 above).
 .IP
 .
-.IP \fBtp_src=\fIport\fR
-.IQ \fBtp_dst=\fIport\fR
-When \fBdl_type\fR and \fBnw_proto\fR specify TCP or UDP or SCTP, \fBtp_src\fR
-and \fBtp_dst\fR match the UDP or TCP or SCTP source or destination port
-\fIport\fR, respectively, which is specified as a decimal number
-between 0 and 65535, inclusive (e.g. 80 to match packets originating
-from a HTTP server).
+.IP \fBtcp_src=\fIport\fR
+.IQ \fBtcp_dst=\fIport\fR
+.IQ \fBudp_src=\fIport\fR
+.IQ \fBudp_dst=\fIport\fR
+.IQ \fBsctp_src=\fIport\fR
+.IQ \fBsctp_dst=\fIport\fR
+Matches a TCP, UDP, or SCTP source or destination port \fIport\fR,
+which is specified as a decimal number between 0 and 65535, inclusive.
 .IP
-When \fBdl_type\fR and \fBnw_proto\fR take other values, the values of
-these settings are ignored (see \fBFlow Syntax\fR above).
+When \fBdl_type\fR and \fBnw_proto\fR are wildcarded or set to values
+that do not indicate an appropriate protocol, the values of these
+settings are ignored (see \fBFlow Syntax\fR above).
 .
-.IP \fBtp_src=\fIport\fB/\fImask\fR
-.IQ \fBtp_dst=\fIport\fB/\fImask\fR
-Bitwise match on TCP (or UDP or SCTP) source or destination port,
-respectively.  The \fIport\fR and \fImask\fR are 16-bit numbers
+.IP \fBtcp_src=\fIport\fB/\fImask\fR
+.IQ \fBtcp_dst=\fIport\fB/\fImask\fR
+.IQ \fBudp_src=\fIport\fB/\fImask\fR
+.IQ \fBudp_dst=\fIport\fB/\fImask\fR
+.IQ \fBsctp_src=\fIport\fB/\fImask\fR
+.IQ \fBsctp_dst=\fIport\fB/\fImask\fR
+Bitwise match on TCP (or UDP or SCTP) source or destination port.
+The \fIport\fR and \fImask\fR are 16-bit numbers
 written in decimal or in hexadecimal prefixed by \fB0x\fR.  Each 1-bit
 in \fImask\fR requires that the corresponding bit in \fIport\fR must
 match.  Each 0-bit in \fImask\fR causes the corresponding bit to be
@@ -740,26 +758,31 @@ accomplish the same results:
 which become the following when written in the syntax required by
 \fBovs\-ofctl\fR:
 .br
-.B "tcp,tp_src=0x03e8/0xfff8"
+.B "tcp,tcp_src=0x03e8/0xfff8"
 .br
-.B "tcp,tp_src=0x03f0/0xfff0"
+.B "tcp,tcp_src=0x03f0/0xfff0"
 .br
-.B "tcp,tp_src=0x0400/0xfe00"
+.B "tcp,tcp_src=0x0400/0xfe00"
 .br
-.B "tcp,tp_src=0x0600/0xff00"
+.B "tcp,tcp_src=0x0600/0xff00"
 .br
-.B "tcp,tp_src=0x0700/0xff80"
+.B "tcp,tcp_src=0x0700/0xff80"
 .br
-.B "tcp,tp_src=0x0780/0xffc0"
+.B "tcp,tcp_src=0x0780/0xffc0"
 .br
-.B "tcp,tp_src=0x07c0/0xfff0"
+.B "tcp,tcp_src=0x07c0/0xfff0"
 .IP
 Only Open vSwitch 1.6 and later supports bitwise matching on transport
 ports.
 .IP
-Like the exact-match forms of \fBtp_src\fR and \fBtp_dst\fR described
+Like the exact-match forms described
 above, the bitwise match forms apply only when \fBdl_type\fR and
 \fBnw_proto\fR specify TCP or UDP or SCTP.
+.
+.IP \fBtp_src=\fIport\fR
+.IQ \fBtp_dst=\fIport\fR
+These are deprecated generic forms of L4 port matches.  In new code,
+please use the TCP-, UDP-, or SCTP-specific forms described above.
 .
 .IP \fBtcp_flags=\fIflags\fB/\fImask\fR
 .IQ \fBtcp_flags=\fR[\fB+\fIflag\fR...][\fB-\fIflag\fR...]
@@ -1092,7 +1115,7 @@ Matches \fIvalue\fR either exactly or with optional \fImask\fR in
 extended registers overlays two of the 32-bit registers: \fBxreg0\fR
 overlays \fBreg0\fR and \fBreg1\fR, with \fBreg0\fR supplying the
 most-significant bits of \fBxreg0\fR and \fBreg1\fR the
-least-significant.  f\fBxreg1\fR similarly overlays \fBreg2\fR and
+least-significant.  \fBxreg1\fR similarly overlays \fBreg2\fR and
 \fBreg3\fR, and so on.
 .IP
 These fields were added in Open vSwitch 2.3 to conform with the
@@ -1108,6 +1131,16 @@ system components in order to facilitate interaction between subsystems.
 On Linux this corresponds to the skb mark but the exact implementation is
 platform-dependent.
 .
+.IP \fBactset_output=\fIport\fR
+Matches the output port currently in the OpenFlow action set, where
+\fIport\fR may be an OpenFlow port number or keyword
+(e.g. \fBLOCAL\fR).  If there is no output port in the OpenFlow action
+set, or if the output port will be ignored (e.g. because there is an
+output group in the OpenFlow action set), then the value will be
+\fBUNSET\fR.
+.IP
+This field was introduced in Open vSwitch 2.4 to conform with the
+OpenFlow 1.5 (draft) specification.
 .PP
 Defining IPv6 flows (those with \fBdl_type\fR equal to 0x86dd) requires
 support for NXM.  The following shorthand notations are available for
@@ -1408,13 +1441,36 @@ six bits numbered 0 through 5, inclusive, in register 0 into bits 26
 through 31, inclusive;
 \fBmove:NXM_NX_REG0[0..15]\->NXM_OF_VLAN_TCI[]\fR copies the least
 significant 16 bits of register 0 into the VLAN TCI field.
-.
-.IP "\fBload:\fIvalue\fB\->\fIdst\fB[\fIstart\fB..\fIend\fB]"
-Writes \fIvalue\fR to bits \fIstart\fR through \fIend\fR, inclusive,
-in field \fIdst\fR.
 .IP
-Example: \fBload:55\->NXM_NX_REG2[0..5]\fR loads value 55 (bit pattern
-\fB110111\fR) into bits 0 through 5, inclusive, in register 2.
+In OpenFlow 1.0 through 1.4, \fBmove\fR uses an Open vSwitch extension
+to OpenFlow.  In OpenFlow 1.5, \fBmove\fR uses the OpenFlow 1.5
+(draft) standard \fBcopy_field\fR action.
+.
+.IP "\fBset_field:\fIvalue\fR[/\fImask\fR]\fB\->\fIdst"
+.IQ "\fBload:\fIvalue\fB\->\fIdst\fB[\fIstart\fB..\fIend\fB]"
+Loads a literal value into a field or part of a field.  With
+\fBset_field\fR, \fBvalue\fR and the optional \fBmask\fR are given in
+the customary syntax for field \fIdst\fR, which is expressed as a
+field name.  For example, \fBset_field:00:11:22:33:44:55->eth_src\fR
+sets the Ethernet source address to 00:11:22:33:44:55.  With
+\fBload\fR, \fIvalue\fR must be an integer value (in decimal or
+prefixed by \fB0x\fR for hexadecimal) and \fIdst\fR is the NXM or OXM
+name for the field.  For example,
+\fBload:0x001122334455->OXM_OF_ETH_DST[]\fR has the same effect as the
+prior \fBset_field\fR example.
+.IP
+The two forms exist for historical reasons.  Open vSwitch 1.1
+introduced \fBNXAST_REG_LOAD\fR as a Nicira extension to OpenFlow 1.0
+and used \fBload\fR to express it.  Later, OpenFlow 1.2 introduced a
+standard \fBOFPAT_SET_FIELD\fR action that was restricted to loading
+entire fields, so Open vSwitch added the form \fBset_field\fR with
+this restriction.  OpenFlow 1.5 extended \fBOFPAT_SET_FIELD\fR to the
+point that it became a superset of \fBNXAST_REG_LOAD\fR.  Open vSwitch
+translates either syntax as necessary for the OpenFlow version in use:
+in OpenFlow 1.0 and 1.1, \fBNXAST_REG_LOAD\fR; in OpenFlow 1.2, 1.3,
+and 1.4, \fBNXAST_REG_LOAD\fR for \fBload\fR or for loading a
+subfield, \fBOFPAT_SET_FIELD\fR otherwise; and OpenFlow 1.5 and later,
+\fBOFPAT_SET_FIELD\fR.
 .
 .IP "\fBpush:\fIsrc\fB[\fIstart\fB..\fIend\fB]"
 Pushes \fIstart\fR to \fIend\fR bits inclusive, in fields
@@ -1433,14 +1489,6 @@ Example: \fBpop:NXM_NX_REG2[0..5]\fR pops the value from top of the stack.
 Set register 2 bits 0 through 5, inclusive, based on bits 0 through 5 from the
 value just popped.
 .
-.IP "\fBset_field:\fIvalue\fB\->\fIdst"
-Writes the literal \fIvalue\fR into the field \fIdst\fR, which should
-be specified as a name used for matching.  (This is similar to
-\fBload\fR but more closely matches the set-field action defined in
-OpenFlow 1.2 and above.)
-.
-.IP
-Example: \fBset_field:00:11:22:33:44:55->eth_src\fR.
 .
 .IP "\fBmultipath(\fIfields\fB, \fIbasis\fB, \fIalgorithm\fB, \fIn_links\fB, \fIarg\fB, \fIdst\fB[\fIstart\fB..\fIend\fB])\fR"
 Hashes \fIfields\fR using \fIbasis\fR as a universal hash parameter,
@@ -1650,11 +1698,14 @@ modifications are applied.
 .IQ
 \fBoutput\fR
 .IQ
-If both actions are present, then \fBgroup\fR is executed and
-\fBoutput\fR is ignored, regardless of the order in which they were
-added to the action set.  (If neither action is present, the action
-set has no real effect, because the modified packet is not sent
-anywhere and thus the modifications are not visible.)
+\fBresubmit\fR
+.IQ
+If more than one of these actions is present, then the one listed
+earliest above is executed and the others are ignored, regardless of
+the order in which they were added to the action set.  (If none of these
+actions is present, the action set has no real effect, because the
+modified packet is not sent anywhere and thus the modifications are
+not visible.)
 .RE
 .IP
 Only the actions listed above may be written to the action set.
@@ -1808,6 +1859,14 @@ Causes the flow to expire after the given number of seconds,
 regardless of activity.  A value of 0 (the default) gives the flow no
 hard expiration deadline.
 .
+.IP "\fBimportance=\fIvalue\fR"
+Sets the importance of a flow.  The flow entry eviction mechanism can
+use importance as a factor in deciding which flow to evict.  A value
+of 0 (the default) makes the flow non-evictable on the basis of
+importance.  Specify a value between 0 and 65535.
+.IP
+Only OpenFlow 1.4 and later support \fBimportance\fR.
+.
 .IP "\fBsend_flow_rem\fR"
 Marks the flow with a flag that causes the switch to generate a ``flow
 removed'' message and send it to interested controllers when the flow
@@ -1883,9 +1942,9 @@ This field is required.
 
 
 .IP \fBtype=\fItype\fR
-The type of the group.  This \fBadd-group\fR, \fBadd-groups\fR and
-\fBdel-groups\fR command require this field.  The following keywords
-designated the allowed types:
+The type of the group.  The \fBadd-group\fR, \fBadd-groups\fR and
+\fBdel-groups\fR commands require this field.  It is prohibited for
+other commands. The following keywords designated the allowed types:
 .RS
 .IP \fBall\fR
 Execute all buckets in the group.
@@ -1901,6 +1960,45 @@ Executes the one bucket in the group.
 Executes the first live bucket in the group which is associated with
 a live port or group.
 .RE
+
+.IP \fBcommand_bucket_id=\fIid\fR
+The bucket to operate on.  The \fBinsert-buckets\fR and \fBremove-buckets\fR
+commands require this field.  It is prohibited for other commands.
+\fIid\fR may be an integer or one of the following keywords:
+.RS
+.IP \fBall\fR
+Operate on all buckets in the group.
+Only valid when used with the \fBremove-buckets\fR command in which
+case the effect is to remove all buckets from the group.
+.IP \fBfirst\fR
+Operate on the first bucket present in the group.
+In the case of the \fBinsert-buckets\fR command the effect is to
+insert new bucets just before the first bucket already present in the group;
+or to replace the buckets of the group if there are no buckets already present
+in the group.
+In the case of the \fBremove-buckets\fR command the effect is to
+remove the first bucket of the group; or do nothing if there are no
+buckets present in the group.
+.IP \fBlast\fR
+Operate on the last bucket present in the group.
+In the case of the \fBinsert-buckets\fR command the effect is to
+insert new bucets just after the last bucket already present in the group;
+or to replace the buckets of the group if there are no buckets already present
+in the group.
+In the case of the \fBremove-buckets\fR command the effect is to
+remove the last bucket of the group; or do nothing if there are no
+buckets present in the group.
+.RE
+.IP
+If \fIid\fR is an integer then it should correspond to the \fBbucket_id\fR
+of a bucket present in the group.
+In case of the \fBinsert-buckets\fR command the effect is to
+insert buckets just before the bucket in the group whose \fBbucket_id\fR is
+\fIid\fR.
+In case of the \fBiremove-buckets\fR command the effect is to
+remove the in the group whose \fBbucket_id\fR is \fIid\fR.
+It is an error if there is no bucket persent group in whose \fBbucket_id\fR is
+\fIid\fR.
 
 .IP \fBbucket\fR=\fIbucket_parameters\fR
 The \fBadd-group\fR, \fBadd-groups\fR and \fBmod-group\fR commands
@@ -1918,6 +2016,14 @@ comma-separated list of actions.
 The fields for \fIbucket_parameters\fR are:
 .
 .RS
+.IP \fBbucket_id=\fIid\fR
+The 32-bit integer group id of the bucket.  Values greater than
+0xffffff00 are reserved.
+.
+This field was added in Open vSwitch 2.4 to conform with the OpenFlow
+1.5 (draft) specification. It is not supported when earlier versions
+of OpenFlow are used.  Open vSwitch will automatically allocate bucket
+ids when they are not specified.
 .IP \fBactions=\fR[\fIaction\fR][\fB,\fIaction\fR...]\fR
 The syntax of actions are identical to the \fBactions=\fR field described in
 \fBFlow Syntax\fR above. Specyfing \fBactions=\fR is optional, any unknown

@@ -40,23 +40,6 @@ struct dpif_backer;
 struct OVS_LOCKABLE rule_dpif;
 struct OVS_LOCKABLE group_dpif;
 
-enum rule_dpif_lookup_verdict {
-    RULE_DPIF_LOOKUP_VERDICT_MATCH,         /* A match occurred. */
-    RULE_DPIF_LOOKUP_VERDICT_CONTROLLER,    /* A miss occurred and the packet
-                                             * should be passed to
-                                             * the controller. */
-    RULE_DPIF_LOOKUP_VERDICT_DROP,          /* A miss occurred and the packet
-                                             * should be dropped. */
-    RULE_DPIF_LOOKUP_VERDICT_DEFAULT,       /* A miss occurred and the packet
-                                             * should handled by the default
-                                             * miss behaviour.
-                                             * For pre-OF1.3 it should be
-                                             * forwarded to the controller.
-                                             * For OF1.3+ it should be
-                                             * dropped. */
-};
-
-
 /* Ofproto-dpif -- DPIF based ofproto implementation.
  *
  * Ofproto-dpif provides an ofproto implementation for those platforms which
@@ -88,18 +71,20 @@ enum rule_dpif_lookup_verdict {
 size_t ofproto_dpif_get_max_mpls_depth(const struct ofproto_dpif *);
 bool ofproto_dpif_get_enable_recirc(const struct ofproto_dpif *);
 
-uint8_t rule_dpif_lookup(struct ofproto_dpif *, struct flow *,
-                         struct flow_wildcards *, struct rule_dpif **rule,
-                         bool take_ref, const struct dpif_flow_stats *);
+struct rule_dpif *rule_dpif_lookup(struct ofproto_dpif *, struct flow *,
+                                   struct flow_wildcards *, bool take_ref,
+                                   const struct dpif_flow_stats *,
+                                   uint8_t *table_id);
 
-enum rule_dpif_lookup_verdict rule_dpif_lookup_from_table(struct ofproto_dpif *,
-                                                          const struct flow *,
-                                                          struct flow_wildcards *,
-                                                          bool force_controller_on_miss,
-                                                          uint8_t *table_id,
-                                                          struct rule_dpif **rule, 
-                                                          bool take_ref,
-                                                          const struct dpif_flow_stats *);
+struct rule_dpif *rule_dpif_lookup_from_table(struct ofproto_dpif *,
+                                              struct flow *,
+                                              struct flow_wildcards *,
+                                              bool take_ref,
+                                              const struct dpif_flow_stats *,
+                                              uint8_t *table_id,
+                                              ofp_port_t in_port,
+                                              bool may_packet_in,
+                                              bool honor_table_miss);
 
 static inline void rule_dpif_ref(struct rule_dpif *);
 static inline void rule_dpif_unref(struct rule_dpif *);
@@ -193,13 +178,13 @@ struct ofport_dpif *odp_port_to_ofport(const struct dpif_backer *, odp_port_t);
  * nested, data path implementation limits the number of recirculation executed
  * to prevent unreasonable nesting depth or infinite loop.
  *
- * Both flow fields and the RECIRC action are exposed as open flow fields via
+ * Both flow fields and the RECIRC action are exposed as OpenFlow fields via
  * Nicira extensions.
  *
  * Post recirculation flow
  * ------------------------
  *
- * At the open flow level, post recirculation rules are always hidden from the
+ * At the OpenFlow level, post recirculation rules are always hidden from the
  * controller.  They are installed in table 254 which is set up as a hidden
  * table during boot time. Those rules are managed by the local user space
  * program only.
@@ -296,4 +281,5 @@ static inline bool rule_dpif_is_internal(const struct rule_dpif *rule)
 
 #undef RULE_CAST
 
+bool ovs_native_tunneling_is_on(struct ofproto_dpif *ofproto);
 #endif /* ofproto-dpif.h */

@@ -164,8 +164,8 @@ void ofputil_format_version_name(struct ds *, enum ofp_version);
 /* A bitmap of version numbers
  *
  * Bit offsets correspond to ofp_version numbers which in turn correspond to
- * wire-protocol numbers for Open Flow versions..  E.g. (1u << OFP11_VERSION)
- * is the mask for Open Flow 1.1.  If the bit for a version is set then it is
+ * wire-protocol numbers for OpenFlow versions, e.g. (1u << OFP11_VERSION)
+ * is the mask for OpenFlow 1.1.  If the bit for a version is set then it is
  * allowed, otherwise it is disallowed. */
 
 void ofputil_format_version_bitmap(struct ds *msg, uint32_t bitmap);
@@ -271,7 +271,7 @@ struct ofputil_flow_mod {
     struct list list_node;    /* For queuing flow_mods. */
 
     struct match match;
-    unsigned int priority;
+    int priority;
 
     /* Cookie matching.  The flow_mod affects only flows that have cookies that
      * bitwise match 'cookie' bits in positions where 'cookie_mask has 1-bits.
@@ -306,6 +306,7 @@ struct ofputil_flow_mod {
     ofp_port_t out_port;
     uint32_t out_group;
     enum ofputil_flow_mod_flags flags;
+    uint16_t importance;     /* Eviction precedence. */
     struct ofpact *ofpacts;  /* Series of "struct ofpact"s. */
     size_t ofpacts_len;      /* Length of ofpacts, in bytes. */
 
@@ -355,6 +356,7 @@ struct ofputil_flow_stats {
     const struct ofpact *ofpacts;
     size_t ofpacts_len;
     enum ofputil_flow_mod_flags flags;
+    uint16_t importance;        /* Eviction precedence. */
 };
 
 int ofputil_decode_flow_stats_reply(struct ofputil_flow_stats *,
@@ -984,6 +986,7 @@ struct ofputil_bucket {
     uint32_t watch_group;       /* Group whose state affects whether this
                                  * bucket is live. Only required for fast
                                  * failover groups. */
+    uint32_t bucket_id;         /* Bucket Id used to identify bucket*/
     struct ofpact *ofpacts;     /* Series of "struct ofpact"s. */
     size_t ofpacts_len;         /* Length of ofpacts, in bytes. */
 
@@ -992,9 +995,13 @@ struct ofputil_bucket {
 
 /* Protocol-independent group_mod. */
 struct ofputil_group_mod {
-    uint16_t command;             /* One of OFPGC11_*. */
+    uint16_t command;             /* One of OFPGC15_*. */
     uint8_t type;                 /* One of OFPGT11_*. */
     uint32_t group_id;            /* Group identifier. */
+    uint32_t command_bucket_id;   /* Bucket Id used as part of
+                                   * OFPGC15_INSERT_BUCKET and
+                                   * OFPGC15_REMOVE_BUCKET commands
+                                   * execution.*/
     struct list buckets;          /* Contains "struct ofputil_bucket"s. */
 };
 
@@ -1028,6 +1035,13 @@ struct ofputil_group_desc {
 };
 
 void ofputil_bucket_list_destroy(struct list *buckets);
+void ofputil_bucket_clone_list(struct list *dest, const struct list *src,
+                               const struct ofputil_bucket *);
+struct ofputil_bucket *ofputil_bucket_find(const struct list *,
+                                           uint32_t bucket_id);
+bool ofputil_bucket_check_duplicate_id(const struct list *);
+struct ofputil_bucket *ofputil_bucket_list_front(const struct list *);
+struct ofputil_bucket *ofputil_bucket_list_back(const struct list *);
 
 static inline bool
 ofputil_bucket_has_liveness(const struct ofputil_bucket *bucket)

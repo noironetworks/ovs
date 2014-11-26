@@ -96,12 +96,27 @@ static inline int rpl_genl_register_family(struct genl_family *family)
 
 #endif
 
-#if LINUX_VERSION_CODE < KERNEL_VERSION(3,14,0)
+#ifndef HAVE_GENLMSG_NEW_UNICAST
 static inline struct sk_buff *genlmsg_new_unicast(size_t payload,
 						  struct genl_info *info,
 						  gfp_t flags)
 {
 	return genlmsg_new(payload, flags);
+}
+#endif
+
+#ifndef HAVE_GENL_HAS_LISTENERS
+static inline int genl_has_listeners(struct genl_family *family,
+				     struct sock *sk, unsigned int group)
+{
+#ifdef HAVE_MCGRP_OFFSET
+	if (WARN_ON_ONCE(group >= family->n_mcgrps))
+		return -EINVAL;
+	group = family->mcgrp_offset + group;
+	return netlink_has_listeners(sk, group);
+#else
+	return netlink_has_listeners(sk, group);
+#endif
 }
 #endif
 

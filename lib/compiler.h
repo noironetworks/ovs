@@ -24,8 +24,17 @@
   #define __has_extension(x) 0
 #endif
 
+/* To make NO_RETURN portable across gcc/clang and MSVC, it should be
+ * added at the beginning of the function declaration. */
 #if __GNUC__ && !__CHECKER__
 #define NO_RETURN __attribute__((__noreturn__))
+#elif _MSC_VER
+#define NO_RETURN __declspec(noreturn)
+#else
+#define NO_RETURN
+#endif
+
+#if __GNUC__ && !__CHECKER__
 #define OVS_UNUSED __attribute__((__unused__))
 #define PRINTF_FORMAT(FMT, ARG1) __attribute__((__format__(printf, FMT, ARG1)))
 #define SCANF_FORMAT(FMT, ARG1) __attribute__((__format__(scanf, FMT, ARG1)))
@@ -37,7 +46,6 @@
 #define OVS_LIKELY(CONDITION) __builtin_expect(!!(CONDITION), 1)
 #define OVS_UNLIKELY(CONDITION) __builtin_expect(!!(CONDITION), 0)
 #else
-#define NO_RETURN
 #define OVS_UNUSED
 #define PRINTF_FORMAT(FMT, ARG1)
 #define SCANF_FORMAT(FMT, ARG1)
@@ -219,6 +227,16 @@
 #else
 #define OVS_PREFETCH(addr)
 #define OVS_PREFETCH_WRITE(addr)
+#endif
+
+/* Output a message (not an error) while compiling without failing the
+ * compilation process */
+#if HAVE_PRAGMA_MESSAGE
+#define DO_PRAGMA(x) _Pragma(#x)
+#define BUILD_MESSAGE(x) \
+    DO_PRAGMA(message(x))
+#else
+#define BUILD_MESSAGE(x)
 #endif
 
 #endif /* compiler.h */

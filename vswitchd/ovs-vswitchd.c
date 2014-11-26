@@ -59,7 +59,7 @@ static bool want_mlockall;
 static unixctl_cb_func ovs_vswitchd_exit;
 
 static char *parse_options(int argc, char *argv[], char **unixctl_path);
-static void usage(void) NO_RETURN;
+NO_RETURN static void usage(void);
 
 int
 main(int argc, char *argv[])
@@ -215,6 +215,7 @@ parse_options(int argc, char *argv[], char **unixctl_pathp)
             exit(EXIT_FAILURE);
 
         case OPT_DPDK:
+            ovs_fatal(0, "--dpdk must be given at beginning of command line.");
             break;
 
         default:

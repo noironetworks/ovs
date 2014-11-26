@@ -28,6 +28,7 @@
 #include "hmap.h"
 #include "netlink.h"
 #include "netlink-protocol.h"
+#include "odp-netlink.h"
 #include "ofpbuf.h"
 #include "ovs-thread.h"
 #include "poll-loop.h"
@@ -60,22 +61,7 @@ portid_next(void)
     g_last_portid++;
     return g_last_portid;
 }
-
-static void
-set_sock_pid_in_kernel(HANDLE handle, uint32_t pid)
-    OVS_GUARDED_BY(portid_mutex)
-{
-    struct nlmsghdr msg = { 0 };
-
-    msg.nlmsg_len = sizeof(struct nlmsghdr);
-    msg.nlmsg_type = 80; /* target = set file pid */
-    msg.nlmsg_flags = 0;
-    msg.nlmsg_seq = 0;
-    msg.nlmsg_pid = pid;
-
-    WriteFile(handle, &msg, sizeof(struct nlmsghdr), NULL, NULL);
-}
-#endif  /* _WIN32 */
+#endif /* _WIN32 */
 
 /* A single (bad) Netlink message can in theory dump out many, many log
  * messages, so the burst size is set quite high here to avoid missing useful
@@ -85,12 +71,17 @@ static struct vlog_rate_limit rl = VLOG_RATE_LIMIT_INIT(60, 600);
 static uint32_t nl_sock_allocate_seq(struct nl_sock *, unsigned int n);
 static void log_nlmsg(const char *function, int error,
                       const void *message, size_t size, int protocol);
+#ifdef _WIN32
+static int get_sock_pid_from_kernel(struct nl_sock *sock);
+#endif
 
 /* Netlink sockets. */
 
 struct nl_sock {
 #ifdef _WIN32
     HANDLE handle;
+    OVERLAPPED overlapped;
+    DWORD read_ioctl;
 #else
     int fd;
 #endif
@@ -150,18 +141,25 @@ nl_sock_create(int protocol, struct nl_sock **sockp)
     sock = xmalloc(sizeof *sock);
 
 #ifdef _WIN32
-    sock->handle = CreateFileA("\\\\.\\OpenVSwitchDevice",
-                               GENERIC_READ | GENERIC_WRITE,
-                               FILE_SHARE_READ | FILE_SHARE_WRITE,
-                               NULL, OPEN_EXISTING,
-                               FILE_ATTRIBUTE_NORMAL, NULL);
-
-    int last_error = GetLastError();
+    sock->handle = CreateFile(OVS_DEVICE_NAME_USER,
+                              GENERIC_READ | GENERIC_WRITE,
+                              FILE_SHARE_READ | FILE_SHARE_WRITE,
+                              NULL, OPEN_EXISTING,
+                              FILE_FLAG_OVERLAPPED, NULL);
 
     if (sock->handle == INVALID_HANDLE_VALUE) {
-        VLOG_ERR("fcntl: %s", ovs_strerror(last_error));
+        VLOG_ERR("fcntl: %s", ovs_lasterror_to_string());
         goto error;
     }
+
+    memset(&sock->overlapped, 0, sizeof sock->overlapped);
+    sock->overlapped.hEvent = CreateEvent(NULL, FALSE, FALSE, NULL);
+    if (sock->overlapped.hEvent == NULL) {
+        VLOG_ERR("fcntl: %s", ovs_lasterror_to_string());
+        goto error;
+    }
+    /* Initialize the type/ioctl to Generic */
+    sock->read_ioctl = OVS_IOCTL_READ;
 #else
     sock->fd = socket(AF_NETLINK, SOCK_RAW, protocol);
     if (sock->fd < 0) {
@@ -176,10 +174,10 @@ nl_sock_create(int protocol, struct nl_sock **sockp)
     rcvbuf = 1024 * 1024;
 #ifdef _WIN32
     sock->rcvbuf = rcvbuf;
-    ovs_mutex_lock(&portid_mutex);
-    sock->pid = portid_next();
-    set_sock_pid_in_kernel(sock->handle, sock->pid);
-    ovs_mutex_unlock(&portid_mutex);
+    retval = get_sock_pid_from_kernel(sock);
+    if (retval != 0) {
+        goto error;
+    }
 #else
     if (setsockopt(sock->fd, SOL_SOCKET, SO_RCVBUFFORCE,
                    &rcvbuf, sizeof rcvbuf)) {
@@ -232,6 +230,9 @@ error:
         }
     }
 #ifdef _WIN32
+    if (sock->overlapped.hEvent) {
+        CloseHandle(sock->overlapped.hEvent);
+    }
     if (sock->handle != INVALID_HANDLE_VALUE) {
         CloseHandle(sock->handle);
     }
@@ -259,6 +260,9 @@ nl_sock_destroy(struct nl_sock *sock)
 {
     if (sock) {
 #ifdef _WIN32
+        if (sock->overlapped.hEvent) {
+            CloseHandle(sock->overlapped.hEvent);
+        }
         CloseHandle(sock->handle);
 #else
         close(sock->fd);
@@ -267,6 +271,96 @@ nl_sock_destroy(struct nl_sock *sock)
     }
 }
 
+#ifdef _WIN32
+/* Reads the pid for 'sock' generated in the kernel datapath. The function
+ * follows a transaction semantic. Eventually this function should call into
+ * nl_transact. */
+static int
+get_sock_pid_from_kernel(struct nl_sock *sock)
+{
+    struct nl_transaction txn;
+    struct ofpbuf request;
+    uint64_t request_stub[128];
+    struct ofpbuf reply;
+    uint64_t reply_stub[128];
+    struct ovs_header *ovs_header;
+    struct nlmsghdr *nlmsg;
+    uint32_t seq;
+    int retval;
+    DWORD bytes;
+    int ovs_msg_size = sizeof (struct nlmsghdr) + sizeof (struct genlmsghdr) +
+                       sizeof (struct ovs_header);
+
+    ofpbuf_use_stub(&request, request_stub, sizeof request_stub);
+    txn.request = &request;
+    ofpbuf_use_stub(&reply, reply_stub, sizeof reply_stub);
+    txn.reply = &reply;
+
+    seq = nl_sock_allocate_seq(sock, 1);
+    nl_msg_put_genlmsghdr(&request, 0, OVS_WIN_NL_CTRL_FAMILY_ID, 0,
+                          OVS_CTRL_CMD_WIN_GET_PID, OVS_WIN_CONTROL_VERSION);
+    nlmsg = nl_msg_nlmsghdr(txn.request);
+    nlmsg->nlmsg_seq = seq;
+
+    ovs_header = ofpbuf_put_uninit(&request, sizeof *ovs_header);
+    ovs_header->dp_ifindex = 0;
+    ovs_header = ofpbuf_put_uninit(&reply, ovs_msg_size);
+
+    if (!DeviceIoControl(sock->handle, OVS_IOCTL_TRANSACT,
+                         ofpbuf_data(txn.request), ofpbuf_size(txn.request),
+                         ofpbuf_data(txn.reply), ofpbuf_size(txn.reply),
+                         &bytes, NULL)) {
+        retval = EINVAL;
+        goto done;
+    } else {
+        if (bytes < ovs_msg_size) {
+            retval = EINVAL;
+            goto done;
+        }
+
+        nlmsg = nl_msg_nlmsghdr(txn.reply);
+        if (nlmsg->nlmsg_seq != seq) {
+            retval = EINVAL;
+            goto done;
+        }
+        sock->pid = nlmsg->nlmsg_pid;
+    }
+    retval = 0;
+
+done:
+    ofpbuf_uninit(&request);
+    ofpbuf_uninit(&reply);
+    return retval;
+}
+#endif  /* _WIN32 */
+
+#ifdef _WIN32
+static int __inline
+nl_sock_mcgroup(struct nl_sock *sock, unsigned int multicast_group, bool join)
+{
+    struct ofpbuf request;
+    uint64_t request_stub[128];
+    struct ovs_header *ovs_header;
+    struct nlmsghdr *nlmsg;
+    int error;
+
+    ofpbuf_use_stub(&request, request_stub, sizeof request_stub);
+
+    nl_msg_put_genlmsghdr(&request, 0, OVS_WIN_NL_CTRL_FAMILY_ID, 0,
+                          OVS_CTRL_CMD_MC_SUBSCRIBE_REQ,
+                          OVS_WIN_CONTROL_VERSION);
+
+    ovs_header = ofpbuf_put_uninit(&request, sizeof *ovs_header);
+    ovs_header->dp_ifindex = 0;
+
+    nl_msg_put_u32(&request, OVS_NL_ATTR_MCAST_GRP, multicast_group);
+    nl_msg_put_u8(&request, OVS_NL_ATTR_MCAST_JOIN, join ? 1 : 0);
+
+    error = nl_sock_send(sock, &request, true);
+    ofpbuf_uninit(&request);
+    return error;
+}
+#endif
 /* Tries to add 'sock' as a listener for 'multicast_group'.  Returns 0 if
  * successful, otherwise a positive errno value.
  *
@@ -282,31 +376,15 @@ int
 nl_sock_join_mcgroup(struct nl_sock *sock, unsigned int multicast_group)
 {
 #ifdef _WIN32
-#define OVS_VPORT_MCGROUP_FALLBACK_ID 33
-    struct ofpbuf msg_buf;
-    struct message_multicast
-    {
-        struct nlmsghdr;
-        /* if true, join; if else, leave */
-        unsigned char join;
-        unsigned int groupId;
-    };
-
-    struct message_multicast msg = { 0 };
-
-    msg.nlmsg_len = sizeof(struct message_multicast);
-    msg.nlmsg_type = OVS_VPORT_MCGROUP_FALLBACK_ID;
-    msg.nlmsg_flags = 0;
-    msg.nlmsg_seq = 0;
-    msg.nlmsg_pid = sock->pid;
-
-    msg.join = 1;
-    msg.groupId = multicast_group;
-    msg_buf.base_ = &msg;
-    msg_buf.data_ = &msg;
-    msg_buf.size_ = msg.nlmsg_len;
-
-    nl_sock_send__(sock, &msg_buf, msg.nlmsg_seq, 0);
+    /* Set the socket type as a "multicast" socket */
+    sock->read_ioctl = OVS_IOCTL_READ_EVENT;
+    int error = nl_sock_mcgroup(sock, multicast_group, true);
+    if (error) {
+        sock->read_ioctl = OVS_IOCTL_READ;
+        VLOG_WARN("could not join multicast group %u (%s)",
+                  multicast_group, ovs_strerror(error));
+        return error;
+    }
 #else
     if (setsockopt(sock->fd, SOL_NETLINK, NETLINK_ADD_MEMBERSHIP,
                    &multicast_group, sizeof multicast_group) < 0) {
@@ -317,6 +395,68 @@ nl_sock_join_mcgroup(struct nl_sock *sock, unsigned int multicast_group)
 #endif
     return 0;
 }
+
+#ifdef _WIN32
+int
+nl_sock_subscribe_packets(struct nl_sock *sock)
+{
+    int error;
+
+    if (sock->read_ioctl != OVS_IOCTL_READ) {
+        return EINVAL;
+    }
+
+    error = nl_sock_subscribe_packet__(sock, true);
+    if (error) {
+        VLOG_WARN("could not unsubscribe packets (%s)",
+                  ovs_strerror(errno));
+        return error;
+    }
+    sock->read_ioctl = OVS_IOCTL_READ_PACKET;
+
+    return 0;
+}
+
+int
+nl_sock_unsubscribe_packets(struct nl_sock *sock)
+{
+    ovs_assert(sock->read_ioctl == OVS_IOCTL_READ_PACKET);
+
+    int error = nl_sock_subscribe_packet__(sock, false);
+    if (error) {
+        VLOG_WARN("could not subscribe to packets (%s)",
+                  ovs_strerror(errno));
+        return error;
+    }
+
+    sock->read_ioctl = OVS_IOCTL_READ;
+    return 0;
+}
+
+int
+nl_sock_subscribe_packet__(struct nl_sock *sock, bool subscribe)
+{
+    struct ofpbuf request;
+    uint64_t request_stub[128];
+    struct ovs_header *ovs_header;
+    struct nlmsghdr *nlmsg;
+    int error;
+
+    ofpbuf_use_stub(&request, request_stub, sizeof request_stub);
+    nl_msg_put_genlmsghdr(&request, 0, OVS_WIN_NL_CTRL_FAMILY_ID, 0,
+                          OVS_CTRL_CMD_PACKET_SUBSCRIBE_REQ,
+                          OVS_WIN_CONTROL_VERSION);
+
+    ovs_header = ofpbuf_put_uninit(&request, sizeof *ovs_header);
+    ovs_header->dp_ifindex = 0;
+    nl_msg_put_u8(&request, OVS_NL_ATTR_PACKET_SUBSCRIBE, subscribe ? 1 : 0);
+    nl_msg_put_u32(&request, OVS_NL_ATTR_PACKET_PID, sock->pid);
+
+    error = nl_sock_send(sock, &request, true);
+    ofpbuf_uninit(&request);
+    return error;
+}
+#endif
 
 /* Tries to make 'sock' stop listening to 'multicast_group'.  Returns 0 if
  * successful, otherwise a positive errno value.
@@ -332,24 +472,13 @@ int
 nl_sock_leave_mcgroup(struct nl_sock *sock, unsigned int multicast_group)
 {
 #ifdef _WIN32
-    struct ofpbuf msg_buf;
-    struct message_multicast
-    {
-        struct nlmsghdr;
-        /* if true, join; if else, leave*/
-        unsigned char join;
-    };
-
-    struct message_multicast msg = { 0 };
-    nl_msg_put_nlmsghdr(&msg, sizeof(struct message_multicast),
-                        multicast_group, 0);
-    msg.join = 0;
-
-    msg_buf.base_ = &msg;
-    msg_buf.data_ = &msg;
-    msg_buf.size_ = msg.nlmsg_len;
-
-    nl_sock_send__(sock, &msg_buf, msg.nlmsg_seq, 0);
+    int error = nl_sock_mcgroup(sock, multicast_group, false);
+    if (error) {
+        VLOG_WARN("could not leave multicast group %u (%s)",
+                   multicast_group, ovs_strerror(error));
+        return error;
+    }
+    sock->read_ioctl = OVS_IOCTL_READ;
 #else
     if (setsockopt(sock->fd, SOL_NETLINK, NETLINK_DROP_MEMBERSHIP,
                    &multicast_group, sizeof multicast_group) < 0) {
@@ -374,17 +503,20 @@ nl_sock_send__(struct nl_sock *sock, const struct ofpbuf *msg,
     do {
         int retval;
 #ifdef _WIN32
-        bool result;
-        DWORD last_error = 0;
-        result = WriteFile(sock->handle, ofpbuf_data(msg), ofpbuf_size(msg),
-                           &retval, NULL);
-        last_error = GetLastError();
-        if (last_error != ERROR_SUCCESS && !result) {
+        DWORD bytes;
+
+        if (!DeviceIoControl(sock->handle, OVS_IOCTL_WRITE,
+                             ofpbuf_data(msg), ofpbuf_size(msg), NULL, 0,
+                             &bytes, NULL)) {
             retval = -1;
-            errno = EAGAIN;
+            /* XXX: Map to a more appropriate error based on GetLastError(). */
+            errno = EINVAL;
+        } else {
+            retval = ofpbuf_size(msg);
         }
 #else
-        retval = send(sock->fd, ofpbuf_data(msg), ofpbuf_size(msg), wait ? 0 : MSG_DONTWAIT);
+        retval = send(sock->fd, ofpbuf_data(msg), ofpbuf_size(msg),
+                      wait ? 0 : MSG_DONTWAIT);
 #endif
         error = retval < 0 ? errno : 0;
     } while (error == EINTR);
@@ -436,12 +568,7 @@ nl_sock_recv__(struct nl_sock *sock, struct ofpbuf *buf, bool wait)
      * 'tail' to allow Netlink messages to be up to 64 kB long (a reasonable
      * figure since that's the maximum length of a Netlink attribute). */
     struct nlmsghdr *nlmsghdr;
-#ifdef _WIN32
-#define MAX_STACK_LENGTH 81920
-    uint8_t tail[MAX_STACK_LENGTH];
-#else
     uint8_t tail[65536];
-#endif
     struct iovec iov[2];
     struct msghdr msg;
     ssize_t retval;
@@ -470,15 +597,25 @@ nl_sock_recv__(struct nl_sock *sock, struct ofpbuf *buf, bool wait)
     do {
         nlmsghdr->nlmsg_len = UINT32_MAX;
 #ifdef _WIN32
-        boolean result = false;
-        DWORD last_error = 0;
-        result = ReadFile(sock->handle, tail, MAX_STACK_LENGTH, &retval, NULL);
-        last_error = GetLastError();
-        if (last_error != ERROR_SUCCESS && !result) {
+        DWORD bytes;
+        if (!DeviceIoControl(sock->handle, sock->read_ioctl,
+                             NULL, 0, tail, sizeof tail, &bytes, NULL)) {
             retval = -1;
-            errno = EAGAIN;
+            errno = EINVAL;
         } else {
-            ofpbuf_put(buf, tail, retval);
+            retval = bytes;
+            if (retval == 0) {
+                retval = -1;
+                errno = EAGAIN;
+            } else {
+                if (retval >= buf->allocated) {
+                    ofpbuf_reinit(buf, retval);
+                    nlmsghdr = ofpbuf_base(buf);
+                    nlmsghdr->nlmsg_len = UINT32_MAX;
+                }
+                memcpy(ofpbuf_data(buf), tail, retval);
+                ofpbuf_set_size(buf, retval);
+            }
         }
 #else
         retval = recvmsg(sock->fd, &msg, wait ? 0 : MSG_DONTWAIT);
@@ -592,34 +729,19 @@ nl_sock_transact_multiple__(struct nl_sock *sock,
         iovs[i].iov_len = ofpbuf_size(txn->request);
     }
 
+#ifndef _WIN32
     memset(&msg, 0, sizeof msg);
     msg.msg_iov = iovs;
     msg.msg_iovlen = n;
     do {
-#ifdef _WIN32
-    DWORD last_error = 0;
-    bool result = FALSE;
-    for (i = 0; i < n; i++) {
-        result = WriteFile((HANDLE)sock->handle, iovs[i].iov_base, iovs[i].iov_len,
-                           &error, NULL);
-        last_error = GetLastError();
-        if (last_error != ERROR_SUCCESS && !result) {
-            error = EAGAIN;
-            errno = EAGAIN;
-        } else {
-            error = 0;
-        }
-    }
-#else
         error = sendmsg(sock->fd, &msg, 0) < 0 ? errno : 0;
-#endif
     } while (error == EINTR);
 
     for (i = 0; i < n; i++) {
         struct nl_transaction *txn = transactions[i];
 
-        log_nlmsg(__func__, error, ofpbuf_data(txn->request), ofpbuf_size(txn->request),
-                  sock->protocol);
+        log_nlmsg(__func__, error, ofpbuf_data(txn->request),
+                  ofpbuf_size(txn->request), sock->protocol);
     }
     if (!error) {
         COVERAGE_ADD(netlink_sent, n);
@@ -698,6 +820,76 @@ nl_sock_transact_multiple__(struct nl_sock *sock,
         base_seq += i + 1;
     }
     ofpbuf_uninit(&tmp_reply);
+#else
+    error = 0;
+    uint8_t reply_buf[65536];
+    for (i = 0; i < n; i++) {
+        DWORD reply_len;
+        struct nl_transaction *txn = transactions[i];
+        struct nlmsghdr *request_nlmsg, *reply_nlmsg;
+
+        if (!DeviceIoControl(sock->handle, OVS_IOCTL_TRANSACT,
+                             ofpbuf_data(txn->request),
+                             ofpbuf_size(txn->request),
+                             reply_buf, sizeof reply_buf,
+                             &reply_len, NULL)) {
+            /* XXX: Map to a more appropriate error. */
+            error = EINVAL;
+            break;
+        }
+
+        if (reply_len < sizeof *reply_nlmsg) {
+            nl_sock_record_errors__(transactions, n, 0);
+            VLOG_DBG_RL(&rl, "insufficient length of reply %#"PRIu32
+                " for seq: %#"PRIx32, reply_len, request_nlmsg->nlmsg_seq);
+            break;
+        }
+
+        /* Validate the sequence number in the reply. */
+        request_nlmsg = nl_msg_nlmsghdr(txn->request);
+        reply_nlmsg = (struct nlmsghdr *)reply_buf;
+
+        if (request_nlmsg->nlmsg_seq != reply_nlmsg->nlmsg_seq) {
+            ovs_assert(request_nlmsg->nlmsg_seq == reply_nlmsg->nlmsg_seq);
+            VLOG_DBG_RL(&rl, "mismatched seq request %#"PRIx32
+                ", reply %#"PRIx32, request_nlmsg->nlmsg_seq,
+                reply_nlmsg->nlmsg_seq);
+            break;
+        }
+
+        /* Handle errors embedded within the netlink message. */
+        ofpbuf_use_stub(&tmp_reply, reply_buf, sizeof reply_buf);
+        ofpbuf_set_size(&tmp_reply, sizeof reply_buf);
+        if (nl_msg_nlmsgerr(&tmp_reply, &txn->error)) {
+            if (txn->reply) {
+                ofpbuf_clear(txn->reply);
+            }
+            if (txn->error) {
+                VLOG_DBG_RL(&rl, "received NAK error=%d (%s)",
+                            error, ovs_strerror(txn->error));
+            }
+        } else {
+            txn->error = 0;
+            if (txn->reply) {
+                /* Copy the reply to the buffer specified by the caller. */
+                if (reply_len > txn->reply->allocated) {
+                    ofpbuf_reinit(txn->reply, reply_len);
+                }
+                memcpy(ofpbuf_data(txn->reply), reply_buf, reply_len);
+                ofpbuf_set_size(txn->reply, reply_len);
+            }
+        }
+        ofpbuf_uninit(&tmp_reply);
+
+        /* Count the number of successful transactions. */
+        (*done)++;
+
+    }
+
+    if (!error) {
+        COVERAGE_ADD(netlink_sent, n);
+    }
+#endif
 
     return error;
 }
@@ -982,13 +1174,73 @@ nl_dump_done(struct nl_dump *dump)
     return status == EOF ? 0 : status;
 }
 
+#ifdef _WIN32
+/* Pend an I/O request in the driver. The driver completes the I/O whenever
+ * an event or a packet is ready to be read. Once the I/O is completed
+ * the overlapped structure event associated with the pending I/O will be set
+ */
+static int
+pend_io_request(struct nl_sock *sock)
+{
+    struct ofpbuf request;
+    uint64_t request_stub[128];
+    struct ovs_header *ovs_header;
+    struct nlmsghdr *nlmsg;
+    uint32_t seq;
+    int retval;
+    int error;
+    DWORD bytes;
+    OVERLAPPED *overlapped = CONST_CAST(OVERLAPPED *, &sock->overlapped);
+
+    int ovs_msg_size = sizeof (struct nlmsghdr) + sizeof (struct genlmsghdr) +
+                               sizeof (struct ovs_header);
+
+    ofpbuf_use_stub(&request, request_stub, sizeof request_stub);
+
+    seq = nl_sock_allocate_seq(sock, 1);
+    nl_msg_put_genlmsghdr(&request, 0, OVS_WIN_NL_CTRL_FAMILY_ID, 0,
+                          OVS_CTRL_CMD_WIN_PEND_REQ, OVS_WIN_CONTROL_VERSION);
+    nlmsg = nl_msg_nlmsghdr(&request);
+    nlmsg->nlmsg_seq = seq;
+    nlmsg->nlmsg_pid = sock->pid;
+
+    ovs_header = ofpbuf_put_uninit(&request, sizeof *ovs_header);
+    ovs_header->dp_ifindex = 0;
+
+    if (!DeviceIoControl(sock->handle, OVS_IOCTL_WRITE,
+                         ofpbuf_data(&request), ofpbuf_size(&request),
+                         NULL, 0, &bytes, overlapped)) {
+        error = GetLastError();
+        /* Check if the I/O got pended */
+        if (error != ERROR_IO_INCOMPLETE && error != ERROR_IO_PENDING) {
+            VLOG_ERR("nl_sock_wait failed - %s\n", ovs_format_message(error));
+            retval = EINVAL;
+            goto done;
+        }
+    } else {
+        /* The I/O was completed synchronously */
+        poll_immediate_wake();
+    }
+    retval = 0;
+
+done:
+    ofpbuf_uninit(&request);
+    return retval;
+}
+#endif  /* _WIN32 */
+
 /* Causes poll_block() to wake up when any of the specified 'events' (which is
- * a OR'd combination of POLLIN, POLLOUT, etc.) occur on 'sock'. */
+ * a OR'd combination of POLLIN, POLLOUT, etc.) occur on 'sock'.
+ * On Windows, 'sock' is not treated as const, and may be modified. */
 void
 nl_sock_wait(const struct nl_sock *sock, short int events)
 {
 #ifdef _WIN32
-    poll_fd_wait(sock->handle, events);
+    if (sock->overlapped.Internal != STATUS_PENDING) {
+        pend_io_request(CONST_CAST(struct nl_sock *, sock));
+       /* XXX: poll_wevent_wait(sock->overlapped.hEvent); */
+    }
+    poll_immediate_wake(); /* XXX: temporary. */
 #else
     poll_fd_wait(sock->fd, events);
 #endif
@@ -1005,7 +1257,8 @@ int
 nl_sock_fd(const struct nl_sock *sock)
 {
 #ifdef _WIN32
-    return sock->handle;
+    BUILD_ASSERT_DECL(sizeof sock->handle == sizeof(int));
+    return (int)sock->handle;
 #else
     return sock->fd;
 #endif
@@ -1076,6 +1329,7 @@ genl_family_to_name(uint16_t id)
     }
 }
 
+#ifndef _WIN32
 static int
 do_lookup_genl_family(const char *name, struct nlattr **attrs,
                       struct ofpbuf **replyp)
@@ -1113,6 +1367,97 @@ do_lookup_genl_family(const char *name, struct nlattr **attrs,
     *replyp = reply;
     return 0;
 }
+#else
+static int
+do_lookup_genl_family(const char *name, struct nlattr **attrs,
+                      struct ofpbuf **replyp)
+{
+    struct nlmsghdr *nlmsg;
+    struct ofpbuf *reply;
+    int error;
+    uint16_t family_id;
+    const char *family_name;
+    uint32_t family_version;
+    uint32_t family_attrmax;
+    uint32_t mcgrp_id = OVS_WIN_NL_INVALID_MCGRP_ID;
+    const char *mcgrp_name = NULL;
+
+    *replyp = NULL;
+    reply = ofpbuf_new(1024);
+
+    /* CTRL_ATTR_MCAST_GROUPS is supported only for VPORT family. */
+    if (!strcmp(name, OVS_WIN_CONTROL_FAMILY)) {
+        family_id = OVS_WIN_NL_CTRL_FAMILY_ID;
+        family_name = OVS_WIN_CONTROL_FAMILY;
+        family_version = OVS_WIN_CONTROL_VERSION;
+        family_attrmax = OVS_WIN_CONTROL_ATTR_MAX;
+    } else if (!strcmp(name, OVS_DATAPATH_FAMILY)) {
+        family_id = OVS_WIN_NL_DATAPATH_FAMILY_ID;
+        family_name = OVS_DATAPATH_FAMILY;
+        family_version = OVS_DATAPATH_VERSION;
+        family_attrmax = OVS_DP_ATTR_MAX;
+    } else if (!strcmp(name, OVS_PACKET_FAMILY)) {
+        family_id = OVS_WIN_NL_PACKET_FAMILY_ID;
+        family_name = OVS_PACKET_FAMILY;
+        family_version = OVS_PACKET_VERSION;
+        family_attrmax = OVS_PACKET_ATTR_MAX;
+    } else if (!strcmp(name, OVS_VPORT_FAMILY)) {
+        family_id = OVS_WIN_NL_VPORT_FAMILY_ID;
+        family_name = OVS_VPORT_FAMILY;
+        family_version = OVS_VPORT_VERSION;
+        family_attrmax = OVS_VPORT_ATTR_MAX;
+        mcgrp_id = OVS_WIN_NL_VPORT_MCGRP_ID;
+        mcgrp_name = OVS_VPORT_MCGROUP;
+    } else if (!strcmp(name, OVS_FLOW_FAMILY)) {
+        family_id = OVS_WIN_NL_FLOW_FAMILY_ID;
+        family_name = OVS_FLOW_FAMILY;
+        family_version = OVS_FLOW_VERSION;
+        family_attrmax = OVS_FLOW_ATTR_MAX;
+    } else if (!strcmp(name, OVS_WIN_NETDEV_FAMILY)) {
+        family_id = OVS_WIN_NL_NETDEV_FAMILY_ID;
+        family_name = OVS_WIN_NETDEV_FAMILY;
+        family_version = OVS_WIN_NETDEV_VERSION;
+        family_attrmax = OVS_WIN_NETDEV_ATTR_MAX;
+    } else {
+        ofpbuf_delete(reply);
+        return EINVAL;
+    }
+
+    nl_msg_put_genlmsghdr(reply, 0, GENL_ID_CTRL, 0,
+                          CTRL_CMD_NEWFAMILY, family_version);
+    /* CTRL_ATTR_HDRSIZE and CTRL_ATTR_OPS are not populated, but the
+     * callers do not seem to need them. */
+    nl_msg_put_u16(reply, CTRL_ATTR_FAMILY_ID, family_id);
+    nl_msg_put_string(reply, CTRL_ATTR_FAMILY_NAME, family_name);
+    nl_msg_put_u32(reply, CTRL_ATTR_VERSION, family_version);
+    nl_msg_put_u32(reply, CTRL_ATTR_MAXATTR, family_attrmax);
+
+    if (mcgrp_id != OVS_WIN_NL_INVALID_MCGRP_ID) {
+        size_t mcgrp_ofs1 = nl_msg_start_nested(reply, CTRL_ATTR_MCAST_GROUPS);
+        size_t mcgrp_ofs2= nl_msg_start_nested(reply,
+            OVS_WIN_NL_VPORT_MCGRP_ID - OVS_WIN_NL_MCGRP_START_ID);
+        nl_msg_put_u32(reply, CTRL_ATTR_MCAST_GRP_ID, mcgrp_id);
+        ovs_assert(mcgrp_name != NULL);
+        nl_msg_put_string(reply, CTRL_ATTR_MCAST_GRP_NAME, mcgrp_name);
+        nl_msg_end_nested(reply, mcgrp_ofs2);
+        nl_msg_end_nested(reply, mcgrp_ofs1);
+    }
+
+    /* Set the total length of the netlink message. */
+    nlmsg = nl_msg_nlmsghdr(reply);
+    nlmsg->nlmsg_len = ofpbuf_size(reply);
+
+    if (!nl_policy_parse(reply, NLMSG_HDRLEN + GENL_HDRLEN,
+                         family_policy, attrs, ARRAY_SIZE(family_policy))
+        || nl_attr_get_u16(attrs[CTRL_ATTR_FAMILY_ID]) == 0) {
+        ofpbuf_delete(reply);
+        return EPROTO;
+    }
+
+    *replyp = reply;
+    return 0;
+}
+#endif
 
 /* Finds the multicast group called 'group_name' in genl family 'family_name'.
  * When successful, writes its result to 'multicast_group' and returns 0.

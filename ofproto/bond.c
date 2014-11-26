@@ -83,7 +83,7 @@ struct bond_slave {
 
     struct netdev *netdev;      /* Network device, owned by the client. */
     unsigned int change_seq;    /* Tracks changes in 'netdev'. */
-    ofp_port_t  ofp_port;       /* Open flow port number */
+    ofp_port_t  ofp_port;       /* OpenFlow port number. */
     char *name;                 /* Name (a copy of netdev_get_name(netdev)). */
 
     /* Link status. */
@@ -131,8 +131,16 @@ struct bond {
     uint32_t recirc_id;          /* Non zero if recirculation can be used.*/
     struct hmap pr_rule_ops;     /* Helps to maintain post recirculation rules.*/
 
+    /* Store active slave to OVSDB. */
+    bool active_slave_changed; /* Set to true whenever the bond changes
+                                   active slave. It will be reset to false
+                                   after it is stored into OVSDB */
+
+    /* Interface name may not be persistent across an OS reboot, use
+     * MAC address for identifing the active slave */
+    uint8_t active_slave_mac[ETH_ADDR_LEN];
+                               /* The MAC address of the active interface. */
     /* Legacy compatibility. */
-    long long int next_fake_iface_update; /* LLONG_MAX if disabled. */
     bool lacp_fallback_ab; /* Fallback to active-backup on LACP failure. */
 
     struct ovs_refcount ref_cnt;
@@ -176,8 +184,6 @@ static struct bond_slave *choose_output_slave(const struct bond *,
                                               const struct flow *,
                                               struct flow_wildcards *,
                                               uint16_t vlan)
-    OVS_REQ_RDLOCK(rwlock);
-static void bond_update_fake_slave_stats(struct bond *)
     OVS_REQ_RDLOCK(rwlock);
 
 /* Attempts to parse 's' as the name of a bond balancing mode.  If successful,
@@ -228,7 +234,6 @@ bond_create(const struct bond_settings *s, struct ofproto_dpif *ofproto)
     hmap_init(&bond->slaves);
     list_init(&bond->enabled_slaves);
     ovs_mutex_init(&bond->mutex);
-    bond->next_fake_iface_update = LLONG_MAX;
     ovs_refcount_init(&bond->ref_cnt);
 
     bond->recirc_id = 0;
@@ -432,14 +437,6 @@ bond_reconfigure(struct bond *bond, const struct bond_settings *s)
         revalidate = true;
     }
 
-    if (s->fake_iface) {
-        if (bond->next_fake_iface_update == LLONG_MAX) {
-            bond->next_fake_iface_update = time_msec();
-        }
-    } else {
-        bond->next_fake_iface_update = LLONG_MAX;
-    }
-
     if (bond->bond_revalidate) {
         revalidate = true;
         bond->bond_revalidate = false;
@@ -458,8 +455,45 @@ bond_reconfigure(struct bond *bond, const struct bond_settings *s)
         bond_entry_reset(bond);
     }
 
+    memcpy(bond->active_slave_mac, s->active_slave_mac,
+           sizeof s->active_slave_mac);
+
+    bond->active_slave_changed = false;
+
     ovs_rwlock_unlock(&rwlock);
     return revalidate;
+}
+
+static struct bond_slave *
+bond_find_slave_by_mac(const struct bond *bond, const uint8_t mac[ETH_ADDR_LEN])
+{
+    struct bond_slave *slave;
+
+    /* Find the last active slave */
+    HMAP_FOR_EACH(slave, hmap_node, &bond->slaves) {
+        uint8_t slave_mac[ETH_ADDR_LEN];
+
+        if (netdev_get_etheraddr(slave->netdev, slave_mac)) {
+            continue;
+        }
+
+        if (!memcmp(slave_mac, mac, sizeof(slave_mac))) {
+            return slave;
+        }
+    }
+
+    return NULL;
+}
+
+static void
+bond_active_slave_changed(struct bond *bond)
+{
+    uint8_t mac[ETH_ADDR_LEN];
+
+    netdev_get_etheraddr(bond->active_slave->netdev, mac);
+    memcpy(bond->active_slave_mac, mac, sizeof bond->active_slave_mac);
+    bond->active_slave_changed = true;
+    seq_change(connectivity_seq_get());
 }
 
 static void
@@ -611,12 +645,6 @@ bond_run(struct bond *bond, enum lacp_status lacp_status)
         bond_choose_active_slave(bond);
     }
 
-    /* Update fake bond interface stats. */
-    if (time_msec() >= bond->next_fake_iface_update) {
-        bond_update_fake_slave_stats(bond);
-        bond->next_fake_iface_update = time_msec() + 1000;
-    }
-
     revalidate = bond->bond_revalidate;
     bond->bond_revalidate = false;
     ovs_rwlock_unlock(&rwlock);
@@ -637,10 +665,6 @@ bond_wait(struct bond *bond)
         }
 
         seq_wait(connectivity_seq_get(), slave->change_seq);
-    }
-
-    if (bond->next_fake_iface_update != LLONG_MAX) {
-        poll_timer_wait_until(bond->next_fake_iface_update);
     }
 
     if (bond->bond_revalidate) {
@@ -1292,6 +1316,11 @@ bond_print_details(struct ds *ds, const struct bond *bond)
         break;
     }
 
+    ds_put_cstr(ds, "active slave mac: ");
+    ds_put_format(ds, ETH_ADDR_FMT, ETH_ADDR_ARGS(bond->active_slave_mac));
+    slave = bond_find_slave_by_mac(bond, bond->active_slave_mac);
+    ds_put_format(ds,"(%s)\n", slave ? slave->name : "none");
+
     HMAP_FOR_EACH (slave, hmap_node, &bond->slaves) {
         shash_add(&slave_shash, slave->name, slave);
     }
@@ -1462,6 +1491,7 @@ bond_unixctl_set_active_slave(struct unixctl_conn *conn,
                   bond->name, slave->name);
         bond->send_learning_packets = true;
         unixctl_command_reply(conn, "done");
+        bond_active_slave_changed(bond);
     } else {
         unixctl_command_reply(conn, "no change");
     }
@@ -1769,6 +1799,12 @@ bond_choose_slave(const struct bond *bond)
 {
     struct bond_slave *slave, *best;
 
+    /* Find the last active slave. */
+    slave = bond_find_slave_by_mac(bond, bond->active_slave_mac);
+    if (slave && slave->enabled) {
+        return slave;
+    }
+
     /* Find an enabled slave. */
     HMAP_FOR_EACH (slave, hmap_node, &bond->slaves) {
         if (slave->enabled) {
@@ -1809,44 +1845,35 @@ bond_choose_active_slave(struct bond *bond)
         }
 
         bond->send_learning_packets = true;
+
+        if (bond->active_slave != old_active_slave) {
+            bond_active_slave_changed(bond);
+        }
     } else if (old_active_slave) {
         VLOG_INFO_RL(&rl, "bond %s: all interfaces disabled", bond->name);
     }
 }
 
-/* Attempts to make the sum of the bond slaves' statistics appear on the fake
- * bond interface. */
-static void
-bond_update_fake_slave_stats(struct bond *bond)
+/*
+ * Return true if bond has unstored active slave change.
+ * If return true, 'mac' will store the bond's current active slave's
+ * MAC address.  */
+bool
+bond_get_changed_active_slave(const char *name, uint8_t* mac, bool force)
 {
-    struct netdev_stats bond_stats;
-    struct bond_slave *slave;
-    struct netdev *bond_dev;
+    struct bond *bond;
 
-    memset(&bond_stats, 0, sizeof bond_stats);
-
-    HMAP_FOR_EACH (slave, hmap_node, &bond->slaves) {
-        struct netdev_stats slave_stats;
-
-        if (!netdev_get_stats(slave->netdev, &slave_stats)) {
-            /* XXX: We swap the stats here because they are swapped back when
-             * reported by the internal device.  The reason for this is
-             * internal devices normally represent packets going into the
-             * system but when used as fake bond device they represent packets
-             * leaving the system.  We really should do this in the internal
-             * device itself because changing it here reverses the counts from
-             * the perspective of the switch.  However, the internal device
-             * doesn't know what type of device it represents so we have to do
-             * it here for now. */
-            bond_stats.tx_packets += slave_stats.rx_packets;
-            bond_stats.tx_bytes += slave_stats.rx_bytes;
-            bond_stats.rx_packets += slave_stats.tx_packets;
-            bond_stats.rx_bytes += slave_stats.tx_bytes;
+    ovs_rwlock_wrlock(&rwlock);
+    bond = bond_find(name);
+    if (bond) {
+        if (bond->active_slave_changed || force) {
+            memcpy(mac, bond->active_slave_mac, ETH_ADDR_LEN);
+            bond->active_slave_changed = false;
+            ovs_rwlock_unlock(&rwlock);
+            return true;
         }
     }
+    ovs_rwlock_unlock(&rwlock);
 
-    if (!netdev_open(bond->name, "system", &bond_dev)) {
-        netdev_set_stats(bond_dev, &bond_stats);
-        netdev_close(bond_dev);
-    }
+    return false;
 }

@@ -32,6 +32,7 @@
 #include <linux/if_arp.h>
 #include <linux/ip.h>
 #include <linux/ipv6.h>
+#include <linux/mpls.h>
 #include <linux/sctp.h>
 #include <linux/smp.h>
 #include <linux/tcp.h>
@@ -41,13 +42,13 @@
 #include <linux/rculist.h>
 #include <net/ip.h>
 #include <net/ipv6.h>
+#include <net/mpls.h>
 #include <net/ndisc.h>
 
 #include "datapath.h"
 #include "flow.h"
 #include "flow_netlink.h"
 
-#include "mpls.h"
 #include "vlan.h"
 
 u64 ovs_flow_used_time(unsigned long flow_jiffies)
@@ -66,7 +67,7 @@ u64 ovs_flow_used_time(unsigned long flow_jiffies)
 #define TCP_FLAGS_BE16(tp) (*(__be16 *)&tcp_flag_word(tp) & htons(0x0FFF))
 
 void ovs_flow_stats_update(struct sw_flow *flow, __be16 tcp_flags,
-			   struct sk_buff *skb)
+			   const struct sk_buff *skb)
 {
 	struct flow_stats *stats;
 	int node = numa_node_id();
@@ -93,7 +94,7 @@ void ovs_flow_stats_update(struct sw_flow *flow, __be16 tcp_flags,
 			 * allocated stats as we have already locked them.
 			 */
 			if (likely(flow->stats_last_writer != NUMA_NO_NODE)
-			    && likely(!rcu_dereference(flow->stats[node]))) {
+			    && likely(!rcu_access_pointer(flow->stats[node]))) {
 				/* Try to allocate node-specific stats. */
 				struct flow_stats *new_stats;
 
@@ -402,13 +403,13 @@ static int parse_icmpv6(struct sk_buff *skb, struct sw_flow_key *key,
 				if (unlikely(!is_zero_ether_addr(key->ipv6.nd.sll)))
 					goto invalid;
 				ether_addr_copy(key->ipv6.nd.sll,
-				    &nd->opt[offset+sizeof(*nd_opt)]);
+						&nd->opt[offset+sizeof(*nd_opt)]);
 			} else if (nd_opt->nd_opt_type == ND_OPT_TARGET_LL_ADDR
 				   && opt_len == 8) {
 				if (unlikely(!is_zero_ether_addr(key->ipv6.nd.tll)))
 					goto invalid;
 				ether_addr_copy(key->ipv6.nd.tll,
-				    &nd->opt[offset+sizeof(*nd_opt)]);
+						&nd->opt[offset+sizeof(*nd_opt)]);
 			}
 
 			icmp_len -= opt_len;
@@ -453,7 +454,7 @@ static int key_extract(struct sk_buff *skb, struct sw_flow_key *key)
 	int error;
 	struct ethhdr *eth;
 
-	/* Flags are always used as part of stats. */
+	/* Flags are always used as part of stats */
 	key->tp.flags = 0;
 
 	skb_reset_mac_header(skb);
@@ -467,7 +468,8 @@ static int key_extract(struct sk_buff *skb, struct sw_flow_key *key)
 
 	__skb_pull(skb, 2 * ETH_ALEN);
 	/* We are going to push all headers that we pull, so no need to
- 	 * update skb->csum here. */
+	 * update skb->csum here.
+	 */
 
 	key->eth.tci = 0;
 	if (vlan_tx_tag_present(skb))
@@ -514,7 +516,7 @@ static int key_extract(struct sk_buff *skb, struct sw_flow_key *key)
 			return 0;
 		}
 		if (nh->frag_off & htons(IP_MF) ||
-			 skb_shinfo(skb)->gso_type & SKB_GSO_UDP)
+			skb_shinfo(skb)->gso_type & SKB_GSO_UDP)
 			key->ip.frag = OVS_FRAG_TYPE_FIRST;
 		else
 			key->ip.frag = OVS_FRAG_TYPE_NONE;
@@ -529,6 +531,7 @@ static int key_extract(struct sk_buff *skb, struct sw_flow_key *key)
 			} else {
 				memset(&key->tp, 0, sizeof(key->tp));
 			}
+
 		} else if (key->ip.proto == IPPROTO_UDP) {
 			if (udphdr_ok(skb)) {
 				struct udphdr *udp = udp_hdr(skb);
@@ -550,7 +553,8 @@ static int key_extract(struct sk_buff *skb, struct sw_flow_key *key)
 				struct icmphdr *icmp = icmp_hdr(skb);
 				/* The ICMP type and code fields use the 16-bit
 				 * transport port fields, so we need to store
-				 * them in 16-bit network byte order. */
+				 * them in 16-bit network byte order.
+				 */
 				key->tp.src = htons(icmp->type);
 				key->tp.dst = htons(icmp->code);
 			} else {
@@ -561,14 +565,15 @@ static int key_extract(struct sk_buff *skb, struct sw_flow_key *key)
 	} else if (key->eth.type == htons(ETH_P_ARP) ||
 		   key->eth.type == htons(ETH_P_RARP)) {
 		struct arp_eth_header *arp;
+		bool arp_available = arphdr_ok(skb);
 
 		arp = (struct arp_eth_header *)skb_network_header(skb);
 
-		if (arphdr_ok(skb)
-				&& arp->ar_hrd == htons(ARPHRD_ETHER)
-				&& arp->ar_pro == htons(ETH_P_IP)
-				&& arp->ar_hln == ETH_ALEN
-				&& arp->ar_pln == 4) {
+		if (arp_available &&
+		    arp->ar_hrd == htons(ARPHRD_ETHER) &&
+		    arp->ar_pro == htons(ETH_P_IP) &&
+		    arp->ar_hln == ETH_ALEN &&
+		    arp->ar_pln == 4) {
 
 			/* We only match on the lower 8 bits of the opcode. */
 			if (ntohs(arp->ar_op) <= 0xff)
@@ -606,7 +611,7 @@ static int key_extract(struct sk_buff *skb, struct sw_flow_key *key)
 				memcpy(&key->mpls.top_lse, &lse, MPLS_HLEN);
 
 			skb_set_network_header(skb, skb->mac_len + stack_len);
-			if (lse & htonl(MPLS_BOS_MASK))
+			if (lse & htonl(MPLS_LS_S_MASK))
 				break;
 
 			stack_len += MPLS_HLEN;
@@ -668,8 +673,6 @@ static int key_extract(struct sk_buff *skb, struct sw_flow_key *key)
 			}
 		}
 	}
-
-	OVS_CB(skb)->pkt_key = key;
 	return 0;
 }
 
@@ -679,8 +682,7 @@ int ovs_flow_key_update(struct sk_buff *skb, struct sw_flow_key *key)
 }
 
 int ovs_flow_key_extract(const struct ovs_tunnel_info *tun_info,
-			 struct sk_buff *skb,
-			 struct sw_flow_key *key)
+			 struct sk_buff *skb, struct sw_flow_key *key)
 {
 	/* Extract metadata from packet. */
 	if (tun_info) {
@@ -691,7 +693,7 @@ int ovs_flow_key_extract(const struct ovs_tunnel_info *tun_info,
 
 		if (tun_info->options) {
 			memcpy(GENEVE_OPTS(key, tun_info->options_len),
-				tun_info->options, tun_info->options_len);
+			       tun_info->options, tun_info->options_len);
 			key->tun_opts_len = tun_info->options_len;
 		} else {
 			key->tun_opts_len = 0;
@@ -712,12 +714,12 @@ int ovs_flow_key_extract(const struct ovs_tunnel_info *tun_info,
 
 int ovs_flow_key_extract_userspace(const struct nlattr *attr,
 				   struct sk_buff *skb,
-				   struct sw_flow_key *key)
+				   struct sw_flow_key *key, bool log)
 {
 	int err;
 
 	/* Extract metadata from netlink attributes. */
-	err = ovs_nla_get_flow_metadata(attr, key);
+	err = ovs_nla_get_flow_metadata(attr, key, log);
 	if (err)
 		return err;
 

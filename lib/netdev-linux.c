@@ -48,7 +48,7 @@
 #include <unistd.h>
 
 #include "coverage.h"
-#include "dpif-linux.h"
+#include "dpif-netlink.h"
 #include "dpif-netdev.h"
 #include "dynamic-string.h"
 #include "fatal-signal.h"
@@ -136,6 +136,46 @@ struct tpacket_auxdata {
     uint16_t tp_net;
     uint16_t tp_vlan_tci;
     uint16_t tp_vlan_tpid;
+};
+
+/* Linux 2.6.35 introduced IFLA_STATS64 and rtnl_link_stats64.
+ *
+ * Tests for rtnl_link_stats64 don't seem to consistently work, e.g. on
+ * 2.6.32-431.29.2.el6.x86_64 (see report at
+ * http://openvswitch.org/pipermail/dev/2014-October/047978.html).  Maybe
+ * if_link.h is not self-contained on those kernels.  It is easiest to
+ * unconditionally define a replacement. */
+#ifndef IFLA_STATS64
+#define IFLA_STATS64 23
+#endif
+#define rtnl_link_stats64 rpl_rtnl_link_stats64
+struct rtnl_link_stats64 {
+    uint64_t rx_packets;
+    uint64_t tx_packets;
+    uint64_t rx_bytes;
+    uint64_t tx_bytes;
+    uint64_t rx_errors;
+    uint64_t tx_errors;
+    uint64_t rx_dropped;
+    uint64_t tx_dropped;
+    uint64_t multicast;
+    uint64_t collisions;
+
+    uint64_t rx_length_errors;
+    uint64_t rx_over_errors;
+    uint64_t rx_crc_errors;
+    uint64_t rx_frame_errors;
+    uint64_t rx_fifo_errors;
+    uint64_t rx_missed_errors;
+
+    uint64_t tx_aborted_errors;
+    uint64_t tx_carrier_errors;
+    uint64_t tx_fifo_errors;
+    uint64_t tx_heartbeat_errors;
+    uint64_t tx_window_errors;
+
+    uint64_t rx_compressed;
+    uint64_t tx_compressed;
 };
 
 enum {
@@ -435,8 +475,11 @@ static struct vlog_rate_limit rl = VLOG_RATE_LIMIT_INIT(5, 20);
 
 /* Polling miimon status for all ports causes performance degradation when
  * handling a large number of ports. If there are no devices using miimon, then
- * we skip netdev_linux_miimon_run() and netdev_linux_miimon_wait(). */
-static atomic_int miimon_cnt = ATOMIC_VAR_INIT(0);
+ * we skip netdev_linux_miimon_run() and netdev_linux_miimon_wait().
+ *
+ * Readers do not depend on this variable synchronizing with the related
+ * changes in the device miimon status, so we can use atomic_count. */
+static atomic_count miimon_cnt = ATOMIC_COUNT_INIT(0);
 
 static void netdev_linux_run(void);
 
@@ -525,10 +568,7 @@ netdev_linux_notify_sock(void)
 static bool
 netdev_linux_miimon_enabled(void)
 {
-    int miimon;
-
-    atomic_read(&miimon_cnt, &miimon);
-    return miimon > 0;
+    return atomic_count_get(&miimon_cnt) > 0;
 }
 
 static void
@@ -758,8 +798,7 @@ netdev_linux_destruct(struct netdev *netdev_)
     }
 
     if (netdev->miimon_interval > 0) {
-        int junk;
-        atomic_sub(&miimon_cnt, 1, &junk);
+        atomic_count_dec(&miimon_cnt);
     }
 
     ovs_mutex_destroy(&netdev->mutex);
@@ -1015,6 +1054,7 @@ netdev_linux_rxq_recv(struct netdev_rxq *rxq_, struct dpif_packet **packets,
         dpif_packet_delete(packet);
     } else {
         dp_packet_pad(buffer);
+        dpif_packet_set_dp_hash(packet, 0);
         packets[0] = packet;
         *c = 1;
     }
@@ -1057,8 +1097,8 @@ netdev_linux_rxq_drain(struct netdev_rxq *rxq_)
  * The kernel maintains a packet transmission queue, so the caller is not
  * expected to do additional queuing of packets. */
 static int
-netdev_linux_send(struct netdev *netdev_, struct dpif_packet **pkts, int cnt,
-                  bool may_steal)
+netdev_linux_send(struct netdev *netdev_, int qid OVS_UNUSED,
+                  struct dpif_packet **pkts, int cnt, bool may_steal)
 {
     int i;
     int error = 0;
@@ -1161,7 +1201,7 @@ netdev_linux_send(struct netdev *netdev_, struct dpif_packet **pkts, int cnt,
  * expected to do additional queuing of packets.  Thus, this function is
  * unlikely to ever be used.  It is included for completeness. */
 static void
-netdev_linux_send_wait(struct netdev *netdev)
+netdev_linux_send_wait(struct netdev *netdev, int qid OVS_UNUSED)
 {
     if (is_tap_netdev(netdev)) {
         /* TAP device always accepts packets.*/
@@ -1416,12 +1456,10 @@ netdev_linux_set_miimon_interval(struct netdev *netdev_,
     ovs_mutex_lock(&netdev->mutex);
     interval = interval > 0 ? MAX(interval, 100) : 0;
     if (netdev->miimon_interval != interval) {
-        int junk;
-
         if (interval && !netdev->miimon_interval) {
-            atomic_add(&miimon_cnt, 1, &junk);
+            atomic_count_inc(&miimon_cnt);
         } else if (!interval && netdev->miimon_interval) {
-            atomic_sub(&miimon_cnt, 1, &junk);
+            atomic_count_dec(&miimon_cnt);
         }
 
         netdev->miimon_interval = interval;
@@ -1525,11 +1563,11 @@ netdev_stats_from_ovs_vport_stats(struct netdev_stats *dst,
 static int
 get_stats_via_vport__(const struct netdev *netdev, struct netdev_stats *stats)
 {
-    struct dpif_linux_vport reply;
+    struct dpif_netlink_vport reply;
     struct ofpbuf *buf;
     int error;
 
-    error = dpif_linux_vport_get(netdev_get_name(netdev), &reply, &buf);
+    error = dpif_netlink_vport_get(netdev_get_name(netdev), &reply, &buf);
     if (error) {
         return error;
     } else if (!reply.stats) {
@@ -1691,41 +1729,6 @@ netdev_internal_get_stats(const struct netdev *netdev_,
     ovs_mutex_unlock(&netdev->mutex);
 
     return error;
-}
-
-static int
-netdev_internal_set_stats(struct netdev *netdev,
-                          const struct netdev_stats *stats)
-{
-    struct ovs_vport_stats vport_stats;
-    struct dpif_linux_vport vport;
-    int err;
-
-    put_32aligned_u64(&vport_stats.rx_packets, stats->rx_packets);
-    put_32aligned_u64(&vport_stats.tx_packets, stats->tx_packets);
-    put_32aligned_u64(&vport_stats.rx_bytes, stats->rx_bytes);
-    put_32aligned_u64(&vport_stats.tx_bytes, stats->tx_bytes);
-    put_32aligned_u64(&vport_stats.rx_errors, stats->rx_errors);
-    put_32aligned_u64(&vport_stats.tx_errors, stats->tx_errors);
-    put_32aligned_u64(&vport_stats.rx_dropped, stats->rx_dropped);
-    put_32aligned_u64(&vport_stats.tx_dropped, stats->tx_dropped);
-
-    dpif_linux_vport_init(&vport);
-    vport.cmd = OVS_VPORT_CMD_SET;
-    vport.name = netdev_get_name(netdev);
-    vport.stats = &vport_stats;
-
-    err = dpif_linux_vport_transact(&vport, NULL, NULL);
-
-    /* If the vport layer doesn't know about the device, that doesn't mean it
-     * doesn't exist (after all were able to open it when netdev_open() was
-     * called), it just means that it isn't attached and we'll be getting
-     * stats a different way. */
-    if (err == ENODEV) {
-        err = EOPNOTSUPP;
-    }
-
-    return err;
 }
 
 static void
@@ -2736,7 +2739,7 @@ netdev_linux_update_flags(struct netdev *netdev_, enum netdev_flags off,
     return error;
 }
 
-#define NETDEV_LINUX_CLASS(NAME, CONSTRUCT, GET_STATS, SET_STATS,  \
+#define NETDEV_LINUX_CLASS(NAME, CONSTRUCT, GET_STATS,          \
                            GET_FEATURES, GET_STATUS)            \
 {                                                               \
     NAME,                                                       \
@@ -2752,6 +2755,11 @@ netdev_linux_update_flags(struct netdev *netdev_, enum netdev_flags off,
     NULL,                       /* get_config */                \
     NULL,                       /* set_config */                \
     NULL,                       /* get_tunnel_config */         \
+    NULL,                       /* build header */              \
+    NULL,                       /* push header */               \
+    NULL,                       /* pop header */                \
+    NULL,                       /* get_numa_id */               \
+    NULL,                       /* set_multiq */                \
                                                                 \
     netdev_linux_send,                                          \
     netdev_linux_send_wait,                                     \
@@ -2765,7 +2773,6 @@ netdev_linux_update_flags(struct netdev *netdev_, enum netdev_flags off,
     netdev_linux_get_carrier_resets,                            \
     netdev_linux_set_miimon_interval,                           \
     GET_STATS,                                                  \
-    SET_STATS,                                                  \
                                                                 \
     GET_FEATURES,                                               \
     netdev_linux_set_advertisements,                            \
@@ -2808,7 +2815,6 @@ const struct netdev_class netdev_linux_class =
         "system",
         netdev_linux_construct,
         netdev_linux_get_stats,
-        NULL,                    /* set_stats */
         netdev_linux_get_features,
         netdev_linux_get_status);
 
@@ -2817,7 +2823,6 @@ const struct netdev_class netdev_tap_class =
         "tap",
         netdev_linux_construct_tap,
         netdev_tap_get_stats,
-        NULL,                   /* set_stats */
         netdev_linux_get_features,
         netdev_linux_get_status);
 
@@ -2826,7 +2831,6 @@ const struct netdev_class netdev_internal_class =
         "internal",
         netdev_linux_construct,
         netdev_internal_get_stats,
-        netdev_internal_set_stats,
         NULL,                  /* get_features */
         netdev_internal_get_status);
 
@@ -4045,7 +4049,7 @@ tc_add_policer(struct netdev *netdev, int kbits_rate, int kbits_burst)
     memset(&tc_police, 0, sizeof tc_police);
     tc_police.action = TC_POLICE_SHOT;
     tc_police.mtu = mtu;
-    tc_fill_rate(&tc_police.rate, (kbits_rate * 1000)/8, mtu);
+    tc_fill_rate(&tc_police.rate, ((uint64_t) kbits_rate * 1000)/8, mtu);
     tc_police.burst = tc_bytes_to_ticks(tc_police.rate.rate,
                                         kbits_burst * 1024);
 
@@ -4614,6 +4618,34 @@ netdev_stats_from_rtnl_link_stats(struct netdev_stats *dst,
     dst->tx_window_errors = src->tx_window_errors;
 }
 
+/* Copies 'src' into 'dst', performing format conversion in the process. */
+static void
+netdev_stats_from_rtnl_link_stats64(struct netdev_stats *dst,
+                                    const struct rtnl_link_stats64 *src)
+{
+    dst->rx_packets = src->rx_packets;
+    dst->tx_packets = src->tx_packets;
+    dst->rx_bytes = src->rx_bytes;
+    dst->tx_bytes = src->tx_bytes;
+    dst->rx_errors = src->rx_errors;
+    dst->tx_errors = src->tx_errors;
+    dst->rx_dropped = src->rx_dropped;
+    dst->tx_dropped = src->tx_dropped;
+    dst->multicast = src->multicast;
+    dst->collisions = src->collisions;
+    dst->rx_length_errors = src->rx_length_errors;
+    dst->rx_over_errors = src->rx_over_errors;
+    dst->rx_crc_errors = src->rx_crc_errors;
+    dst->rx_frame_errors = src->rx_frame_errors;
+    dst->rx_fifo_errors = src->rx_fifo_errors;
+    dst->rx_missed_errors = src->rx_missed_errors;
+    dst->tx_aborted_errors = src->tx_aborted_errors;
+    dst->tx_carrier_errors = src->tx_carrier_errors;
+    dst->tx_fifo_errors = src->tx_fifo_errors;
+    dst->tx_heartbeat_errors = src->tx_heartbeat_errors;
+    dst->tx_window_errors = src->tx_window_errors;
+}
+
 static int
 get_stats_via_netlink(const struct netdev *netdev_, struct netdev_stats *stats)
 {
@@ -4634,13 +4666,19 @@ get_stats_via_netlink(const struct netdev *netdev_, struct netdev_stats *stats)
     }
 
     if (ofpbuf_try_pull(reply, NLMSG_HDRLEN + sizeof(struct ifinfomsg))) {
-        const struct nlattr *a = nl_attr_find(reply, 0, IFLA_STATS);
-        if (a && nl_attr_get_size(a) >= sizeof(struct rtnl_link_stats)) {
-            netdev_stats_from_rtnl_link_stats(stats, nl_attr_get(a));
+        const struct nlattr *a = nl_attr_find(reply, 0, IFLA_STATS64);
+        if (a && nl_attr_get_size(a) >= sizeof(struct rtnl_link_stats64)) {
+            netdev_stats_from_rtnl_link_stats64(stats, nl_attr_get(a));
             error = 0;
         } else {
-            VLOG_WARN_RL(&rl, "RTM_GETLINK reply lacks stats");
-            error = EPROTO;
+            const struct nlattr *a = nl_attr_find(reply, 0, IFLA_STATS);
+            if (a && nl_attr_get_size(a) >= sizeof(struct rtnl_link_stats)) {
+                netdev_stats_from_rtnl_link_stats(stats, nl_attr_get(a));
+                error = 0;
+            } else {
+                VLOG_WARN_RL(&rl, "RTM_GETLINK reply lacks stats");
+                error = EPROTO;
+            }
         }
     } else {
         VLOG_WARN_RL(&rl, "short RTM_GETLINK reply");

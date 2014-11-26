@@ -15,27 +15,25 @@
  */
 
 #include <config.h>
-
+#undef NDEBUG
 #include "jsonrpc.h"
-
 #include <errno.h>
 #include <fcntl.h>
 #include <getopt.h>
 #include <stdio.h>
 #include <stdlib.h>
-
 #include "command-line.h"
 #include "daemon.h"
 #include "json.h"
+#include "ovstest.h"
 #include "poll-loop.h"
 #include "stream-ssl.h"
 #include "stream.h"
 #include "timeval.h"
 #include "util.h"
 #include "vlog.h"
-#include "ovstest.h"
 
-static void usage(void) NO_RETURN;
+NO_RETURN static void usage(void);
 static void parse_options(int argc, char *argv[]);
 static struct command *get_all_commands(void);
 
@@ -330,11 +328,11 @@ do_help(int argc OVS_UNUSED, char *argv[] OVS_UNUSED)
 }
 
 static struct command all_commands[] = {
-    { "listen", 1, 1, do_listen },
-    { "request", 3, 3, do_request },
-    { "notify", 3, 3, do_notify },
-    { "help", 0, INT_MAX, do_help },
-    { NULL, 0, 0, NULL },
+    { "listen", NULL, 1, 1, do_listen },
+    { "request", NULL, 3, 3, do_request },
+    { "notify", NULL, 3, 3, do_notify },
+    { "help", NULL, 0, INT_MAX, do_help },
+    { NULL, NULL, 0, 0, NULL },
 };
 
 static struct command *

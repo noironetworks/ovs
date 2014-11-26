@@ -647,6 +647,7 @@ netdev_bsd_rxq_recv(struct netdev_rxq *rxq_, struct dpif_packet **packets,
         dpif_packet_delete(packet);
     } else {
         dp_packet_pad(buffer);
+        dpif_packet_set_dp_hash(packet, 0);
         packets[0] = packet;
         *c = 1;
     }
@@ -686,8 +687,8 @@ netdev_bsd_rxq_drain(struct netdev_rxq *rxq_)
  * system or a tap device.
  */
 static int
-netdev_bsd_send(struct netdev *netdev_, struct dpif_packet **pkts, int cnt,
-                bool may_steal)
+netdev_bsd_send(struct netdev *netdev_, int qid OVS_UNUSED,
+                struct dpif_packet **pkts, int cnt, bool may_steal)
 {
     struct netdev_bsd *dev = netdev_bsd_cast(netdev_);
     const char *name = netdev_get_name(netdev_);
@@ -749,7 +750,7 @@ netdev_bsd_send(struct netdev *netdev_, struct dpif_packet **pkts, int cnt,
  * with netdev_send().
  */
 static void
-netdev_bsd_send_wait(struct netdev *netdev_)
+netdev_bsd_send_wait(struct netdev *netdev_, int qid OVS_UNUSED)
 {
     struct netdev_bsd *dev = netdev_bsd_cast(netdev_);
 
@@ -1561,6 +1562,11 @@ netdev_bsd_update_flags(struct netdev *netdev_, enum netdev_flags off,
     NULL, /* get_config */                           \
     NULL, /* set_config */                           \
     NULL, /* get_tunnel_config */                    \
+    NULL, /* build header */                         \
+    NULL, /* push header */                          \
+    NULL, /* pop header */                           \
+    NULL, /* get_numa_id */                          \
+    NULL, /* set_multiq */                           \
                                                      \
     netdev_bsd_send,                                 \
     netdev_bsd_send_wait,                            \
@@ -1574,7 +1580,6 @@ netdev_bsd_update_flags(struct netdev *netdev_, enum netdev_flags off,
     NULL, /* get_carrier_resets */                   \
     NULL, /* set_miimon_interval */                  \
     netdev_bsd_get_stats,                            \
-    NULL, /* set_stats */                            \
                                                      \
     GET_FEATURES,                                    \
     NULL, /* set_advertisement */                    \

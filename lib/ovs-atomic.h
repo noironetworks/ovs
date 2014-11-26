@@ -321,10 +321,10 @@
     #if __CHECKER__
         /* sparse doesn't understand some GCC extensions we use. */
         #include "ovs-atomic-pthreads.h"
-    #elif HAVE_STDATOMIC_H
-        #include "ovs-atomic-c11.h"
     #elif __has_extension(c_atomic)
         #include "ovs-atomic-clang.h"
+    #elif HAVE_STDATOMIC_H
+        #include "ovs-atomic-c11.h"
     #elif __GNUC__ >= 4 && __GNUC_MINOR__ >= 7
         #include "ovs-atomic-gcc4.7+.h"
     #elif __GNUC__ && defined(__x86_64__)
@@ -333,6 +333,8 @@
         #include "ovs-atomic-i586.h"
     #elif HAVE_GCC4_ATOMICS
         #include "ovs-atomic-gcc4+.h"
+    #elif _MSC_VER && _M_IX86 >= 500
+        #include "ovs-atomic-msvc.h"
     #else
         /* ovs-atomic-pthreads implementation is provided for portability.
          * It might be too slow for real use because Open vSwitch is
@@ -379,6 +381,96 @@ typedef ATOMIC(int8_t)    atomic_int8_t;
 typedef ATOMIC(int16_t)   atomic_int16_t;
 typedef ATOMIC(int32_t)   atomic_int32_t;
 
+/* Relaxed atomic operations.
+ *
+ * When an operation on an atomic variable is not expected to synchronize
+ * with operations on other (atomic or non-atomic) variables, no memory
+ * barriers are needed and the relaxed memory ordering can be used.  These
+ * macros make such uses less daunting, but not invisible. */
+#define atomic_store_relaxed(VAR, VALUE)                        \
+    atomic_store_explicit(VAR, VALUE, memory_order_relaxed)
+#define atomic_read_relaxed(VAR, DST)                                   \
+    atomic_read_explicit(VAR, DST, memory_order_relaxed)
+#define atomic_compare_exchange_strong_relaxed(DST, EXP, SRC)     \
+    atomic_compare_exchange_strong_explicit(DST, EXP, SRC,        \
+                                            memory_order_relaxed, \
+                                            memory_order_relaxed)
+#define atomic_compare_exchange_weak_relaxed(DST, EXP, SRC)       \
+    atomic_compare_exchange_weak_explicit(DST, EXP, SRC,          \
+                                          memory_order_relaxed,   \
+                                          memory_order_relaxed)
+#define atomic_add_relaxed(RMW, ARG, ORIG)                              \
+    atomic_add_explicit(RMW, ARG, ORIG, memory_order_relaxed)
+#define atomic_sub_relaxed(RMW, ARG, ORIG)                              \
+    atomic_sub_explicit(RMW, ARG, ORIG, memory_order_relaxed)
+#define atomic_or_relaxed(RMW, ARG, ORIG)                               \
+    atomic_or_explicit(RMW, ARG, ORIG, memory_order_relaxed)
+#define atomic_xor_relaxed(RMW, ARG, ORIG)                              \
+    atomic_xor_explicit(RMW, ARG, ORIG, memory_order_relaxed)
+#define atomic_and_relaxed(RMW, ARG, ORIG)                              \
+    atomic_and_explicit(RMW, ARG, ORIG, memory_order_relaxed)
+#define atomic_flag_test_and_set_relaxed(FLAG)                          \
+    atomic_flag_test_and_set_explicit(FLAG, memory_order_relaxed)
+#define atomic_flag_clear_relaxed(FLAG)                         \
+    atomic_flag_clear_explicit(FLAG, memory_order_relaxed)
+
+/* A simplified atomic count.  Does not provide any synchronization with any
+ * other variables.
+ *
+ * Typically a counter is not used to synchronize the state of any other
+ * variables (with the notable exception of reference count, below).
+ * This abstraction releaves the user from the memory order considerations,
+ * and may make the code easier to read.
+ *
+ * We only support the unsigned int counters, as those are the most common. */
+typedef struct atomic_count {
+    atomic_uint count;
+} atomic_count;
+
+#define ATOMIC_COUNT_INIT(VALUE) { VALUE }
+
+static inline void
+atomic_count_init(atomic_count *count, unsigned int value)
+{
+    atomic_init(&count->count, value);
+}
+
+static inline unsigned int
+atomic_count_inc(atomic_count *count)
+{
+    unsigned int old;
+
+    atomic_add_relaxed(&count->count, 1, &old);
+
+    return old;
+}
+
+static inline unsigned int
+atomic_count_dec(atomic_count *count)
+{
+    unsigned int old;
+
+    atomic_sub_relaxed(&count->count, 1, &old);
+
+    return old;
+}
+
+static inline unsigned int
+atomic_count_get(atomic_count *count)
+{
+    unsigned int value;
+
+    atomic_read_relaxed(&count->count, &value);
+
+    return value;
+}
+
+static inline void
+atomic_count_set(atomic_count *count, unsigned int value)
+{
+    atomic_store_relaxed(&count->count, value);
+}
+
 /* Reference count. */
 struct ovs_refcount {
     atomic_uint count;
@@ -414,7 +506,10 @@ ovs_refcount_ref(struct ovs_refcount *refcount)
  * }
  *
  * Provides a release barrier making the preceding loads and stores to not be
- * reordered after the unref. */
+ * reordered after the unref, and in case of the last reference provides also
+ * an acquire barrier to keep all the following uninitialization from being
+ * reordered before the atomic decrement operation.  Together these synchronize
+ * any concurrent unref operations between each other. */
 static inline unsigned int
 ovs_refcount_unref(struct ovs_refcount *refcount)
 {
@@ -425,8 +520,7 @@ ovs_refcount_unref(struct ovs_refcount *refcount)
     ovs_assert(old_refcount > 0);
     if (old_refcount == 1) {
         /* 'memory_order_release' above means that there are no (reordered)
-         * accesses to the protected object from any other thread at this
-         * point.
+         * accesses to the protected object from any thread at this point.
          * An acquire barrier is needed to keep all subsequent access to the
          * object's memory from being reordered before the atomic operation
          * above. */

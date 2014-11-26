@@ -26,6 +26,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include "byte-order.h"
 #include "compiler.h"
 #include "openvswitch/types.h"
 
@@ -65,16 +66,17 @@
 #define BUILD_ASSERT_DECL_GCCONLY(EXPR) ((void) 0)
 #endif
 
-/* Like the standard assert macro, except:
- *
- *   - Writes the failure message to the log.
- *
- *   - Not affected by NDEBUG. */
+/* Like the standard assert macro, except writes the failure message to the
+ * log. */
+#ifndef NDEBUG
 #define ovs_assert(CONDITION)                                           \
     if (!OVS_LIKELY(CONDITION)) {                                       \
         ovs_assert_failure(SOURCE_LOCATOR, __func__, #CONDITION);       \
     }
-void ovs_assert_failure(const char *, const char *, const char *) NO_RETURN;
+#else
+#define ovs_assert(CONDITION) ((void) (CONDITION))
+#endif
+NO_RETURN void ovs_assert_failure(const char *, const char *, const char *);
 
 /* Casts 'pointer' to 'type' and issues a compiler warning if the cast changes
  * anything other than an outermost "const" or "volatile" qualifier.
@@ -228,6 +230,13 @@ ovs_prefetch_range(const void *start, size_t size)
 #define ASSIGN_CONTAINER(OBJECT, POINTER, MEMBER) \
     ((OBJECT) = OBJECT_CONTAINING(POINTER, OBJECT, MEMBER), (void) 0)
 
+/* As explained in the comment above OBJECT_OFFSETOF(), non-GNUC compilers
+ * like MSVC will complain about un-initialized variables if OBJECT
+ * hasn't already been initialized. To prevent such warnings, INIT_CONTAINER()
+ * can be used as a wrapper around ASSIGN_CONTAINER. */
+#define INIT_CONTAINER(OBJECT, POINTER, MEMBER) \
+    ((OBJECT) = NULL, ASSIGN_CONTAINER(OBJECT, POINTER, MEMBER))
+
 /* Given ATTR, and TYPE, cast the ATTR to TYPE by first casting ATTR to
  * (void *). This is to suppress the alignment warning issued by clang. */
 #define ALIGNED_CAST(TYPE, ATTR) ((TYPE) (void *) (ATTR))
@@ -268,7 +277,7 @@ void set_subprogram_name(const char *format, ...) PRINTF_FORMAT(1, 2);
 const char *get_program_version(void);
 void ovs_print_version(uint8_t min_ofp, uint8_t max_ofp);
 
-void out_of_memory(void) NO_RETURN;
+NO_RETURN void out_of_memory(void);
 void *xmalloc(size_t) MALLOC_LIKE;
 void *xcalloc(size_t, size_t) MALLOC_LIKE;
 void *xzalloc(size_t) MALLOC_LIKE;
@@ -287,14 +296,14 @@ void free_cacheline(void *);
 void ovs_strlcpy(char *dst, const char *src, size_t size);
 void ovs_strzcpy(char *dst, const char *src, size_t size);
 
-void ovs_abort(int err_no, const char *format, ...)
-    PRINTF_FORMAT(2, 3) NO_RETURN;
-void ovs_abort_valist(int err_no, const char *format, va_list)
-    PRINTF_FORMAT(2, 0) NO_RETURN;
-void ovs_fatal(int err_no, const char *format, ...)
-    PRINTF_FORMAT(2, 3) NO_RETURN;
-void ovs_fatal_valist(int err_no, const char *format, va_list)
-    PRINTF_FORMAT(2, 0) NO_RETURN;
+NO_RETURN void ovs_abort(int err_no, const char *format, ...)
+    PRINTF_FORMAT(2, 3);
+NO_RETURN void ovs_abort_valist(int err_no, const char *format, va_list)
+    PRINTF_FORMAT(2, 0);
+NO_RETURN void ovs_fatal(int err_no, const char *format, ...)
+    PRINTF_FORMAT(2, 3);
+NO_RETURN void ovs_fatal_valist(int err_no, const char *format, va_list)
+    PRINTF_FORMAT(2, 0);
 void ovs_error(int err_no, const char *format, ...) PRINTF_FORMAT(2, 3);
 void ovs_error_valist(int err_no, const char *format, va_list)
     PRINTF_FORMAT(2, 0);
@@ -308,11 +317,12 @@ bool str_to_llong(const char *, int base, long long *);
 bool str_to_uint(const char *, int base, unsigned int *);
 
 bool ovs_scan(const char *s, const char *format, ...) SCANF_FORMAT(2, 3);
+bool ovs_scan_len(const char *s, int *n, const char *format, ...);
 
 bool str_to_double(const char *, double *);
 
 int hexit_value(int c);
-unsigned int hexits_value(const char *s, size_t n, bool *ok);
+uintmax_t hexits_value(const char *s, size_t n, bool *ok);
 
 const char *english_list_delimiter(size_t index, size_t total);
 
@@ -346,6 +356,42 @@ static inline int
 raw_clz64(uint64_t n)
 {
     return __builtin_clzll(n);
+}
+#elif _MSC_VER
+static inline int
+raw_ctz(uint64_t n)
+{
+#ifdef _WIN64
+    uint32_t r = 0;
+    _BitScanForward64(&r, n);
+    return r;
+#else
+    uint32_t low = n, high, r = 0;
+    if (_BitScanForward(&r, low)) {
+        return r;
+    }
+    high = n >> 32;
+    _BitScanForward(&r, high);
+    return r + 32;
+#endif
+}
+
+static inline int
+raw_clz64(uint64_t n)
+{
+#ifdef _WIN64
+    uint32_t r = 0;
+    _BitScanReverse64(&r, n);
+    return 63 - r;
+#else
+    uint32_t low, high = n >> 32, r = 0;
+    if (_BitScanReverse(&r, high)) {
+        return 31 - r;
+    }
+    low = n;
+    _BitScanReverse(&r, low);
+    return 63 - r;
+#endif
 }
 #else
 /* Defined in util.c. */
@@ -469,7 +515,7 @@ zero_rightmost_1bit(uintmax_t x)
  *
  * Unlike the other functions for rightmost 1-bits, this function only works
  * with 32-bit integers. */
-static inline uint32_t
+static inline int
 rightmost_1bit_idx(uint32_t x)
 {
     return ctz32(x);
@@ -484,9 +530,17 @@ leftmost_1bit_idx(uint32_t x)
 {
     return x ? log_2_floor(x) : 32;
 }
+
+/* Return a ovs_be32 prefix in network byte order with 'plen' highest bits set.
+ * Shift with 32 is undefined behavior, but we rather use 64-bit shift than
+ * compare. */
+static inline ovs_be32 be32_prefix_mask(int plen)
+{
+    return htonl((uint64_t)UINT32_MAX << (32 - plen));
+}
 
-bool is_all_zeros(const uint8_t *, size_t);
-bool is_all_ones(const uint8_t *, size_t);
+bool is_all_zeros(const void *, size_t);
+bool is_all_ones(const void *, size_t);
 void bitwise_copy(const void *src, unsigned int src_len, unsigned int src_ofs,
                   void *dst, unsigned int dst_len, unsigned int dst_ofs,
                   unsigned int n_bits);
@@ -496,6 +550,8 @@ void bitwise_one(void *dst_, unsigned int dst_len, unsigned dst_ofs,
                  unsigned int n_bits);
 bool bitwise_is_all_zeros(const void *, unsigned int len, unsigned int ofs,
                           unsigned int n_bits);
+unsigned int bitwise_scan(const void *, unsigned int len,
+                          bool target, unsigned int start, unsigned int end);
 void bitwise_put(uint64_t value,
                  void *dst, unsigned int dst_len, unsigned int dst_ofs,
                  unsigned int n_bits);

@@ -201,14 +201,24 @@ enum ofp_raw_action_type {
     /* NX1.0+(21): struct nx_action_cnt_ids, ... */
     NXAST_RAW_DEC_TTL_CNT_IDS,
 
-    /* OF1.2+(25): struct ofp12_action_set_field, ... */
+    /* OF1.2-1.4(25): struct ofp12_action_set_field, ... */
     OFPAT_RAW12_SET_FIELD,
-    /* NX1.0+(7): struct nx_action_reg_load. */
+    /* OF1.5+(25): struct ofp12_action_set_field, ... */
+    OFPAT_RAW15_SET_FIELD,
+    /* NX1.0-1.4(7): struct nx_action_reg_load.
+     *
+     * [In OpenFlow 1.5, set_field is a superset of reg_load functionality, so
+     * we drop reg_load.] */
     NXAST_RAW_REG_LOAD,
+    /* NX1.0-1.4(33): struct nx_action_reg_load2, ...
+     *
+     * [In OpenFlow 1.5, set_field is a superset of reg_load2 functionality, so
+     * we drop reg_load2.] */
+    NXAST_RAW_REG_LOAD2,
 
-    /* OF1.5+(28): struct ofp15_action_copy_field. */
+    /* OF1.5+(28): struct ofp15_action_copy_field, ... */
     OFPAT_RAW15_COPY_FIELD,
-    /* NX1.0-1.4(6): struct nx_action_reg_move. */
+    /* NX1.0-1.4(6): struct nx_action_reg_move, ... */
     NXAST_RAW_REG_MOVE,
 
 /* ## ------------------------- ## */
@@ -243,6 +253,8 @@ enum ofp_raw_action_type {
 
     /* NX1.0+(15): struct nx_action_output_reg. */
     NXAST_RAW_OUTPUT_REG,
+    /* NX1.0+(32): struct nx_action_output_reg2. */
+    NXAST_RAW_OUTPUT_REG2,
 
     /* NX1.0+(16): struct nx_action_learn, ... */
     NXAST_RAW_LEARN,
@@ -301,6 +313,7 @@ OVS_INSTRUCTIONS
 
 static void ofpacts_update_instruction_actions(struct ofpbuf *openflow,
                                                size_t ofs);
+static void pad_ofpat(struct ofpbuf *openflow, size_t start_ofs);
 
 static enum ofperr ofpacts_verify(const struct ofpact[], size_t ofpacts_len,
                                   uint32_t allowed_ovsinsts);
@@ -702,6 +715,27 @@ struct nx_action_output_reg {
 };
 OFP_ASSERT(sizeof(struct nx_action_output_reg) == 24);
 
+/* Action structure for NXAST_OUTPUT_REG2.
+ *
+ * Like the NXAST_OUTPUT_REG but organized so that there is room for a 64-bit
+ * experimenter OXM as 'src'.
+ */
+struct nx_action_output_reg2 {
+    ovs_be16 type;              /* OFPAT_VENDOR. */
+    ovs_be16 len;               /* 24. */
+    ovs_be32 vendor;            /* NX_VENDOR_ID. */
+    ovs_be16 subtype;           /* NXAST_OUTPUT_REG2. */
+
+    ovs_be16 ofs_nbits;         /* (ofs << 6) | (n_bits - 1). */
+    ovs_be16 max_len;           /* Max length to send to controller. */
+
+    /* Followed by:
+     * - 'src', as an OXM/NXM header (either 4 or 8 bytes).
+     * - Enough 0-bytes to pad the action out to 24 bytes. */
+    uint8_t pad[10];
+};
+OFP_ASSERT(sizeof(struct nx_action_output_reg2) == 24);
+
 static enum ofperr
 decode_NXAST_RAW_OUTPUT_REG(const struct nx_action_output_reg *naor,
                             struct ofpbuf *out)
@@ -713,10 +747,38 @@ decode_NXAST_RAW_OUTPUT_REG(const struct nx_action_output_reg *naor,
     }
 
     output_reg = ofpact_put_OUTPUT_REG(out);
+    output_reg->ofpact.raw = NXAST_RAW_OUTPUT_REG;
     output_reg->src.field = mf_from_nxm_header(ntohl(naor->src));
     output_reg->src.ofs = nxm_decode_ofs(naor->ofs_nbits);
     output_reg->src.n_bits = nxm_decode_n_bits(naor->ofs_nbits);
     output_reg->max_len = ntohs(naor->max_len);
+
+    return mf_check_src(&output_reg->src, NULL);
+}
+
+static enum ofperr
+decode_NXAST_RAW_OUTPUT_REG2(const struct nx_action_output_reg2 *naor,
+                            struct ofpbuf *out)
+{
+    struct ofpact_output_reg *output_reg;
+    enum ofperr error;
+    struct ofpbuf b;
+
+    output_reg = ofpact_put_OUTPUT_REG(out);
+    output_reg->ofpact.raw = NXAST_RAW_OUTPUT_REG2;
+    output_reg->src.ofs = nxm_decode_ofs(naor->ofs_nbits);
+    output_reg->src.n_bits = nxm_decode_n_bits(naor->ofs_nbits);
+    output_reg->max_len = ntohs(naor->max_len);
+
+    ofpbuf_use_const(&b, naor, ntohs(naor->len));
+    ofpbuf_pull(&b, OBJECT_OFFSETOF(naor, pad));
+    error = nx_pull_header(&b, &output_reg->src.field, NULL);
+    if (error) {
+        return error;
+    }
+    if (!is_all_zeros(ofpbuf_data(&b), ofpbuf_size(&b))) {
+        return OFPERR_NXBRC_MUST_BE_ZERO;
+    }
 
     return mf_check_src(&output_reg->src, NULL);
 }
@@ -726,12 +788,29 @@ encode_OUTPUT_REG(const struct ofpact_output_reg *output_reg,
                   enum ofp_version ofp_version OVS_UNUSED,
                   struct ofpbuf *out)
 {
-    struct nx_action_output_reg *naor = put_NXAST_OUTPUT_REG(out);
+    /* If 'output_reg' came in as an NXAST_RAW_OUTPUT_REG2 action, or if it
+     * cannot be encoded in the older form, encode it as
+     * NXAST_RAW_OUTPUT_REG2. */
+    if (output_reg->ofpact.raw == NXAST_RAW_OUTPUT_REG2
+        || !mf_nxm_header(output_reg->src.field->id)) {
+        struct nx_action_output_reg2 *naor = put_NXAST_OUTPUT_REG2(out);
+        size_t size = ofpbuf_size(out);
 
-    naor->ofs_nbits = nxm_encode_ofs_nbits(output_reg->src.ofs,
-                                           output_reg->src.n_bits);
-    naor->src = htonl(output_reg->src.field->nxm_header);
-    naor->max_len = htons(output_reg->max_len);
+        naor->ofs_nbits = nxm_encode_ofs_nbits(output_reg->src.ofs,
+                                               output_reg->src.n_bits);
+        naor->max_len = htons(output_reg->max_len);
+
+        ofpbuf_set_size(out, size - sizeof naor->pad);
+        nx_put_header(out, output_reg->src.field->id, 0, false);
+        ofpbuf_set_size(out, size);
+    } else {
+        struct nx_action_output_reg *naor = put_NXAST_OUTPUT_REG(out);
+
+        naor->ofs_nbits = nxm_encode_ofs_nbits(output_reg->src.ofs,
+                                               output_reg->src.n_bits);
+        naor->src = htonl(mf_nxm_header(output_reg->src.field->id));
+        naor->max_len = htons(output_reg->max_len);
+    }
 }
 
 static char * WARN_UNUSED_RESULT
@@ -843,7 +922,7 @@ decode_bundle(bool load, const struct nx_action_bundle *nab,
     } else if (bundle->algorithm != NX_BD_ALG_HRW
                && bundle->algorithm != NX_BD_ALG_ACTIVE_BACKUP) {
         VLOG_WARN_RL(&rl, "unsupported algorithm %d", (int) bundle->algorithm);
-    } else if (slave_type != NXM_OF_IN_PORT) {
+    } else if (slave_type != mf_nxm_header(MFF_IN_PORT)) {
         VLOG_WARN_RL(&rl, "unsupported slave type %"PRIu16, slave_type);
     } else {
         error = 0;
@@ -924,12 +1003,12 @@ encode_BUNDLE(const struct ofpact_bundle *bundle,
     nab->algorithm = htons(bundle->algorithm);
     nab->fields = htons(bundle->fields);
     nab->basis = htons(bundle->basis);
-    nab->slave_type = htonl(NXM_OF_IN_PORT);
+    nab->slave_type = htonl(mf_nxm_header(MFF_IN_PORT));
     nab->n_slaves = htons(bundle->n_slaves);
     if (bundle->dst.field) {
         nab->ofs_nbits = nxm_encode_ofs_nbits(bundle->dst.ofs,
                                               bundle->dst.n_bits);
-        nab->dst = htonl(bundle->dst.field->nxm_header);
+        nab->dst = htonl(mf_nxm_header(bundle->dst.field->id));
     }
 
     slaves = ofpbuf_put_zeros(out, slaves_len);
@@ -1632,17 +1711,14 @@ struct ofp15_action_copy_field {
     ovs_be16 src_offset;        /* Starting bit offset in source. */
     ovs_be16 dst_offset;        /* Starting bit offset in destination. */
     ovs_be16 oxm_id_len;        /* Length of oxm_ids. */
-
-    /* OpenFlow allows for experimenter OXM fields whose expression is longer
-     * than a standard 32-bit OXM.  Thus, in the OpenFlow specification, the
-     * following is variable-length.  Open vSwitch does not yet support
-     * experimenter OXM fields, so until it does we leave these as fixed
-     * size. */
-    ovs_be32 src;               /* OXM for source field. */
-    ovs_be32 dst;               /* OXM for destination field. */
-    uint8_t pad[4];             /* Must be zero. */
+    /* Followed by:
+     * - OXM header for source field.
+     * - OXM header for destination field.
+     * - Padding with 0-bytes to a multiple of 8 bytes.
+     * The "pad" member is the beginning of the above. */
+    uint8_t pad[4];
 };
-OFP_ASSERT(sizeof(struct ofp15_action_copy_field) == 24);
+OFP_ASSERT(sizeof(struct ofp15_action_copy_field) == 16);
 
 /* Action structure for NXAST_REG_MOVE.
  *
@@ -1744,29 +1820,46 @@ struct nx_action_reg_move {
     ovs_be16 n_bits;                /* Number of bits. */
     ovs_be16 src_ofs;               /* Starting bit offset in source. */
     ovs_be16 dst_ofs;               /* Starting bit offset in destination. */
-    ovs_be32 src;                   /* Source register. */
-    ovs_be32 dst;                   /* Destination register. */
+    /* Followed by:
+     * - OXM/NXM header for source field (4 or 8 bytes).
+     * - OXM/NXM header for destination field (4 or 8 bytes).
+     * - Padding with 0-bytes to a multiple of 8 bytes, if necessary. */
 };
-OFP_ASSERT(sizeof(struct nx_action_reg_move) == 24);
+OFP_ASSERT(sizeof(struct nx_action_reg_move) == 16);
 
 static enum ofperr
 decode_OFPAT_RAW15_COPY_FIELD(const struct ofp15_action_copy_field *oacf,
                               struct ofpbuf *ofpacts)
 {
     struct ofpact_reg_move *move;
+    enum ofperr error;
+    size_t orig_size;
+    struct ofpbuf b;
 
-    if (oacf->oxm_id_len != htons(8)) {
-        /* We only support 4-byte OXM IDs so far. */
+    move = ofpact_put_REG_MOVE(ofpacts);
+    move->src.ofs = ntohs(oacf->src_offset);
+    move->src.n_bits = ntohs(oacf->n_bits);
+    move->dst.ofs = ntohs(oacf->dst_offset);
+    move->dst.n_bits = ntohs(oacf->n_bits);
+
+    ofpbuf_use_const(&b, oacf, ntohs(oacf->len));
+    ofpbuf_pull(&b, offsetof(struct ofp15_action_copy_field, pad));
+    orig_size = ofpbuf_size(&b);
+    error = nx_pull_header(&b, &move->src.field, NULL);
+    if (error) {
+        return error;
+    }
+    error = nx_pull_header(&b, &move->dst.field, NULL);
+    if (error) {
+        return error;
+    }
+    if (orig_size - ofpbuf_size(&b) != ntohs(oacf->oxm_id_len)) {
         return OFPERR_OFPBAC_BAD_LEN;
     }
 
-    move = ofpact_put_REG_MOVE(ofpacts);
-    move->src.field = mf_from_nxm_header(ntohl(oacf->src));
-    move->src.ofs = ntohs(oacf->src_offset);
-    move->src.n_bits = ntohs(oacf->n_bits);
-    move->dst.field = mf_from_nxm_header(ntohl(oacf->dst));
-    move->dst.ofs = ntohs(oacf->dst_offset);
-    move->dst.n_bits = ntohs(oacf->n_bits);
+    if (!is_all_zeros(ofpbuf_data(&b), ofpbuf_size(&b))) {
+        return OFPERR_NXBRC_MUST_BE_ZERO;
+    }
 
     return nxm_reg_move_check(move, NULL);
 }
@@ -1776,14 +1869,28 @@ decode_NXAST_RAW_REG_MOVE(const struct nx_action_reg_move *narm,
                           struct ofpbuf *ofpacts)
 {
     struct ofpact_reg_move *move;
+    enum ofperr error;
+    struct ofpbuf b;
 
     move = ofpact_put_REG_MOVE(ofpacts);
-    move->src.field = mf_from_nxm_header(ntohl(narm->src));
     move->src.ofs = ntohs(narm->src_ofs);
     move->src.n_bits = ntohs(narm->n_bits);
-    move->dst.field = mf_from_nxm_header(ntohl(narm->dst));
     move->dst.ofs = ntohs(narm->dst_ofs);
     move->dst.n_bits = ntohs(narm->n_bits);
+
+    ofpbuf_use_const(&b, narm, ntohs(narm->len));
+    ofpbuf_pull(&b, sizeof *narm);
+    error = nx_pull_header(&b, &move->src.field, NULL);
+    if (error) {
+        return error;
+    }
+    error = nx_pull_header(&b, &move->dst.field, NULL);
+    if (error) {
+        return error;
+    }
+    if (!is_all_zeros(ofpbuf_data(&b), ofpbuf_size(&b))) {
+        return OFPERR_NXBRC_MUST_BE_ZERO;
+    }
 
     return nxm_reg_move_check(move, NULL);
 }
@@ -1792,26 +1899,25 @@ static void
 encode_REG_MOVE(const struct ofpact_reg_move *move,
                 enum ofp_version ofp_version, struct ofpbuf *out)
 {
+    size_t start_ofs = ofpbuf_size(out);
     if (ofp_version >= OFP15_VERSION) {
-        struct ofp15_action_copy_field *copy;
-
-        copy = put_OFPAT15_COPY_FIELD(out);
+        struct ofp15_action_copy_field *copy = put_OFPAT15_COPY_FIELD(out);
         copy->n_bits = htons(move->dst.n_bits);
         copy->src_offset = htons(move->src.ofs);
         copy->dst_offset = htons(move->dst.ofs);
         copy->oxm_id_len = htons(8);
-        copy->src = htonl(mf_oxm_header(move->src.field->id, ofp_version));
-        copy->dst = htonl(mf_oxm_header(move->dst.field->id, ofp_version));
+        ofpbuf_set_size(out, ofpbuf_size(out) - sizeof copy->pad);
+        nx_put_header(out, move->src.field->id, ofp_version, false);
+        nx_put_header(out, move->dst.field->id, ofp_version, false);
     } else {
-        struct nx_action_reg_move *narm;
-
-        narm = put_NXAST_REG_MOVE(out);
+        struct nx_action_reg_move *narm = put_NXAST_REG_MOVE(out);
         narm->n_bits = htons(move->dst.n_bits);
         narm->src_ofs = htons(move->src.ofs);
         narm->dst_ofs = htons(move->dst.ofs);
-        narm->src = htonl(move->src.field->nxm_header);
-        narm->dst = htonl(move->dst.field->nxm_header);
+        nx_put_header(out, move->src.field->id, 0, false);
+        nx_put_header(out, move->dst.field->id, 0, false);
     }
+    pad_ofpat(out, start_ofs);
 }
 
 static char * WARN_UNUSED_RESULT
@@ -1849,6 +1955,20 @@ format_REG_MOVE(const struct ofpact_reg_move *a, struct ds *s)
     nxm_format_reg_move(a, s);
 }
 
+/* Action structure for OFPAT12_SET_FIELD. */
+struct ofp12_action_set_field {
+    ovs_be16 type;                  /* OFPAT12_SET_FIELD. */
+    ovs_be16 len;                   /* Length is padded to 64 bits. */
+
+    /* Followed by:
+     * - An OXM header, value, and (in OpenFlow 1.5+) optionally a mask.
+     * - Enough 0-bytes to pad out to a multiple of 64 bits.
+     *
+     * The "pad" member is the beginning of the above. */
+    uint8_t pad[4];
+};
+OFP_ASSERT(sizeof(struct ofp12_action_set_field) == 8);
+
 /* Action structure for NXAST_REG_LOAD.
  *
  * Copies value[0:n_bits] to dst[ofs:ofs+n_bits], where a[b:c] denotes the bits
@@ -1886,110 +2006,77 @@ struct nx_action_reg_load {
 };
 OFP_ASSERT(sizeof(struct nx_action_reg_load) == 24);
 
-static enum ofperr
-decode_NXAST_RAW_REG_LOAD(const struct nx_action_reg_load *narl,
-                          struct ofpbuf *out)
-{
-    struct ofpact_reg_load *load;
+/* Action structure for NXAST_REG_LOAD2.
+ *
+ * Compared to OFPAT_SET_FIELD, we can use this to set whole or partial fields
+ * in any OpenFlow version.  Compared to NXAST_REG_LOAD, we can use this to set
+ * OXM experimenter fields. */
+struct nx_action_reg_load2 {
+    ovs_be16 type;                  /* OFPAT_VENDOR. */
+    ovs_be16 len;                   /* At least 16. */
+    ovs_be32 vendor;                /* NX_VENDOR_ID. */
+    ovs_be16 subtype;               /* NXAST_SET_FIELD. */
 
-    load = ofpact_put_REG_LOAD(out);
-    load->dst.field = mf_from_nxm_header(ntohl(narl->dst));
-    load->dst.ofs = nxm_decode_ofs(narl->ofs_nbits);
-    load->dst.n_bits = nxm_decode_n_bits(narl->ofs_nbits);
-    load->subvalue.be64[1] = narl->value;
-
-    /* Reject 'narl' if a bit numbered 'n_bits' or higher is set to 1 in
-     * narl->value. */
-    if (load->dst.n_bits < 64 &&
-        ntohll(narl->value) >> load->dst.n_bits) {
-        return OFPERR_OFPBAC_BAD_ARGUMENT;
-    }
-
-    return nxm_reg_load_check(load, NULL);
-}
-
-static void
-encode_REG_LOAD(const struct ofpact_reg_load *load,
-                enum ofp_version ofp_version OVS_UNUSED, struct ofpbuf *out)
-{
-    struct nx_action_reg_load *narl;
-
-    narl = put_NXAST_REG_LOAD(out);
-    narl->ofs_nbits = nxm_encode_ofs_nbits(load->dst.ofs, load->dst.n_bits);
-    narl->dst = htonl(load->dst.field->nxm_header);
-    narl->value = load->subvalue.be64[1];
-}
-
-static char * WARN_UNUSED_RESULT
-parse_REG_LOAD(char *arg, struct ofpbuf *ofpacts,
-               enum ofputil_protocol *usable_protocols OVS_UNUSED)
-{
-    return nxm_parse_reg_load(ofpact_put_REG_LOAD(ofpacts), arg);
-}
-
-static void
-format_REG_LOAD(const struct ofpact_reg_load *a, struct ds *s)
-{
-    nxm_format_reg_load(a, s);
-}
-
-/* Action structure for OFPAT12_SET_FIELD. */
-struct ofp12_action_set_field {
-    ovs_be16 type;                  /* OFPAT12_SET_FIELD. */
-    ovs_be16 len;                   /* Length is padded to 64 bits. */
-    ovs_be32 dst;                   /* OXM TLV header */
     /* Followed by:
-     * - Exactly ((oxm_len + 4) + 7)/8*8 - (oxm_len + 4) (between 0 and 7)
-     *   bytes of all-zero bytes
-     */
+     * - An NXM/OXM header, value, and optionally a mask.
+     * - Enough 0-bytes to pad out to a multiple of 64 bits.
+     *
+     * The "pad" member is the beginning of the above. */
+    uint8_t pad[6];
 };
-OFP_ASSERT(sizeof(struct ofp12_action_set_field) == 8);
+OFP_ASSERT(sizeof(struct nx_action_reg_load2) == 16);
 
 static enum ofperr
-decode_OFPAT_RAW12_SET_FIELD(const struct ofp12_action_set_field *oasf,
-                             struct ofpbuf *ofpacts)
+decode_ofpat_set_field(const struct ofp12_action_set_field *oasf,
+                       bool may_mask, struct ofpbuf *ofpacts)
 {
-    uint16_t oasf_len = ntohs(oasf->len);
-    uint32_t oxm_header = ntohl(oasf->dst);
-    uint8_t oxm_length = NXM_LENGTH(oxm_header);
     struct ofpact_set_field *sf;
-    const struct mf_field *mf;
+    enum ofperr error;
+    struct ofpbuf b;
 
-    /* ofp12_action_set_field is padded to 64 bits by zero */
-    if (oasf_len != ROUND_UP(sizeof *oasf + oxm_length, 8)) {
-        return OFPERR_OFPBAC_BAD_SET_LEN;
-    }
-    if (!is_all_zeros((const uint8_t *)oasf + sizeof *oasf + oxm_length,
-                      oasf_len - oxm_length - sizeof *oasf)) {
-        return OFPERR_OFPBAC_BAD_SET_ARGUMENT;
-    }
-
-    if (NXM_HASMASK(oxm_header)) {
-        return OFPERR_OFPBAC_BAD_SET_MASK;
-    }
-    mf = mf_from_nxm_header(oxm_header);
-    if (!mf) {
-        return OFPERR_OFPBAC_BAD_SET_TYPE;
-    }
-    ovs_assert(mf->n_bytes == oxm_length);
-    /* oxm_length is now validated to be compatible with mf_value. */
-    if (!mf->writable) {
-        VLOG_WARN_RL(&rl, "destination field %s is not writable", mf->name);
-        return OFPERR_OFPBAC_BAD_SET_ARGUMENT;
-    }
     sf = ofpact_put_SET_FIELD(ofpacts);
-    sf->field = mf;
-    memcpy(&sf->value, oasf + 1, mf->n_bytes);
 
-    /* The value must be valid for match and must have the OFPVID_PRESENT bit
-     * on for OXM_OF_VLAN_VID. */
-    if (!mf_is_value_valid(mf, &sf->value)
-        || (mf->id == MFF_VLAN_VID
-            && !(sf->value.be16 & htons(OFPVID12_PRESENT)))) {
+    ofpbuf_use_const(&b, oasf, ntohs(oasf->len));
+    ofpbuf_pull(&b, OBJECT_OFFSETOF(oasf, pad));
+    error = nx_pull_entry(&b, &sf->field, &sf->value,
+                          may_mask ? &sf->mask : NULL);
+    if (error) {
+        return (error == OFPERR_OFPBMC_BAD_MASK
+                ? OFPERR_OFPBAC_BAD_SET_MASK
+                : error);
+    }
+    if (!may_mask) {
+        memset(&sf->mask, 0xff, sf->field->n_bytes);
+    }
+
+    if (!is_all_zeros(ofpbuf_data(&b), ofpbuf_size(&b))) {
+        return OFPERR_OFPBAC_BAD_SET_ARGUMENT;
+    }
+
+    /* OpenFlow says specifically that one may not set OXM_OF_IN_PORT via
+     * Set-Field. */
+    if (sf->field->id == MFF_IN_PORT_OXM) {
+        return OFPERR_OFPBAC_BAD_SET_ARGUMENT;
+    }
+
+    /* oxm_length is now validated to be compatible with mf_value. */
+    if (!sf->field->writable) {
+        VLOG_WARN_RL(&rl, "destination field %s is not writable",
+                     sf->field->name);
+        return OFPERR_OFPBAC_BAD_SET_ARGUMENT;
+    }
+
+    /* The value must be valid for match.  The OpenFlow 1.5 draft also says,
+     * "In an OXM_OF_VLAN_VID set-field action, the OFPVID_PRESENT bit must be
+     * a 1-bit in oxm_value and in oxm_mask." */
+    if (!mf_is_value_valid(sf->field, &sf->value)
+        || (sf->field->id == MFF_VLAN_VID
+            && (!(sf->mask.be16 & htons(OFPVID12_PRESENT))
+                || !(sf->value.be16 & htons(OFPVID12_PRESENT))))) {
         struct ds ds = DS_EMPTY_INITIALIZER;
-        mf_format(mf, &sf->value, NULL, &ds);
+        mf_format(sf->field, &sf->value, NULL, &ds);
         VLOG_WARN_RL(&rl, "Invalid value for set field %s: %s",
-                     mf->name, ds_cstr(&ds));
+                     sf->field->name, ds_cstr(&ds));
         ds_destroy(&ds);
 
         return OFPERR_OFPBAC_BAD_SET_ARGUMENT;
@@ -1997,58 +2084,154 @@ decode_OFPAT_RAW12_SET_FIELD(const struct ofp12_action_set_field *oasf,
     return 0;
 }
 
-static void
-ofpact_put_set_field(struct ofpbuf *openflow, enum ofp_version ofp_version,
-                     enum mf_field_id field, uint64_t value)
+static enum ofperr
+decode_OFPAT_RAW12_SET_FIELD(const struct ofp12_action_set_field *oasf,
+                             struct ofpbuf *ofpacts)
 {
-    const struct mf_field *mf = mf_from_id(field);
-    struct ofp12_action_set_field *oasf;
-    ovs_be64 n_value;
-
-    oasf = put_OFPAT12_SET_FIELD(openflow);
-    oasf->dst = htonl(mf_oxm_header(mf->id, ofp_version));
-    oasf->len = htons(sizeof *oasf + 8);
-
-    ovs_assert(mf->n_bytes <= 8);
-    if (mf->n_bytes < 8) {
-        value <<= 8 * (8 - mf->n_bytes);
-    }
-    n_value = htonll(value);
-    ofpbuf_put(openflow, &n_value, 8);
+    return decode_ofpat_set_field(oasf, false, ofpacts);
 }
 
-/* Convert 'sf' to one or two REG_LOADs. */
+static enum ofperr
+decode_OFPAT_RAW15_SET_FIELD(const struct ofp12_action_set_field *oasf,
+                             struct ofpbuf *ofpacts)
+{
+    return decode_ofpat_set_field(oasf, true, ofpacts);
+}
+
+static enum ofperr
+decode_NXAST_RAW_REG_LOAD(const struct nx_action_reg_load *narl,
+                          struct ofpbuf *out)
+{
+    struct ofpact_set_field *sf = ofpact_put_reg_load(out);
+    struct mf_subfield dst;
+    enum ofperr error;
+
+    sf->ofpact.raw = NXAST_RAW_REG_LOAD;
+
+    dst.field = mf_from_nxm_header(ntohl(narl->dst));
+    dst.ofs = nxm_decode_ofs(narl->ofs_nbits);
+    dst.n_bits = nxm_decode_n_bits(narl->ofs_nbits);
+    error = mf_check_dst(&dst, NULL);
+    if (error) {
+        return error;
+    }
+
+    /* Reject 'narl' if a bit numbered 'n_bits' or higher is set to 1 in
+     * narl->value. */
+    if (dst.n_bits < 64 && ntohll(narl->value) >> dst.n_bits) {
+        return OFPERR_OFPBAC_BAD_ARGUMENT;
+    }
+
+    sf->field = dst.field;
+    bitwise_put(ntohll(narl->value),
+                &sf->value, dst.field->n_bytes, dst.ofs,
+                dst.n_bits);
+    bitwise_put(UINT64_MAX,
+                &sf->mask, dst.field->n_bytes, dst.ofs,
+                dst.n_bits);
+
+    return 0;
+}
+
+static enum ofperr
+decode_NXAST_RAW_REG_LOAD2(const struct nx_action_reg_load2 *narl,
+                           struct ofpbuf *out)
+{
+    struct ofpact_set_field *sf;
+    enum ofperr error;
+    struct ofpbuf b;
+
+    sf = ofpact_put_SET_FIELD(out);
+    sf->ofpact.raw = NXAST_RAW_REG_LOAD2;
+
+    ofpbuf_use_const(&b, narl, ntohs(narl->len));
+    ofpbuf_pull(&b, OBJECT_OFFSETOF(narl, pad));
+    error = nx_pull_entry(&b, &sf->field, &sf->value, &sf->mask);
+    if (error) {
+        return error;
+    }
+    if (!is_all_zeros(ofpbuf_data(&b), ofpbuf_size(&b))) {
+        return OFPERR_OFPBAC_BAD_SET_ARGUMENT;
+    }
+
+    if (!sf->field->writable) {
+        VLOG_WARN_RL(&rl, "destination field %s is not writable",
+                     sf->field->name);
+        return OFPERR_OFPBAC_BAD_SET_ARGUMENT;
+    }
+    return 0;
+}
+
+static void
+ofpact_put_set_field(struct ofpbuf *openflow, enum ofp_version ofp_version,
+                     enum mf_field_id field, uint64_t value_)
+{
+    struct ofp12_action_set_field *oasf OVS_UNUSED;
+    int n_bytes = mf_from_id(field)->n_bytes;
+    size_t start_ofs = ofpbuf_size(openflow);
+    union mf_value value;
+
+    value.be64 = htonll(value_ << (8 * (8 - n_bytes)));
+
+    oasf = put_OFPAT12_SET_FIELD(openflow);
+    ofpbuf_set_size(openflow, ofpbuf_size(openflow) - sizeof oasf->pad);
+    nx_put_entry(openflow, field, ofp_version, &value, NULL);
+    pad_ofpat(openflow, start_ofs);
+}
+
+static bool
+next_load_segment(const struct ofpact_set_field *sf,
+                  struct mf_subfield *dst, uint64_t *value)
+{
+    int w = sf->field->n_bytes;
+    int start = dst->ofs + dst->n_bits;
+
+    if (start < 8 * w) {
+        dst->field = sf->field;
+        dst->ofs = bitwise_scan(&sf->mask, w, 1, start, 8 * w);
+        if (dst->ofs < 8 * w) {
+            dst->n_bits = bitwise_scan(&sf->mask, w, 0, dst->ofs + 1,
+                                       MIN(dst->ofs + 64, 8 * w)) - dst->ofs;
+            *value = bitwise_get(&sf->value, w, dst->ofs, dst->n_bits);
+            return true;
+        }
+    }
+    return false;
+}
+
+/* Convert 'sf' to a series of REG_LOADs. */
 static void
 set_field_to_nxast(const struct ofpact_set_field *sf, struct ofpbuf *openflow)
 {
-    const struct mf_field *mf = sf->field;
-    struct nx_action_reg_load *narl;
+    /* If 'sf' cannot be encoded as NXAST_REG_LOAD because it requires an
+     * experimenter OXM (or if it came in as NXAST_REG_LOAD2), encode as
+     * NXAST_REG_LOAD2.  Otherwise use NXAST_REG_LOAD, which is backward
+     * compatible. */
+    if (sf->ofpact.raw == NXAST_RAW_REG_LOAD2
+        || !mf_nxm_header(sf->field->id)) {
+        struct nx_action_reg_load2 *narl OVS_UNUSED;
+        size_t start_ofs = ofpbuf_size(openflow);
 
-    if (mf->n_bits > 64) {
-        ovs_assert(mf->n_bytes == 16); /* IPv6 addr. */
-        /* Split into 64bit chunks */
-        /* Lower bits first. */
-        narl = put_NXAST_REG_LOAD(openflow);
-        narl->ofs_nbits = nxm_encode_ofs_nbits(0, 64);
-        narl->dst = htonl(mf->nxm_header);
-        memcpy(&narl->value, &sf->value.ipv6.s6_addr[8], sizeof narl->value);
-        /* Higher bits next. */
-        narl = put_NXAST_REG_LOAD(openflow);
-        narl->ofs_nbits = nxm_encode_ofs_nbits(64, mf->n_bits - 64);
-        narl->dst = htonl(mf->nxm_header);
-        memcpy(&narl->value, &sf->value.ipv6.s6_addr[0], sizeof narl->value);
+        narl = put_NXAST_REG_LOAD2(openflow);
+        ofpbuf_set_size(openflow, ofpbuf_size(openflow) - sizeof narl->pad);
+        nx_put_entry(openflow, sf->field->id, 0, &sf->value, &sf->mask);
+        pad_ofpat(openflow, start_ofs);
     } else {
-        narl = put_NXAST_REG_LOAD(openflow);
-        narl->ofs_nbits = nxm_encode_ofs_nbits(0, mf->n_bits);
-        narl->dst = htonl(mf->nxm_header);
-        memset(&narl->value, 0, 8 - mf->n_bytes);
-        memcpy((char*)&narl->value + (8 - mf->n_bytes),
-               &sf->value, mf->n_bytes);
+        struct mf_subfield dst;
+        uint64_t value;
+
+        dst.ofs = dst.n_bits = 0;
+        while (next_load_segment(sf, &dst, &value)) {
+            struct nx_action_reg_load *narl = put_NXAST_REG_LOAD(openflow);
+            narl->ofs_nbits = nxm_encode_ofs_nbits(dst.ofs, dst.n_bits);
+            narl->dst = htonl(mf_nxm_header(dst.field->id));
+            narl->value = htonll(value);
+        }
     }
 }
 
-/* Convert 'sf' to standard OpenFlow 1.0/1.1 actions, if we can, falling back
- * to Nicira extensions if we must.
+/* Convert 'sf', which must set an entire field, to standard OpenFlow 1.0/1.1
+ * actions, if we can, falling back to Nicira extensions if we must.
  *
  * We check only meta-flow types that can appear within set field actions and
  * that have a mapping to compatible action types.  These struct mf_field
@@ -2169,22 +2352,42 @@ set_field_to_legacy_openflow(const struct ofpact_set_field *sf,
 }
 
 static void
+set_field_to_set_field(const struct ofpact_set_field *sf,
+                       enum ofp_version ofp_version, struct ofpbuf *out)
+{
+    struct ofp12_action_set_field *oasf OVS_UNUSED;
+    size_t start_ofs = ofpbuf_size(out);
+
+    oasf = put_OFPAT12_SET_FIELD(out);
+    ofpbuf_set_size(out, ofpbuf_size(out) - sizeof oasf->pad);
+    nx_put_entry(out, sf->field->id, ofp_version, &sf->value, &sf->mask);
+    pad_ofpat(out, start_ofs);
+}
+
+static void
 encode_SET_FIELD(const struct ofpact_set_field *sf,
                  enum ofp_version ofp_version, struct ofpbuf *out)
 {
-    if (ofp_version < OFP12_VERSION) {
+    if (ofp_version >= OFP15_VERSION) {
+        /* OF1.5+ only has Set-Field (reg_load is redundant so we drop it
+         * entirely). */
+        set_field_to_set_field(sf, ofp_version, out);
+    } else if (sf->ofpact.raw == NXAST_RAW_REG_LOAD ||
+               sf->ofpact.raw == NXAST_RAW_REG_LOAD2) {
+        /* It came in as reg_load, send it out the same way. */
+        set_field_to_nxast(sf, out);
+    } else if (ofp_version < OFP12_VERSION) {
+        /* OpenFlow 1.0 and 1.1 don't have Set-Field. */
         set_field_to_legacy_openflow(sf, ofp_version, out);
+    } else if (is_all_ones((const uint8_t *) &sf->mask, sf->field->n_bytes)) {
+        /* We're encoding to OpenFlow 1.2, 1.3, or 1.4.  The action sets an
+         * entire field, so encode it as OFPAT_SET_FIELD. */
+        set_field_to_set_field(sf, ofp_version, out);
     } else {
-        uint16_t padded_value_len = ROUND_UP(sf->field->n_bytes, 8);
-        struct ofp12_action_set_field *oasf;
-        char *value;
-
-        oasf = ofpact_put_raw(out, ofp_version, OFPAT_RAW12_SET_FIELD, 0);
-        oasf->dst = htonl(mf_oxm_header(sf->field->id, ofp_version));
-        oasf->len = htons(sizeof *oasf + padded_value_len);
-
-        value = ofpbuf_put_zeros(out, padded_value_len);
-        memcpy(value, &sf->value, sf->field->n_bytes);
+        /* We're encoding to OpenFlow 1.2, 1.3, or 1.4.  The action cannot be
+         * encoded as OFPAT_SET_FIELD because it does not set an entire field,
+         * so encode it as reg_load. */
+        set_field_to_nxast(sf, out);
     }
 }
 
@@ -2223,7 +2426,7 @@ set_field_parse__(char *arg, struct ofpbuf *ofpacts,
     }
     sf->field = mf;
     delim[0] = '\0';
-    error = mf_parse_value(mf, value, &sf->value);
+    error = mf_parse(mf, value, &sf->value, &sf->mask);
     if (error) {
         return error;
     }
@@ -2232,7 +2435,7 @@ set_field_parse__(char *arg, struct ofpbuf *ofpacts,
         return xasprintf("%s is not a valid value for field %s", value, key);
     }
 
-    *usable_protocols &= mf->usable_protocols;
+    *usable_protocols &= mf->usable_protocols_exact;
     return NULL;
 }
 
@@ -2251,12 +2454,69 @@ parse_SET_FIELD(const char *arg, struct ofpbuf *ofpacts,
     return error;
 }
 
+static char * WARN_UNUSED_RESULT
+parse_reg_load(char *arg, struct ofpbuf *ofpacts)
+{
+    struct ofpact_set_field *sf = ofpact_put_reg_load(ofpacts);
+    const char *full_arg = arg;
+    uint64_t value = strtoull(arg, (char **) &arg, 0);
+    struct mf_subfield dst;
+    char *error;
+
+    if (strncmp(arg, "->", 2)) {
+        return xasprintf("%s: missing `->' following value", full_arg);
+    }
+    arg += 2;
+    error = mf_parse_subfield(&dst, arg);
+    if (error) {
+        return error;
+    }
+
+    if (dst.n_bits < 64 && (value >> dst.n_bits) != 0) {
+        return xasprintf("%s: value %"PRIu64" does not fit into %d bits",
+                         full_arg, value, dst.n_bits);
+    }
+
+    sf->field = dst.field;
+    memset(&sf->value, 0, sizeof sf->value);
+    bitwise_put(value, &sf->value, dst.field->n_bytes, dst.ofs, dst.n_bits);
+    bitwise_put(UINT64_MAX, &sf->mask,
+                dst.field->n_bytes, dst.ofs, dst.n_bits);
+    return NULL;
+}
+
 static void
 format_SET_FIELD(const struct ofpact_set_field *a, struct ds *s)
 {
-    ds_put_format(s, "set_field:");
-    mf_format(a->field, &a->value, NULL, s);
-    ds_put_format(s, "->%s", a->field->name);
+    if (a->ofpact.raw == NXAST_RAW_REG_LOAD) {
+        struct mf_subfield dst;
+        uint64_t value;
+
+        dst.ofs = dst.n_bits = 0;
+        while (next_load_segment(a, &dst, &value)) {
+            ds_put_format(s, "load:%#"PRIx64"->", value);
+            mf_format_subfield(&dst, s);
+            ds_put_char(s, ',');
+        }
+        ds_chomp(s, ',');
+    } else {
+        ds_put_cstr(s, "set_field:");
+        mf_format(a->field, &a->value, &a->mask, s);
+        ds_put_format(s, "->%s", a->field->name);
+    }
+}
+
+/* Appends an OFPACT_SET_FIELD ofpact to 'ofpacts' and returns it.  The ofpact
+ * is marked such that, if possible, it will be translated to OpenFlow as
+ * NXAST_REG_LOAD extension actions rather than OFPAT_SET_FIELD, either because
+ * that was the way that the action was expressed when it came into OVS or for
+ * backward compatibility. */
+struct ofpact_set_field *
+ofpact_put_reg_load(struct ofpbuf *ofpacts)
+{
+    struct ofpact_set_field *sf = ofpact_put_SET_FIELD(ofpacts);
+    sf->ofpact.raw = NXAST_RAW_REG_LOAD;
+    return sf;
 }
 
 /* Action structure for NXAST_STACK_PUSH and NXAST_STACK_POP.
@@ -2270,19 +2530,36 @@ struct nx_action_stack {
     ovs_be32 vendor;                /* NX_VENDOR_ID. */
     ovs_be16 subtype;               /* NXAST_STACK_PUSH or NXAST_STACK_POP. */
     ovs_be16 offset;                /* Bit offset into the field. */
-    ovs_be32 field;                 /* The field used for push or pop. */
-    ovs_be16 n_bits;                /* (n_bits + 1) bits of the field. */
-    uint8_t zero[6];                /* Reserved, must be zero. */
+    /* Followed by:
+     * - OXM/NXM header for field to push or pop (4 or 8 bytes).
+     * - ovs_be16 'n_bits', the number of bits to extract from the field.
+     * - Enough 0-bytes to pad out the action to 24 bytes. */
+    uint8_t pad[12];                /* See above. */
 };
 OFP_ASSERT(sizeof(struct nx_action_stack) == 24);
 
-static void
+static enum ofperr
 decode_stack_action(const struct nx_action_stack *nasp,
                     struct ofpact_stack *stack_action)
 {
-    stack_action->subfield.field = mf_from_nxm_header(ntohl(nasp->field));
+    enum ofperr error;
+    struct ofpbuf b;
+
     stack_action->subfield.ofs = ntohs(nasp->offset);
-    stack_action->subfield.n_bits = ntohs(nasp->n_bits);
+
+    ofpbuf_use_const(&b, nasp, sizeof *nasp);
+    ofpbuf_pull(&b, OBJECT_OFFSETOF(nasp, pad));
+    error = nx_pull_header(&b, &stack_action->subfield.field, NULL);
+    if (error) {
+        return error;
+    }
+    stack_action->subfield.n_bits = ntohs(*(const ovs_be16 *) ofpbuf_data(&b));
+    ofpbuf_pull(&b, 2);
+    if (!is_all_zeros(ofpbuf_data(&b), ofpbuf_size(&b))) {
+        return OFPERR_NXBRC_MUST_BE_ZERO;
+    }
+
+    return 0;
 }
 
 static enum ofperr
@@ -2290,8 +2567,8 @@ decode_NXAST_RAW_STACK_PUSH(const struct nx_action_stack *nasp,
                              struct ofpbuf *ofpacts)
 {
     struct ofpact_stack *push = ofpact_put_STACK_PUSH(ofpacts);
-    decode_stack_action(nasp, push);
-    return nxm_stack_push_check(push, NULL);
+    enum ofperr error = decode_stack_action(nasp, push);
+    return error ? error : nxm_stack_push_check(push, NULL);
 }
 
 static enum ofperr
@@ -2299,17 +2576,24 @@ decode_NXAST_RAW_STACK_POP(const struct nx_action_stack *nasp,
                            struct ofpbuf *ofpacts)
 {
     struct ofpact_stack *pop = ofpact_put_STACK_POP(ofpacts);
-    decode_stack_action(nasp, pop);
-    return nxm_stack_pop_check(pop, NULL);
+    enum ofperr error = decode_stack_action(nasp, pop);
+    return error ? error : nxm_stack_pop_check(pop, NULL);
 }
 
 static void
 encode_STACK_op(const struct ofpact_stack *stack_action,
                 struct nx_action_stack *nasp)
 {
+    struct ofpbuf b;
+    ovs_be16 n_bits;
+
     nasp->offset = htons(stack_action->subfield.ofs);
-    nasp->n_bits = htons(stack_action->subfield.n_bits);
-    nasp->field = htonl(stack_action->subfield.field->nxm_header);
+
+    ofpbuf_use_stack(&b, nasp, ntohs(nasp->len));
+    ofpbuf_put_uninit(&b, OBJECT_OFFSETOF(nasp, pad));
+    nx_put_header(&b, stack_action->subfield.field->id, 0, false);
+    n_bits = htons(stack_action->subfield.n_bits);
+    ofpbuf_put(&b, &n_bits, sizeof n_bits);
 }
 
 static void
@@ -3528,7 +3812,7 @@ encode_LEARN(const struct ofpact_learn *learn,
         put_u16(out, spec->n_bits | spec->dst_type | spec->src_type);
 
         if (spec->src_type == NX_LEARN_SRC_FIELD) {
-            put_u32(out, spec->src.field->nxm_header);
+            put_u32(out, mf_nxm_header(spec->src.field->id));
             put_u16(out, spec->src.ofs);
         } else {
             size_t n_dst_bytes = 2 * DIV_ROUND_UP(spec->n_bits, 16);
@@ -3540,17 +3824,12 @@ encode_LEARN(const struct ofpact_learn *learn,
 
         if (spec->dst_type == NX_LEARN_DST_MATCH ||
             spec->dst_type == NX_LEARN_DST_LOAD) {
-            put_u32(out, spec->dst.field->nxm_header);
+            put_u32(out, mf_nxm_header(spec->dst.field->id));
             put_u16(out, spec->dst.ofs);
         }
     }
 
-    if ((ofpbuf_size(out) - start_ofs) % 8) {
-        ofpbuf_put_zeros(out, 8 - (ofpbuf_size(out) - start_ofs) % 8);
-    }
-
-    nal = ofpbuf_at_assert(out, start_ofs, sizeof *nal);
-    nal->len = htons(ofpbuf_size(out) - start_ofs);
+    pad_ofpat(out, start_ofs);
 }
 
 static char * WARN_UNUSED_RESULT
@@ -3670,7 +3949,7 @@ encode_MULTIPATH(const struct ofpact_multipath *mp,
     nam->max_link = htons(mp->max_link);
     nam->arg = htonl(mp->arg);
     nam->ofs_nbits = nxm_encode_ofs_nbits(mp->dst.ofs, mp->dst.n_bits);
-    nam->dst = htonl(mp->dst.field->nxm_header);
+    nam->dst = htonl(mf_nxm_header(mp->dst.field->id));
 }
 
 static char * WARN_UNUSED_RESULT
@@ -4283,7 +4562,6 @@ ofpact_is_set_or_move_action(const struct ofpact *a)
 {
     switch (a->type) {
     case OFPACT_SET_FIELD:
-    case OFPACT_REG_LOAD:
     case OFPACT_REG_MOVE:
     case OFPACT_SET_ETH_DST:
     case OFPACT_SET_ETH_SRC:
@@ -4348,7 +4626,6 @@ ofpact_is_allowed_in_actions_set(const struct ofpact *a)
     case OFPACT_POP_MPLS:
     case OFPACT_PUSH_MPLS:
     case OFPACT_PUSH_VLAN:
-    case OFPACT_REG_LOAD:
     case OFPACT_REG_MOVE:
     case OFPACT_SET_FIELD:
     case OFPACT_SET_ETH_DST:
@@ -4482,7 +4759,8 @@ ofpacts_execute_action_set(struct ofpbuf *action_list,
      * all the actions because there's no point in modifying a packet that will
      * not be sent anywhere. */
     if (!ofpacts_copy_last(action_list, action_set, OFPACT_GROUP) &&
-        !ofpacts_copy_last(action_list, action_set, OFPACT_OUTPUT)) {
+        !ofpacts_copy_last(action_list, action_set, OFPACT_OUTPUT) &&
+        !ofpacts_copy_last(action_list, action_set, OFPACT_RESUBMIT)) {
         ofpbuf_clear(action_list);
     }
 }
@@ -4578,7 +4856,6 @@ ovs_instruction_type_from_ofpact_type(enum ofpact_type type)
     case OFPACT_SET_L4_SRC_PORT:
     case OFPACT_SET_L4_DST_PORT:
     case OFPACT_REG_MOVE:
-    case OFPACT_REG_LOAD:
     case OFPACT_SET_FIELD:
     case OFPACT_STACK_PUSH:
     case OFPACT_STACK_POP:
@@ -5056,19 +5333,8 @@ ofpact_check__(enum ofputil_protocol *usable_protocols, struct ofpact *a,
         return 0;
 
     case OFPACT_SET_L4_SRC_PORT:
-        if (!is_ip_any(flow) ||
-            (flow->nw_proto != IPPROTO_TCP && flow->nw_proto != IPPROTO_UDP
-             && flow->nw_proto != IPPROTO_SCTP)) {
-            inconsistent_match(usable_protocols);
-        }
-        /* Note on which transport protocol the port numbers are set.
-         * This allows this set action to be converted to an OF1.2 set field
-         * action. */
-        ofpact_get_SET_L4_SRC_PORT(a)->flow_ip_proto = flow->nw_proto;
-        return 0;
-
     case OFPACT_SET_L4_DST_PORT:
-        if (!is_ip_any(flow) ||
+        if (!is_ip_any(flow) || (flow->nw_frag & FLOW_NW_FRAG_LATER) ||
             (flow->nw_proto != IPPROTO_TCP && flow->nw_proto != IPPROTO_UDP
              && flow->nw_proto != IPPROTO_SCTP)) {
             inconsistent_match(usable_protocols);
@@ -5076,14 +5342,15 @@ ofpact_check__(enum ofputil_protocol *usable_protocols, struct ofpact *a,
         /* Note on which transport protocol the port numbers are set.
          * This allows this set action to be converted to an OF1.2 set field
          * action. */
-        ofpact_get_SET_L4_DST_PORT(a)->flow_ip_proto = flow->nw_proto;
+        if (a->type == OFPACT_SET_L4_SRC_PORT) {
+            ofpact_get_SET_L4_SRC_PORT(a)->flow_ip_proto = flow->nw_proto;
+        } else {
+            ofpact_get_SET_L4_DST_PORT(a)->flow_ip_proto = flow->nw_proto;
+        }
         return 0;
 
     case OFPACT_REG_MOVE:
         return nxm_reg_move_check(ofpact_get_REG_MOVE(a), flow);
-
-    case OFPACT_REG_LOAD:
-        return nxm_reg_load_check(ofpact_get_REG_LOAD(a), flow);
 
     case OFPACT_SET_FIELD:
         mf = ofpact_get_SET_FIELD(a)->field;
@@ -5187,7 +5454,7 @@ ofpact_check__(enum ofputil_protocol *usable_protocols, struct ofpact *a,
         uint8_t goto_table = ofpact_get_GOTO_TABLE(a)->table_id;
         if ((table_id != 255 && goto_table <= table_id)
             || (n_tables != 255 && goto_table >= n_tables)) {
-            return OFPERR_OFPBRC_BAD_TABLE_ID;
+            return OFPERR_OFPBIC_BAD_TABLE_ID;
         }
         return 0;
     }
@@ -5309,7 +5576,8 @@ encode_ofpact(const struct ofpact *a, enum ofp_version ofp_version,
     switch (a->type) {
 #define OFPACT(ENUM, STRUCT, MEMBER, NAME)                              \
         case OFPACT_##ENUM:                                             \
-            return encode_##ENUM(ofpact_get_##ENUM(a), ofp_version, out);
+            encode_##ENUM(ofpact_get_##ENUM(a), ofp_version, out);      \
+            return;
         OFPACTS
 #undef OFPACT
     default:
@@ -5551,7 +5819,6 @@ ofpact_outputs_to_port(const struct ofpact *ofpact, ofp_port_t port)
     case OFPACT_SET_L4_SRC_PORT:
     case OFPACT_SET_L4_DST_PORT:
     case OFPACT_REG_MOVE:
-    case OFPACT_REG_LOAD:
     case OFPACT_SET_FIELD:
     case OFPACT_STACK_PUSH:
     case OFPACT_STACK_POP:
@@ -5810,6 +6077,8 @@ ofpacts_parse__(char *str, struct ofpbuf *ofpacts,
         } else if (!strcasecmp(key, "set_tunnel64")) {
             error = parse_set_tunnel(value, ofpacts,
                                      NXAST_RAW_SET_TUNNEL64);
+        } else if (!strcasecmp(key, "load")) {
+            error = parse_reg_load(value, ofpacts);
         } else if (!strcasecmp(key, "bundle_load")) {
             error = parse_bundle_load(value, ofpacts);
         } else if (!strcasecmp(key, "drop")) {
@@ -6130,6 +6399,11 @@ ofpact_pull_raw(struct ofpbuf *buf, enum ofp_version ofp_version,
     }
 
     length = ntohs(oah->len);
+    if (length > ofpbuf_size(buf)) {
+        VLOG_WARN_RL(&rl, "OpenFlow action %s length %u exceeds action buffer "
+                     "length %"PRIu32, action->name, length, ofpbuf_size(buf));
+        return OFPERR_OFPBAC_BAD_LEN;
+    }
     if (length < action->min_length || length > action->max_length) {
         VLOG_WARN_RL(&rl, "OpenFlow action %s length %u not in valid range "
                      "[%hu,%hu]", action->name, length,
@@ -6217,3 +6491,15 @@ ofpact_put_raw(struct ofpbuf *buf, enum ofp_version ofp_version,
 
     return oah;
 }
+
+static void
+pad_ofpat(struct ofpbuf *openflow, size_t start_ofs)
+{
+    struct ofp_action_header *oah;
+
+    ofpbuf_put_zeros(openflow, PAD_SIZE(ofpbuf_size(openflow) - start_ofs, 8));
+
+    oah = ofpbuf_at_assert(openflow, start_ofs, sizeof *oah);
+    oah->len = htons(ofpbuf_size(openflow) - start_ofs);
+}
+

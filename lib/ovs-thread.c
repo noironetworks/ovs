@@ -266,7 +266,7 @@ void
 ovs_barrier_init(struct ovs_barrier *barrier, uint32_t size)
 {
     barrier->size = size;
-    atomic_init(&barrier->count, 0);
+    atomic_count_init(&barrier->count, 0);
     barrier->seq = seq_create();
 }
 
@@ -278,24 +278,30 @@ ovs_barrier_destroy(struct ovs_barrier *barrier)
 }
 
 /* Makes the calling thread block on the 'barrier' until all
- * 'barrier->size' threads hit the barrier. */
+ * 'barrier->size' threads hit the barrier.
+ * ovs_barrier provides the necessary acquire-release semantics to make
+ * the effects of prior memory accesses of all the participating threads
+ * visible on return and to prevent the following memory accesses to be
+ * reordered before the ovs_barrier_block(). */
 void
 ovs_barrier_block(struct ovs_barrier *barrier)
 {
     uint64_t seq = seq_read(barrier->seq);
     uint32_t orig;
 
-    atomic_add(&barrier->count, 1, &orig);
+    orig = atomic_count_inc(&barrier->count);
     if (orig + 1 == barrier->size) {
-        atomic_store(&barrier->count, 0);
+        atomic_count_set(&barrier->count, 0);
+        /* seq_change() serves as a release barrier against the other threads,
+         * so the zeroed count is visible to them as they continue. */
         seq_change(barrier->seq);
-    }
-
-    /* To prevent thread from waking up by other event,
-     * keeps waiting for the change of 'barrier->seq'. */
-    while (seq == seq_read(barrier->seq)) {
-        seq_wait(barrier->seq, seq);
-        poll_block();
+    } else {
+        /* To prevent thread from waking up by other event,
+         * keeps waiting for the change of 'barrier->seq'. */
+        while (seq == seq_read(barrier->seq)) {
+            seq_wait(barrier->seq, seq);
+            poll_block();
+        }
     }
 }
 
@@ -310,13 +316,13 @@ struct ovsthread_aux {
 static void *
 ovsthread_wrapper(void *aux_)
 {
-    static atomic_uint next_id = ATOMIC_VAR_INIT(1);
+    static atomic_count next_id = ATOMIC_COUNT_INIT(1);
 
     struct ovsthread_aux *auxp = aux_;
     struct ovsthread_aux aux;
     unsigned int id;
 
-    atomic_add(&next_id, 1, &id);
+    id = atomic_count_inc(&next_id);
     *ovsthread_id_get() = id;
 
     aux = *auxp;
@@ -361,17 +367,23 @@ bool
 ovsthread_once_start__(struct ovsthread_once *once)
 {
     ovs_mutex_lock(&once->mutex);
-    if (!ovsthread_once_is_done__(once)) {
-        return false;
+    /* Mutex synchronizes memory, so we get the current value of 'done'. */
+    if (!once->done) {
+        return true;
     }
     ovs_mutex_unlock(&once->mutex);
-    return true;
+    return false;
 }
 
 void
 ovsthread_once_done(struct ovsthread_once *once)
 {
-    atomic_store(&once->done, true);
+    /* We need release semantics here, so that the following store may not
+     * be moved ahead of any of the preceding initialization operations.
+     * A release atomic_thread_fence provides that prior memory accesses
+     * will not be reordered to take place after the following store. */
+    atomic_thread_fence(memory_order_release);
+    once->done = true;
     ovs_mutex_unlock(&once->mutex);
 }
 
@@ -520,11 +532,11 @@ parse_cpuinfo(long int *n_cores)
                 break;
             }
 
-            if (cpu & (1 << id)) {
+            if (cpu & (1ULL << id)) {
                 /* We've already counted this package's cores. */
                 continue;
             }
-            cpu |= 1 << id;
+            cpu |= 1ULL << id;
 
             /* Find the number of cores for this package. */
             while (fgets(line, sizeof line, stream)) {

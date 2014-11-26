@@ -262,7 +262,7 @@ enum ofperr {
     /* OF1.2+(3,8).  Permissions error. */
     OFPERR_OFPBIC_EPERM,
 
-    /* ONF1.1-1.3(2600), OF1.4+(3,9).  Duplicate instruction. */
+    /* NX1.1(3,256), ONF1.2-1.3(2600), OF1.4+(3,9).  Duplicate instruction. */
     OFPERR_OFPBIC_DUP_INST,
 
 /* ## --------------- ## */
@@ -286,7 +286,8 @@ enum ofperr {
      * arbitrary network address mask. */
     OFPERR_OFPBMC_BAD_NW_ADDR_MASK,
 
-    /* OF1.1+(4,5).  Unsupported wildcard specified in the match. */
+    /* NX1.0(1,262), OF1.1+(4,5).  Unsupported wildcard specified in the
+     * match. */
     OFPERR_OFPBMC_BAD_WILDCARDS,
 
     /* OF1.1+(4,6).  Unsupported field in the match. */
@@ -409,6 +410,14 @@ enum ofperr {
 
     /* OF1.2+(6,14).  Permissions error. */
     OFPERR_OFPGMFC_EPERM,
+
+    /* OF1.5+(6,15).  Invalid bucket identifier used in
+     * INSERT BUCKET or REMOVE BUCKET command. */
+    OFPERR_OFPGMFC_UNKNOWN_BUCKET,
+
+    /* OF1.5+(6,16).  Can't insert bucket because a bucket
+     * already exist with that bucket-id. */
+    OFPERR_OFPGMFC_BUCKET_EXISTS,
 
 /* ## --------------------- ## */
 /* ## OFPET_PORT_MOD_FAILED ## */
@@ -557,22 +566,22 @@ enum ofperr {
      * [Known as OFPTFFC_BAD_ARGUMENT in OF1.3.] */
     OFPERR_OFPBPC_BAD_VALUE,
 
-    /* HPL1.3(4443), OF1.4+(14,3).  Can't handle this many properties. */
+    /* ONF1.3(4443), OF1.4+(14,3).  Can't handle this many properties. */
     OFPERR_OFPBPC_TOO_MANY,
 
-    /* HPL1.3(4444), OF1.4+(14,4).  A property type was duplicated. */
+    /* ONF1.3(4444), OF1.4+(14,4).  A property type was duplicated. */
     OFPERR_OFPBPC_DUP_TYPE,
 
-    /* HPL1.3(4445), OF1.4+(14,5).  Unknown experimenter id specified. */
+    /* ONF1.3(4445), OF1.4+(14,5).  Unknown experimenter id specified. */
     OFPERR_OFPBPC_BAD_EXPERIMENTER,
 
-    /* HPL1.3(4446), OF1.4+(14,6).  Unknown exp_type for experimenter id. */
+    /* ONF1.3(4446), OF1.4+(14,6).  Unknown exp_type for experimenter id. */
     OFPERR_OFPBPC_BAD_EXP_TYPE,
 
-    /* HPL1.3(4447), OF1.4+(14,7).  Unknown value for experimenter id. */
+    /* ONF1.3(4447), OF1.4+(14,7).  Unknown value for experimenter id. */
     OFPERR_OFPBPC_BAD_EXP_VALUE,
 
-    /* HPL1.3(4448), OF1.4+(14,8).  Permissions error. */
+    /* ONF1.3(4448), OF1.4+(14,8).  Permissions error. */
     OFPERR_OFPBPC_EPERM,
 
 /* ## -------------------- ## */

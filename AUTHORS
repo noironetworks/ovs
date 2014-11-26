@@ -1,5 +1,5 @@
-The following people, in alphabetical order, have either authored or
-signed off on commits in the Open vSwitch version control repository.
+The following people authored or signed off on commits in the Open
+vSwitch source code or webpage version control repository.
 
 Aaron Rosen             arosen@clemson.edu
 Alexandru Copot         alex.mihai.c@gmail.com
@@ -8,6 +8,7 @@ Alexey I. Froloff       raorn@altlinux.org
 Alex Wang               alexw@nicira.com
 Alfredo Finelli         alf@computationes.de
 Alin Serdean            aserdean@cloudbasesolutions.com
+Amit Bose               bose@noironetworks.com
 Andrew Evans            aevans@nicira.com
 Andrew Lambeth          wal@nicira.com
 Andy Hill               hillad@gmail.com
@@ -17,6 +18,7 @@ Ankur Sharma            ankursharma@vmware.com
 Anoob Soman             anoob.soman@citrix.com
 Ansis Atteka            aatteka@nicira.com
 Anupam Chanda           achanda@nicira.com
+Ariel Tubaltsev         atubaltsev@vmware.com
 Arun Sharma             arun.sharma@calsoftinc.com
 Aryan TaheriMonfared    aryan.taherimonfared@uis.no
 Ashwin Swaminathan      ashwinds@arista.com
@@ -42,9 +44,12 @@ David Erickson          derickso@stanford.edu
 David S. Miller         davem@davemloft.net
 David Yang              davidy@vmware.com
 Devendra Naga           devendra.aaru@gmail.com
+Dmitry Krivenok         krivenok.dmitry@gmail.com
 Dominic Curran          dominic.curran@citrix.com
+Dongdong                dongdong1@huawei.com
 Duffie Cooley           dcooley@nicira.com
 Ed Maste                emaste at freebsd.org
+Ed Swierk               eswierk@skyportsystems.com
 Edouard Bourguignon     madko@linuxed.net
 Edward Tomasz Napierała trasz@freebsd.org
 Eitan Eliahu            eliahue@vmware.com
@@ -81,16 +86,21 @@ Keith Amidon            keith@nicira.com
 Ken Ajiro               ajiro@mxw.nes.nec.co.jp
 Kmindg G                kmindg@gmail.com
 Krishna Kondaka         kkondaka@vmware.com
-Kyle Mestery            kmestery@cisco.com
+Kyle Mestery            mestery@mestery.com
 Lars Kellogg-Stedman    lars@redhat.com
 Leo Alterman            lalterman@nicira.com
+Lilijun                 jerry.lilijun@huawei.com
 Linda Sun               lsun@vmware.com
 Lior Neudorfer          lior@guardicore.com
 Lorand Jakab            lojakab@cisco.com
 Luca Giraudo            lgiraudo@nicira.com
+Lucian Petrut           lpetrut@cloudbasesolutions.com
 Luigi Rizzo             rizzo@iet.unipi.it
+Madhu Challa            challa@noironetworks.com
 Mark Hamilton           mhamilton@nicira.com
+Mark Maglana            mmaglana@gmail.com
 Martin Casado           casado@nicira.com
+Martino Fornasa         mf@fornasa.it
 Maryam Tahhan           maryam.tahhan@intel.com
 Mehak Mahajan           mmahajan@nicira.com
 Murphy McCauley         murphy.mccauley@gmail.com
@@ -113,18 +123,28 @@ Ravi Kerur              Ravi.Kerur@telekom.com
 Reid Price              reid@nicira.com
 Remko Tronçon           git@el-tramo.be
 Rich Lane               rlane@bigswitch.com
+Rishi Bamba             rishi.bamba@tcs.com
+Rob Adams               readams@readams.net
 Rob Hoes                rob.hoes@citrix.com
 Romain Lenglet          romain.lenglet@berabera.info
 Ryan Wilson             wryan@nicira.com
 Sajjad Lateef           slateef@nicira.com
+Samuel Ghinet           sghinet@cloudbasesolutions.com
 Sanjay Sane             ssane@nicira.com
 Saurabh Shah            ssaurabh@nicira.com
+Scott Lowe              scott.lowe@scottlowe.org
+Scott Mann              sdmnix@gmail.com
+Selvamuthukumar         smkumar@merunetworks.com
 Shan Wei                davidshan@tencent.com
 Shih-Hao Li             shli@nicira.com
+Shu Shen                shu.shen@radisys.com
 Simon Horman            horms@verge.net.au
+Simon Horman            simon.horman@netronome.com
+Sorin Vinturis          svinturis@cloudbasesolutions.com
 Stephane A. Sezer       sas@cd80.net
 SUGYO Kazushi           sugyo.org@gmail.com
 Tadaaki Nagao           nagao@stratosphere.co.jp
+Terry Wilson            twilson@redhat.com
 Tetsuo NAKAGAWA         nakagawa@mxc.nes.nec.co.jp
 Thomas Goirand          zigo@debian.org
 Thomas Graf             tgraf@noironetworks.com
@@ -135,6 +155,7 @@ Tsvi Slonim             tsvi@toroki.com
 Tyler Coumbes           coumbes@gmail.com
 Valient Gough           vgough@pobox.com
 Vivien Bernet-Rollande  vbr@soprive.net
+Wang Sheng-Hui          shhuiw@gmail.com
 Wei Yongjun             yjwei@cn.fujitsu.com
 William Fulton
 YAMAMOTO Takashi        yamamoto@valinux.co.jp
@@ -163,6 +184,7 @@ Amre Shakimov           ashakimov@vmware.com
 André Ruß               andre.russ@hybris.com
 Andreas Beckmann        debian@abeckmann.de
 Andrei Andone           andrei.andone@softvision.ro
+Andrey Korolyov         andrey@xdel.ru
 Anshuman Manral         anshuman.manral@outlook.com
 Anton Matsiuk           anton.matsiuk@gmail.com
 Anup Khadka             khadka.py@gmail.com
@@ -182,6 +204,8 @@ Cedric Hobbs            cedric@nicira.com
 Chris Hydon             chydon@aristanetworks.com
 Christian Stigen Larsen cslarsen@gmail.com
 Christopher Paggen      cpaggen@cisco.com
+Chunhe Li               lichunhe@huawei.com
+Daniel Badea            daniel.badea@windriver.com
 Dave Walker             DaveWalker@ubuntu.com
 David Palma             palma@onesource.pt
 Derek Cormier           derek.cormier@lab.ntt.co.jp
@@ -249,6 +273,7 @@ Mike Kruze              mkruze@nicira.com
 Min Chen                ustcer.tonychan@gmail.com
 Mikael Doverhag         mdoverhag@nicira.com
 Nagi Reddy Jonnala      njonnala@Brocade.com
+Niels van Adrichem      N.L.M.vanAdrichem@tudelft.nl
 Niklas Andersson        nandersson@nicira.com
 Pankaj Thakkar          thakkar@nicira.com
 Pasi Kärkkäinen         pasik@iki.fi
@@ -262,6 +287,7 @@ Ralf Heiringhoff        ralf@frosty-geek.net
 Ram Jothikumar          rjothikumar@nicira.com
 Ramana Reddy            gtvrreddy@gmail.com
 Rob Sherwood            rob.sherwood@bigswitch.com
+Robert Strickler        anomalyst@gmail.com
 Roger Leigh             rleigh@codelibre.net
 Rogério Vinhal Nunes
 Roman Sokolkov          rsokolkov@gmail.com
@@ -291,6 +317,7 @@ Voravit T.              voravit@kth.se
 Yeming Zhao             zhaoyeming@gmail.com
 Ying Chen               yingchen@vmware.com
 Yongqiang Liu           liuyq7809@gmail.com
+Ziyou Wang              ziyouw@vmware.com
 ankur dwivedi           ankurengg2003@gmail.com
 chen zhang              3zhangchen9211@gmail.com
 kk yap                  yapkke@stanford.edu

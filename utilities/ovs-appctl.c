@@ -89,7 +89,7 @@ usage: %s [TARGET] COMMAND [ARG...]\n\
 Targets:\n\
   -t, --target=TARGET  pidfile or socket to contact\n\
 Common commands:\n\
-  help               List commands supported by the target\n\
+  list-commands      List commands supported by the target\n\
   version            Print version of the target\n\
   vlog/list          List current logging levels\n\
   vlog/set [SPEC]\n\
@@ -110,12 +110,14 @@ static const char *
 parse_command_line(int argc, char *argv[])
 {
     enum {
+        OPT_START = UCHAR_MAX + 1,
         VLOG_OPTION_ENUMS
     };
     static const struct option long_options[] = {
         {"target", required_argument, NULL, 't'},
         {"execute", no_argument, NULL, 'e'},
         {"help", no_argument, NULL, 'h'},
+        {"option", no_argument, NULL, 'o'},
         {"version", no_argument, NULL, 'V'},
         {"timeout", required_argument, NULL, 'T'},
         VLOG_LONG_OPTIONS,
@@ -156,6 +158,10 @@ parse_command_line(int argc, char *argv[])
         case 'h':
             usage();
             break;
+
+        case 'o':
+            print_options(long_options);
+            exit(EXIT_SUCCESS);
 
         case 'T':
             time_alarm(atoi(optarg));

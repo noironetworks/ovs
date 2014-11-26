@@ -3,6 +3,8 @@
 /dhparams.c
 /dirs.c
 /coverage-counters.c
+/meta-flow.inc
+/nx-match.inc
 /ofp-actions.inc1
 /ofp-actions.inc2
 /ofp-errors.inc
@@ -15,3 +17,5 @@
 /vtep-idl.c
 /vtep-idl.h
 /vtep-idl.ovsidl
+/libopenvswitch.pc
+/libsflow.pc

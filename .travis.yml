@@ -1,0 +1,20 @@
+language: c
+compiler:
+  - gcc
+  - clang
+
+before_install: ./.travis/prepare.sh
+
+env:
+  - OPTS="--disable-ssl"
+  - TESTSUITE=1 KERNEL=1 OPTS="--with-linux=./linux-3.16.2"
+  - KERNEL=1 DPDK=1 OPTS="--with-dpdk=./dpdk-1.7.1/build"
+  - TESTSUITE=1 OPTS="--enable-shared"
+  - DPDK=1 OPTS="--enable-shared"
+
+script: ./.travis/build.sh $OPTS
+
+notifications:
+  email:
+    recipients:
+      - secure: V7W+NdS3L1aXCMUo2EBmOIHeQHT76r78p3f25XFISz8D4a2FnXA2ydwQVbhiZxa+TRgrskY/iB5GU1fS70+qmIaGxnGAVRV8lIQVshoiaKuxvMcha0FdN4d44i1AmLiM2DK8r5k3+fEWTQCvq9mrXQnDJVEPpYfVGj5+b+9oBx8=

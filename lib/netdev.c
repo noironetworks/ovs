@@ -37,6 +37,7 @@
 #include "openflow/openflow.h"
 #include "packets.h"
 #include "poll-loop.h"
+#include "seq.h"
 #include "shash.h"
 #include "smap.h"
 #include "sset.h"
@@ -76,10 +77,15 @@ static struct ovs_mutex netdev_class_mutex OVS_ACQ_BEFORE(netdev_mutex);
 static struct hmap netdev_classes OVS_GUARDED_BY(netdev_class_mutex)
     = HMAP_INITIALIZER(&netdev_classes);
 
+/* Incremented whenever tnl route, arp, etc changes. */
+struct seq *tnl_conf_seq;
+
 struct netdev_registered_class {
-    struct hmap_node hmap_node; /* In 'netdev_classes', by class->type. */
-    const struct netdev_class *class;
-    atomic_int ref_cnt;         /* Number of 'struct netdev's of this class. */
+    /* In 'netdev_classes', by class->type. */
+    struct hmap_node hmap_node OVS_GUARDED_BY(netdev_class_mutex);
+    const struct netdev_class *class OVS_GUARDED_BY(netdev_class_mutex);
+    /* Number of 'struct netdev's of this class. */
+    int ref_cnt OVS_GUARDED_BY(netdev_class_mutex);
 };
 
 /* This is set pretty low because we probably won't learn anything from the
@@ -88,6 +94,12 @@ static struct vlog_rate_limit rl = VLOG_RATE_LIMIT_INIT(5, 20);
 
 static void restore_all_flags(void *aux OVS_UNUSED);
 void update_device_args(struct netdev *, const struct shash *args);
+
+int
+netdev_n_txq(const struct netdev *netdev)
+{
+    return netdev->n_txq;
+}
 
 int
 netdev_n_rxq(const struct netdev *netdev)
@@ -136,8 +148,14 @@ netdev_initialize(void)
         netdev_register_provider(&netdev_tap_class);
         netdev_register_provider(&netdev_bsd_class);
 #endif
+#ifdef _WIN32
+        netdev_register_provider(&netdev_windows_class);
+        netdev_register_provider(&netdev_internal_class);
+        netdev_vport_tunnel_register();
+#endif
         netdev_dpdk_register();
 
+        tnl_conf_seq = seq_create();
         ovsthread_once_done(&once);
     }
 }
@@ -219,7 +237,7 @@ netdev_register_provider(const struct netdev_class *new_class)
             hmap_insert(&netdev_classes, &rc->hmap_node,
                         hash_string(new_class->type, 0));
             rc->class = new_class;
-            atomic_init(&rc->ref_cnt, 0);
+            rc->ref_cnt = 0;
         } else {
             VLOG_ERR("failed to initialize %s network device class: %s",
                      new_class->type, ovs_strerror(error));
@@ -247,10 +265,7 @@ netdev_unregister_provider(const char *type)
                   "registered: %s", type);
         error = EAFNOSUPPORT;
     } else {
-        int ref_cnt;
-
-        atomic_read(&rc->ref_cnt, &ref_cnt);
-        if (!ref_cnt) {
+        if (!rc->ref_cnt) {
             hmap_remove(&netdev_classes, &rc->hmap_node);
             free(rc);
             error = 0;
@@ -356,19 +371,15 @@ netdev_open(const char *name, const char *type, struct netdev **netdevp)
                 netdev->change_seq = 1;
                 netdev->node = shash_add(&netdev_shash, name, netdev);
 
-                /* By default enable one rx queue per netdev. */
-                if (netdev->netdev_class->rxq_alloc) {
-                    netdev->n_rxq = 1;
-                } else {
-                    netdev->n_rxq = 0;
-                }
+                /* By default enable one tx and rx queue per netdev. */
+                netdev->n_txq = netdev->netdev_class->send ? 1 : 0;
+                netdev->n_rxq = netdev->netdev_class->rxq_alloc ? 1 : 0;
+
                 list_init(&netdev->saved_flags_list);
 
                 error = rc->class->construct(netdev);
                 if (!error) {
-                    int old_ref_cnt;
-
-                    atomic_add(&rc->ref_cnt, 1, &old_ref_cnt);
+                    rc->ref_cnt++;
                     netdev_change_seq_changed(netdev);
                 } else {
                     free(netdev->name);
@@ -478,6 +489,18 @@ netdev_get_tunnel_config(const struct netdev *netdev)
     }
 }
 
+/* Returns the id of the numa node the 'netdev' is on.  If the function
+ * is not implemented, returns NETDEV_NUMA_UNSPEC. */
+int
+netdev_get_numa_id(const struct netdev *netdev)
+{
+    if (netdev->netdev_class->get_numa_id) {
+        return netdev->netdev_class->get_numa_id(netdev);
+    } else {
+        return NETDEV_NUMA_UNSPEC;
+    }
+}
+
 static void
 netdev_unref(struct netdev *dev)
     OVS_RELEASES(netdev_mutex)
@@ -486,7 +509,6 @@ netdev_unref(struct netdev *dev)
     if (!--dev->ref_cnt) {
         const struct netdev_class *class = dev->netdev_class;
         struct netdev_registered_class *rc;
-        int old_ref_cnt;
 
         dev->netdev_class->destruct(dev);
 
@@ -499,8 +521,8 @@ netdev_unref(struct netdev *dev)
 
         ovs_mutex_lock(&netdev_class_mutex);
         rc = netdev_lookup_class(class->type);
-        atomic_sub(&rc->ref_cnt, 1, &old_ref_cnt);
-        ovs_assert(old_ref_cnt > 0);
+        ovs_assert(rc->ref_cnt > 0);
+        rc->ref_cnt--;
         ovs_mutex_unlock(&netdev_class_mutex);
     } else {
         ovs_mutex_unlock(&netdev_mutex);
@@ -651,6 +673,33 @@ netdev_rxq_drain(struct netdev_rxq *rx)
             : 0);
 }
 
+/* Configures the number of tx queues and rx queues of 'netdev'.
+ * Return 0 if successful, otherwise a positive errno value.
+ *
+ * On error, the tx queue and rx queue configuration is indeterminant.
+ * Caller should make decision on whether to restore the previous or
+ * the default configuration.  Also, caller must make sure there is no
+ * other thread accessing the queues at the same time. */
+int
+netdev_set_multiq(struct netdev *netdev, unsigned int n_txq,
+                  unsigned int n_rxq)
+{
+    int error;
+
+    error = (netdev->netdev_class->set_multiq
+             ? netdev->netdev_class->set_multiq(netdev,
+                                                MAX(n_txq, 1),
+                                                MAX(n_rxq, 1))
+             : EOPNOTSUPP);
+
+    if (error && error != EOPNOTSUPP) {
+        VLOG_DBG_RL(&rl, "failed to set tx/rx queue for network device %s:"
+                    "%s", netdev_get_name(netdev), ovs_strerror(error));
+    }
+
+    return error;
+}
+
 /* Sends 'buffers' on 'netdev'.  Returns 0 if successful (for every packet),
  * otherwise a positive errno value.  Returns EAGAIN without blocking if
  * at least one the packets cannot be queued immediately.  Returns EMSGSIZE
@@ -662,19 +711,22 @@ netdev_rxq_drain(struct netdev_rxq *rx)
  *
  * To retain ownership of 'buffer' caller can set may_steal to false.
  *
- * The kernel maintains a packet transmission queue, so the caller is not
- * expected to do additional queuing of packets.
+ * The network device is expected to maintain one or more packet
+ * transmission queues, so that the caller does not ordinarily have to
+ * do additional queuing of packets.  'qid' specifies the queue to use
+ * and can be ignored if the implementation does not support multiple
+ * queues.
  *
  * Some network devices may not implement support for this function.  In such
  * cases this function will always return EOPNOTSUPP. */
 int
-netdev_send(struct netdev *netdev, struct dpif_packet **buffers, int cnt,
-            bool may_steal)
+netdev_send(struct netdev *netdev, int qid, struct dpif_packet **buffers,
+            int cnt, bool may_steal)
 {
     int error;
 
     error = (netdev->netdev_class->send
-             ? netdev->netdev_class->send(netdev, buffers, cnt, may_steal)
+             ? netdev->netdev_class->send(netdev, qid, buffers, cnt, may_steal)
              : EOPNOTSUPP);
     if (!error) {
         COVERAGE_INC(netdev_sent);
@@ -682,18 +734,49 @@ netdev_send(struct netdev *netdev, struct dpif_packet **buffers, int cnt,
     return error;
 }
 
+int
+netdev_pop_header(struct netdev *netdev, struct dpif_packet **buffers, int cnt)
+{
+    return (netdev->netdev_class->pop_header
+             ? netdev->netdev_class->pop_header(netdev, buffers, cnt)
+             : EOPNOTSUPP);
+}
+
+int
+netdev_build_header(const struct netdev *netdev, struct ovs_action_push_tnl *data)
+{
+    if (netdev->netdev_class->build_header) {
+        return netdev->netdev_class->build_header(netdev, data);
+    }
+    return EOPNOTSUPP;
+}
+
+int
+netdev_push_header(const struct netdev *netdev,
+                   struct dpif_packet **buffers, int cnt,
+                   const struct ovs_action_push_tnl *data)
+{
+    if (netdev->netdev_class->push_header) {
+        return netdev->netdev_class->push_header(netdev, buffers, cnt, data);
+    } else {
+        return -EINVAL;
+    }
+}
+
 /* Registers with the poll loop to wake up from the next call to poll_block()
  * when the packet transmission queue has sufficient room to transmit a packet
  * with netdev_send().
  *
- * The kernel maintains a packet transmission queue, so the client is not
- * expected to do additional queuing of packets.  Thus, this function is
- * unlikely to ever be used.  It is included for completeness. */
+ * The network device is expected to maintain one or more packet
+ * transmission queues, so that the caller does not ordinarily have to
+ * do additional queuing of packets.  'qid' specifies the queue to use
+ * and can be ignored if the implementation does not support multiple
+ * queues. */
 void
-netdev_send_wait(struct netdev *netdev)
+netdev_send_wait(struct netdev *netdev, int qid)
 {
     if (netdev->netdev_class->send_wait) {
-        netdev->netdev_class->send_wait(netdev);
+        netdev->netdev_class->send_wait(netdev, qid);
     }
 }
 
@@ -1220,19 +1303,6 @@ netdev_get_stats(const struct netdev *netdev, struct netdev_stats *stats)
         memset(stats, 0xff, sizeof *stats);
     }
     return error;
-}
-
-/* Attempts to change the stats for 'netdev' to those provided in 'stats'.
- * Returns 0 if successful, otherwise a positive errno value.
- *
- * This will probably fail for most network devices.  Some devices might only
- * allow setting their stats to 0. */
-int
-netdev_set_stats(struct netdev *netdev, const struct netdev_stats *stats)
-{
-    return (netdev->netdev_class->set_stats
-             ? netdev->netdev_class->set_stats(netdev, stats)
-             : EOPNOTSUPP);
 }
 
 /* Attempts to set input rate limiting (policing) policy, such that up to

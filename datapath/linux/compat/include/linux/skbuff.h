@@ -6,6 +6,10 @@
 #include <linux/jhash.h>
 #include <linux/version.h>
 
+#ifndef HAVE_IGNORE_DF_RENAME
+#define ignore_df local_df
+#endif
+
 #ifndef HAVE_SKB_COPY_FROM_LINEAR_DATA_OFFSET
 static inline void skb_copy_from_linear_data_offset(const struct sk_buff *skb,
 						    const int offset, void *to,
@@ -284,6 +288,10 @@ static inline void skb_tx_error(struct sk_buff *skb)
 
 #if LINUX_VERSION_CODE < KERNEL_VERSION(3,14,0)
 unsigned int skb_zerocopy_headlen(const struct sk_buff *from);
+#endif
+
+#ifndef HAVE_SKB_ZEROCOPY
+#define skb_zerocopy rpl_skb_zerocopy
 int skb_zerocopy(struct sk_buff *to, struct sk_buff *from, int len,
 		  int hlen);
 #endif
@@ -294,7 +302,7 @@ static inline void skb_clear_hash(struct sk_buff *skb)
 #ifdef HAVE_RXHASH
 	skb->rxhash = 0;
 #endif
-#ifdef HAVE_L4_RXHASH
+#if defined(HAVE_L4_RXHASH) && !defined(HAVE_RHEL_OVS_HOOK)
 	skb->l4_rxhash = 0;
 #endif
 }

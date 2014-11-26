@@ -23,20 +23,22 @@
 #include "compiler.h"
 
 #define OVS_CORE_UNSPEC INT_MAX
-#define OVS_SOCKET_UNSPEC INT_MAX
+#define OVS_NUMA_UNSPEC INT_MAX
 
 #ifdef __linux__
 
 void ovs_numa_init(void);
-bool ovs_numa_cpu_socket_id_is_valid(int sid);
-bool ovs_numa_cpu_core_id_is_valid(int cid);
-int ovs_numa_get_n_sockets(void);
+bool ovs_numa_numa_id_is_valid(int numa_id);
+bool ovs_numa_core_id_is_valid(int core_id);
+int ovs_numa_get_n_numas(void);
+void ovs_numa_set_cpu_mask(const char *cmask);
 int ovs_numa_get_n_cores(void);
-int ovs_numa_get_n_cores_on_socket(int socket_id);
-int ovs_numa_get_n_unpinned_cores_on_socket(int socket_id);
+int ovs_numa_get_numa_id(int core_id);
+int ovs_numa_get_n_cores_on_numa(int numa_id);
+int ovs_numa_get_n_unpinned_cores_on_numa(int numa_id);
 bool ovs_numa_try_pin_core_specific(int core_id);
 int ovs_numa_get_unpinned_core_any(void);
-int ovs_numa_get_unpinned_core_on_socket(int socket_id);
+int ovs_numa_get_unpinned_core_on_numa(int numa_id);
 void ovs_numa_unpin_core(int core_id);
 
 #else
@@ -48,21 +50,27 @@ ovs_numa_init(void)
 }
 
 static inline bool
-ovs_numa_cpu_socket_id_is_valid(int sid OVS_UNUSED)
+ovs_numa_numa_id_is_valid(int numa_id OVS_UNUSED)
 {
     return false;
 }
 
 static inline bool
-ovs_numa_cpu_core_id_is_valid(int cid OVS_UNUSED)
+ovs_numa_core_id_is_valid(int core_id OVS_UNUSED)
 {
     return false;
 }
 
-static inline int
-ovs_numa_get_n_sockets(void)
+static inline void
+ovs_numa_set_cpu_mask(const char *cmask OVS_UNUSED)
 {
-    return OVS_SOCKET_UNSPEC;
+    /* Nothing */
+}
+
+static inline int
+ovs_numa_get_n_numas(void)
+{
+    return OVS_NUMA_UNSPEC;
 }
 
 static inline int
@@ -72,13 +80,19 @@ ovs_numa_get_n_cores(void)
 }
 
 static inline int
-ovs_numa_get_n_cores_on_socket(int socket_id OVS_UNUSED)
+ovs_numa_get_numa_id(int core_id OVS_UNUSED)
+{
+    return OVS_NUMA_UNSPEC;
+}
+
+static inline int
+ovs_numa_get_n_cores_on_numa(int numa_id OVS_UNUSED)
 {
     return OVS_CORE_UNSPEC;
 }
 
 static inline int
-ovs_numa_get_n_unpinned_cores_on_socket(int socket_id OVS_UNUSED)
+ovs_numa_get_n_unpinned_cores_on_numa(int numa_id OVS_UNUSED)
 {
     return OVS_CORE_UNSPEC;
 }
@@ -96,7 +110,7 @@ ovs_numa_get_unpinned_core_any(void)
 }
 
 static inline int
-ovs_numa_get_unpinned_core_on_socket(int socket_id OVS_UNUSED)
+ovs_numa_get_unpinned_core_on_numa(int numa_id OVS_UNUSED)
 {
     return OVS_CORE_UNSPEC;
 }

@@ -101,6 +101,7 @@ learn_execute(const struct ofpact_learn *learn, const struct flow *flow,
     fm->command = OFPFC_MODIFY_STRICT;
     fm->idle_timeout = learn->idle_timeout;
     fm->hard_timeout = learn->hard_timeout;
+    fm->importance = 0;
     fm->buffer_id = UINT32_MAX;
     fm->out_port = OFPP_NONE;
     fm->flags = 0;
@@ -120,8 +121,8 @@ learn_execute(const struct ofpact_learn *learn, const struct flow *flow,
     }
 
     for (spec = learn->specs; spec < &learn->specs[learn->n_specs]; spec++) {
+        struct ofpact_set_field *sf;
         union mf_subvalue value;
-        int chunk, ofs;
 
         if (spec->src_type == NX_LEARN_SRC_FIELD) {
             mf_read_subfield(&spec->src, flow, &value);
@@ -135,25 +136,20 @@ learn_execute(const struct ofpact_learn *learn, const struct flow *flow,
             break;
 
         case NX_LEARN_DST_LOAD:
-            for (ofs = 0; ofs < spec->n_bits; ofs += chunk) {
-                struct ofpact_reg_load *load;
-
-                chunk = MIN(spec->n_bits - ofs, 64);
-
-                load = ofpact_put_REG_LOAD(ofpacts);
-                load->dst.field = spec->dst.field;
-                load->dst.ofs = spec->dst.ofs + ofs;
-                load->dst.n_bits = chunk;
-                bitwise_copy(&value, sizeof value, ofs,
-                             &load->subvalue, sizeof load->subvalue, 0,
-                             chunk);
-            }
+            sf = ofpact_put_reg_load(ofpacts);
+            sf->field = spec->dst.field;
+            bitwise_copy(&value, sizeof value, 0,
+                         &sf->value, spec->dst.field->n_bytes, spec->dst.ofs,
+                         spec->n_bits);
+            bitwise_one(&sf->mask, spec->dst.field->n_bytes, spec->dst.ofs,
+                        spec->n_bits);
             break;
 
         case NX_LEARN_DST_OUTPUT:
             if (spec->n_bits <= 16
                 || is_all_zeros(value.u8, sizeof value - 2)) {
-                ofp_port_t port = u16_to_ofp(ntohs(value.be16[7]));
+                ovs_be16 *last_be16 = &value.be16[ARRAY_SIZE(value.be16) - 1];
+                ofp_port_t port = u16_to_ofp(ntohs(*last_be16));
 
                 if (ofp_to_u16(port) < ofp_to_u16(OFPP_MAX)
                     || port == OFPP_IN_PORT
@@ -215,7 +211,8 @@ learn_parse_load_immediate(const char *s, struct ofpact_learn_spec *spec)
         }
         s = arrow;
     } else {
-        imm.be64[1] = htonll(strtoull(s, (char **) &s, 0));
+        ovs_be64 *last_be64 = &imm.be64[ARRAY_SIZE(imm.be64) - 1];
+        *last_be64 = htonll(strtoull(s, (char **) &s, 0));
     }
 
     if (strncmp(s, "->", 2)) {
@@ -226,6 +223,10 @@ learn_parse_load_immediate(const char *s, struct ofpact_learn_spec *spec)
     error = mf_parse_subfield(&dst, s);
     if (error) {
         return error;
+    }
+    if (!mf_nxm_header(dst.field->id)) {
+        return xasprintf("%s: experimenter OXM field '%s' not supported",
+                         full_s, s);
     }
 
     if (!bitwise_is_all_zeros(&imm, sizeof imm, dst.n_bits,
@@ -274,6 +275,10 @@ learn_parse_spec(const char *orig, char *name, char *value,
         error = mf_parse_subfield(&spec->dst, name);
         if (error) {
             return error;
+        }
+        if (!mf_nxm_header(spec->dst.field->id)) {
+            return xasprintf("%s: experimenter OXM field '%s' not supported",
+                             orig, name);
         }
 
         /* Parse source and check prerequisites. */

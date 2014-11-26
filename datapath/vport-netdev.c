@@ -26,6 +26,7 @@
 #include <linux/rtnetlink.h>
 #include <linux/skbuff.h>
 #include <linux/openvswitch.h>
+#include <linux/netdevice.h>
 
 #include <net/llc.h>
 
@@ -84,7 +85,7 @@ static struct sk_buff *netdev_frame_hook(struct net_bridge_port *p,
 #error
 #endif
 
-static struct net_device *get_dpdev(struct datapath *dp)
+static struct net_device *get_dpdev(const struct datapath *dp)
 {
 	struct vport *local;
 
@@ -201,7 +202,8 @@ static void netdev_port_receive(struct vport *vport, struct sk_buff *skb)
 	/* Make our own copy of the packet.  Otherwise we will mangle the
 	 * packet for anyone who came before us (e.g. tcpdump via AF_PACKET).
 	 * (No one comes after us, since we tell handle_bridge() that we took
-	 * the packet.) */
+	 * the packet.)
+	 */
 	skb = skb_share_check(skb, GFP_ATOMIC);
 	if (unlikely(!skb))
 		return;
@@ -255,7 +257,7 @@ struct vport *ovs_netdev_get_vport(struct net_device *dev)
 {
 #if LINUX_VERSION_CODE >= KERNEL_VERSION(2,6,36) || \
     defined HAVE_RHEL_OVS_HOOK
-#if IFF_OVS_DATAPATH != 0
+#ifdef HAVE_OVS_DATAPATH
 	if (likely(dev->priv_flags & IFF_OVS_DATAPATH))
 #else
 	if (likely(rcu_access_pointer(dev->rx_handler) == netdev_frame_hook))

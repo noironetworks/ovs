@@ -28,6 +28,7 @@ ofpbuf_init__(struct ofpbuf *b, size_t allocated, enum ofpbuf_source source)
     b->allocated = allocated;
     b->source = source;
     b->frame = NULL;
+    b->l2_pad_size = 0;
     b->l2_5_ofs = b->l3_ofs = b->l4_ofs = UINT16_MAX;
     list_poison(&b->list_node);
 }
@@ -199,6 +200,7 @@ ofpbuf_clone_with_headroom(const struct ofpbuf *buffer, size_t headroom)
 
         new_buffer->frame = (char *) buffer->frame + data_delta;
     }
+    new_buffer->l2_pad_size = buffer->l2_pad_size;
     new_buffer->l2_5_ofs = buffer->l2_5_ofs;
     new_buffer->l3_ofs = buffer->l3_ofs;
     new_buffer->l4_ofs = buffer->l4_ofs;
@@ -313,8 +315,8 @@ ofpbuf_prealloc_headroom(struct ofpbuf *b, size_t size)
     }
 }
 
-/* Trims the size of 'b' to fit its actual content, reducing its tailroom to
- * 0.  Its headroom, if any, is preserved.
+/* Trims the size of 'b' to fit its actual content, reducing its headroom and
+ * tailroom to 0, if any.
  *
  * Buffers not obtained from malloc() are not resized, since that wouldn't save
  * any memory. */
@@ -429,8 +431,9 @@ ofpbuf_reserve(struct ofpbuf *b, size_t size)
     ofpbuf_set_data(b, (char*)ofpbuf_data(b) + size);
 }
 
-/* Reserves 'size' bytes of headroom so that they can be later allocated with
- * ofpbuf_push_uninit() without reallocating the ofpbuf. */
+/* Reserves 'headroom' bytes at the head and 'tailroom' at the end so that
+ * they can be later allocated with ofpbuf_push_uninit() or
+ * ofpbuf_put_uninit() without reallocating the ofpbuf. */
 void
 ofpbuf_reserve_with_tailroom(struct ofpbuf *b, size_t headroom,
                              size_t tailroom)

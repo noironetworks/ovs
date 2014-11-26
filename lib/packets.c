@@ -20,6 +20,7 @@
 #include <sys/socket.h>
 #include <netinet/in.h>
 #include <netinet/ip6.h>
+#include <netinet/icmp6.h>
 #include <stdlib.h>
 #include "byte-order.h"
 #include "csum.h"
@@ -714,6 +715,11 @@ packet_update_csum128(struct ofpbuf *packet, uint8_t proto,
                 uh->udp_csum = htons(0xffff);
             }
         }
+    } else if (proto == IPPROTO_ICMPV6 &&
+               l4_size >= sizeof(struct icmp6_header)) {
+        struct icmp6_header *icmp = ofpbuf_l4(packet);
+
+        icmp->icmp6_cksum = recalc_csum128(icmp->icmp6_cksum, addr, new_addr);
     }
 }
 
@@ -949,4 +955,39 @@ packet_format_tcp_flags(struct ds *s, uint16_t tcp_flags)
     if (tcp_flags & 0x800) {
         ds_put_cstr(s, "[800]");
     }
+}
+
+#define ARP_PACKET_SIZE  (2 + ETH_HEADER_LEN + VLAN_HEADER_LEN + \
+                          ARP_ETH_HEADER_LEN)
+
+void
+compose_arp(struct ofpbuf *b, const uint8_t eth_src[ETH_ADDR_LEN],
+            ovs_be32 ip_src, ovs_be32 ip_dst)
+{
+    struct eth_header *eth;
+    struct arp_eth_header *arp;
+
+    ofpbuf_clear(b);
+    ofpbuf_prealloc_tailroom(b, ARP_PACKET_SIZE);
+    ofpbuf_reserve(b, 2 + VLAN_HEADER_LEN);
+
+    eth = ofpbuf_put_uninit(b, sizeof *eth);
+    memcpy(eth->eth_dst, eth_addr_broadcast, ETH_ADDR_LEN);
+    memcpy(eth->eth_src, eth_src, ETH_ADDR_LEN);
+    eth->eth_type = htons(ETH_TYPE_ARP);
+
+    arp = ofpbuf_put_uninit(b, sizeof *arp);
+    arp->ar_hrd = htons(ARP_HRD_ETHERNET);
+    arp->ar_pro = htons(ARP_PRO_IP);
+    arp->ar_hln = sizeof arp->ar_sha;
+    arp->ar_pln = sizeof arp->ar_spa;
+    arp->ar_op = htons(ARP_OP_REQUEST);
+    memcpy(arp->ar_sha, eth_src, ETH_ADDR_LEN);
+    memset(arp->ar_tha, 0, ETH_ADDR_LEN);
+
+    put_16aligned_be32(&arp->ar_spa, ip_src);
+    put_16aligned_be32(&arp->ar_tpa, ip_dst);
+
+    ofpbuf_set_frame(b, eth);
+    ofpbuf_set_l3(b, arp);
 }

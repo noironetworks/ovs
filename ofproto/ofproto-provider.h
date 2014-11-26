@@ -346,6 +346,9 @@ struct rule {
     uint16_t hard_timeout OVS_GUARDED; /* In seconds from ->modified. */
     uint16_t idle_timeout OVS_GUARDED; /* In seconds from ->used. */
 
+    /* Eviction precedence. */
+    uint16_t importance OVS_GUARDED;
+
     /* Eviction groups (see comment on struct eviction_group for explanation) .
      *
      * 'eviction_group' is this rule's eviction group, or NULL if it is not in
@@ -450,6 +453,12 @@ extern unsigned ofproto_max_idle;
 /* Number of upcall handler and revalidator threads. Only affects the
  * ofproto-dpif implementation. */
 extern size_t n_handlers, n_revalidators;
+
+/* Number of rx queues to be created for each dpdk interface. */
+extern size_t n_dpdk_rxqs;
+
+/* Cpu mask for pmd threads. */
+extern char *pmd_cpu_mask;
 
 static inline struct rule *rule_from_cls_rule(const struct cls_rule *);
 
@@ -1027,6 +1036,14 @@ struct ofproto_class {
      * not support LACP. */
     int (*port_is_lacp_current)(const struct ofport *port);
 
+    /* Get LACP port stats. Returns -1 if LACP is not enabled on 'port'.
+     *
+     * This function may be a null pointer if the ofproto implementation does
+     * not support LACP. */
+    int (*port_get_lacp_stats)(const struct ofport *port,
+			       struct lacp_slave_stats *stats);
+
+
 /* ## ----------------------- ## */
 /* ## OpenFlow Rule Functions ## */
 /* ## ----------------------- ## */
@@ -1417,6 +1434,53 @@ struct ofproto_class {
     int (*get_stp_port_stats)(struct ofport *ofport,
                               struct ofproto_port_stp_stats *s);
 
+    /* Configures Rapid Spanning Tree Protocol (RSTP) on 'ofproto' using the
+     * settings defined in 's'.
+     *
+     * If 's' is nonnull, configures RSTP according to its members.
+     *
+     * If 's' is null, removes any RSTP configuration from 'ofproto'.
+     *
+     * EOPNOTSUPP as a return value indicates that this ofproto_class does not
+     * support RSTP, as does a null pointer. */
+    void (*set_rstp)(struct ofproto *ofproto,
+                    const struct ofproto_rstp_settings *s);
+
+    /* Retrieves state of Rapid Spanning Tree Protocol (RSTP) on 'ofproto'.
+     *
+     * Stores RSTP state for 'ofproto' in 's'.  If the 'enabled' member
+     * is false, the other member values are not meaningful.
+     *
+     * EOPNOTSUPP as a return value indicates that this ofproto_class does not
+     * support RSTP, as does a null pointer. */
+    void (*get_rstp_status)(struct ofproto *ofproto,
+                           struct ofproto_rstp_status *s);
+
+    /* Configures Rapid Spanning Tree Protocol (RSTP) on 'ofport' using the
+     * settings defined in 's'.
+     *
+     * If 's' is nonnull, configures RSTP according to its members.  The
+     * caller is responsible for assigning RSTP port numbers (using the
+     * 'port_num' member in the range of 1 through 255, inclusive) and
+     * ensuring there are no duplicates.
+     *
+     * If 's' is null, removes any RSTP configuration from 'ofport'.
+     *
+     * EOPNOTSUPP as a return value indicates that this ofproto_class does not
+     * support STP, as does a null pointer. */
+    void (*set_rstp_port)(struct ofport *ofport,
+                         const struct ofproto_port_rstp_settings *s);
+
+    /* Retrieves Rapid Spanning Tree Protocol (RSTP) port status of 'ofport'.
+     *
+     * Stores RSTP state for 'ofport' in 's'.  If the 'enabled' member is
+     * false, the other member values are not meaningful.
+     *
+     * EOPNOTSUPP as a return value indicates that this ofproto_class does not
+     * support RSTP, as does a null pointer. */
+    void (*get_rstp_port_status)(struct ofport *ofport,
+                                struct ofproto_port_rstp_status *s);
+
     /* Registers meta-data associated with the 'n_qdscp' Qualities of Service
      * 'queues' attached to 'ofport'.  This data is not intended to be
      * sufficient to implement QoS.  Instead, providers may use this
@@ -1606,6 +1670,19 @@ struct ofproto_class {
 
     enum ofperr (*group_get_stats)(const struct ofgroup *,
                                    struct ofputil_group_stats *);
+
+/* ## --------------------- ## */
+/* ## Datapath information  ## */
+/* ## --------------------- ## */
+    /* Retrieve the version string of the datapath. The version
+     * string can be NULL if it can not be determined.
+     *
+     * The version retuned is read only. The caller should not
+     * free it.
+     *
+     * This function should be NULL if an implementation does not support it.
+     */
+    const char *(*get_datapath_version)(const struct ofproto *);
 };
 
 extern const struct ofproto_class ofproto_dpif_class;
@@ -1615,12 +1692,10 @@ int ofproto_class_unregister(const struct ofproto_class *);
 
 int ofproto_flow_mod(struct ofproto *, struct ofputil_flow_mod *)
     OVS_EXCLUDED(ofproto_mutex);
-void ofproto_add_flow(struct ofproto *, const struct match *,
-                      unsigned int priority,
+void ofproto_add_flow(struct ofproto *, const struct match *, int priority,
                       const struct ofpact *ofpacts, size_t ofpacts_len)
     OVS_EXCLUDED(ofproto_mutex);
-void ofproto_delete_flow(struct ofproto *,
-                         const struct match *, unsigned int priority)
+void ofproto_delete_flow(struct ofproto *, const struct match *, int priority)
     OVS_EXCLUDED(ofproto_mutex);
 void ofproto_flush_flows(struct ofproto *);
 

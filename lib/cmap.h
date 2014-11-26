@@ -87,11 +87,12 @@ void cmap_destroy(struct cmap *);
 size_t cmap_count(const struct cmap *);
 bool cmap_is_empty(const struct cmap *);
 
-/* Insertion and deletion. */
-void cmap_insert(struct cmap *, struct cmap_node *, uint32_t hash);
-void cmap_remove(struct cmap *, struct cmap_node *, uint32_t hash);
-void cmap_replace(struct cmap *, struct cmap_node *old_node,
-                  struct cmap_node *new_node, uint32_t hash);
+/* Insertion and deletion.  Return the current count after the operation. */
+size_t cmap_insert(struct cmap *, struct cmap_node *, uint32_t hash);
+static inline size_t cmap_remove(struct cmap *, struct cmap_node *,
+                                 uint32_t hash);
+size_t cmap_replace(struct cmap *, struct cmap_node *old_node,
+                    struct cmap_node *new_node, uint32_t hash);
 
 /* Search.
  *
@@ -105,6 +106,14 @@ void cmap_replace(struct cmap *, struct cmap_node *old_node,
  * Thread-safety
  * =============
  *
+ * CMAP_NODE_FOR_EACH will reliably visit each of the nodes starting with
+ * CMAP_NODE, even with concurrent insertions and deletions.  (Of
+ * course, if nodes are being inserted or deleted, it might or might not visit
+ * the nodes actually being inserted or deleted.)
+ *
+ * CMAP_NODE_FOR_EACH_PROTECTED may only be used if the containing CMAP is
+ * guaranteed not to change during iteration.  It may be only slightly faster.
+ *
  * CMAP_FOR_EACH_WITH_HASH will reliably visit each of the nodes with the
  * specified hash in CMAP, even with concurrent insertions and deletions.  (Of
  * course, if nodes with the given HASH are being inserted or deleted, it might
@@ -113,18 +122,34 @@ void cmap_replace(struct cmap *, struct cmap_node *old_node,
  * CMAP_FOR_EACH_WITH_HASH_PROTECTED may only be used if CMAP is guaranteed not
  * to change during iteration.  It may be very slightly faster.
  */
-#define CMAP_FOR_EACH_WITH_HASH(NODE, MEMBER, HASH, CMAP)       \
-    for (ASSIGN_CONTAINER(NODE, cmap_find(CMAP, HASH), MEMBER); \
-         (NODE) != OBJECT_CONTAINING(NULL, NODE, MEMBER);       \
+#define CMAP_NODE_FOR_EACH(NODE, MEMBER, CMAP_NODE)                     \
+    for (INIT_CONTAINER(NODE, CMAP_NODE, MEMBER);                       \
+         (NODE) != OBJECT_CONTAINING(NULL, NODE, MEMBER);               \
          ASSIGN_CONTAINER(NODE, cmap_node_next(&(NODE)->MEMBER), MEMBER))
-#define CMAP_FOR_EACH_WITH_HASH_PROTECTED(NODE, MEMBER, HASH, CMAP)        \
-    for (ASSIGN_CONTAINER(NODE, cmap_find_locked(CMAP, HASH), MEMBER);  \
+#define CMAP_NODE_FOR_EACH_PROTECTED(NODE, MEMBER, CMAP_NODE)           \
+    for (INIT_CONTAINER(NODE, CMAP_NODE, MEMBER);                       \
          (NODE) != OBJECT_CONTAINING(NULL, NODE, MEMBER);               \
          ASSIGN_CONTAINER(NODE, cmap_node_next_protected(&(NODE)->MEMBER), \
                           MEMBER))
+#define CMAP_FOR_EACH_WITH_HASH(NODE, MEMBER, HASH, CMAP)   \
+    CMAP_NODE_FOR_EACH(NODE, MEMBER, cmap_find(CMAP, HASH))
+#define CMAP_FOR_EACH_WITH_HASH_PROTECTED(NODE, MEMBER, HASH, CMAP)     \
+    CMAP_NODE_FOR_EACH_PROTECTED(NODE, MEMBER, cmap_find_locked(CMAP, HASH))
 
-struct cmap_node *cmap_find(const struct cmap *, uint32_t hash);
+const struct cmap_node *cmap_find(const struct cmap *, uint32_t hash);
 struct cmap_node *cmap_find_protected(const struct cmap *, uint32_t hash);
+
+/* Looks up multiple 'hashes', when the corresponding bit in 'map' is 1,
+ * and sets the corresponding pointer in 'nodes', if the hash value was
+ * found from the 'cmap'.  In other cases the 'nodes' values are not changed,
+ * i.e., no NULL pointers are stored there.
+ * Returns a map where a bit is set to 1 if the corresponding 'nodes' pointer
+ * was stored, 0 otherwise.
+ * Generally, the caller wants to use CMAP_NODE_FOR_EACH to verify for
+ * hash collisions. */
+unsigned long cmap_find_batch(const struct cmap *cmap, unsigned long map,
+                              uint32_t hashes[],
+                              const struct cmap_node *nodes[]);
 
 /* Iteration.
  *
@@ -174,7 +199,7 @@ struct cmap_node *cmap_find_protected(const struct cmap *, uint32_t hash);
 
 #define CMAP_CURSOR_FOR_EACH__(NODE, CURSOR, MEMBER)    \
     ((CURSOR)->node                                     \
-     ? (ASSIGN_CONTAINER(NODE, (CURSOR)->node, MEMBER), \
+     ? (INIT_CONTAINER(NODE, (CURSOR)->node, MEMBER),   \
         cmap_cursor_advance(CURSOR),                    \
         true)                                           \
      : false)
@@ -223,6 +248,21 @@ cmap_first(const struct cmap *cmap)
     struct cmap_position pos = { 0, 0, 0 };
 
     return cmap_next_position(cmap, &pos);
+}
+
+/* Removes 'node' from 'cmap'.  The caller must ensure that 'cmap' cannot
+ * change concurrently (from another thread).
+ *
+ * 'node' must not be destroyed or modified or inserted back into 'cmap' or
+ * into any other concurrent hash map while any other thread might be accessing
+ * it.  One correct way to do this is to free it from an RCU callback with
+ * ovsrcu_postpone().
+ *
+ * Returns the current number of nodes in the cmap after the removal. */
+static inline size_t
+cmap_remove(struct cmap *cmap, struct cmap_node *node, uint32_t hash)
+{
+    return cmap_replace(cmap, node, NULL, hash);
 }
 
 #endif /* cmap.h */

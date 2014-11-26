@@ -44,7 +44,7 @@
 
 static struct dpctl_params dpctl_p;
 
-static void usage(void *userdata OVS_UNUSED) NO_RETURN;
+NO_RETURN static void usage(void *userdata OVS_UNUSED);
 static void parse_options(int argc, char *argv[]);
 
 static void
@@ -62,6 +62,7 @@ main(int argc, char *argv[])
     parse_options(argc, argv);
     fatal_ignore_sigpipe();
 
+    dpctl_p.is_appctl = false;
     dpctl_p.output = dpctl_print;
     dpctl_p.usage = usage;
 
@@ -85,6 +86,7 @@ parse_options(int argc, char *argv[])
         {"more", no_argument, NULL, 'm'},
         {"timeout", required_argument, NULL, 't'},
         {"help", no_argument, NULL, 'h'},
+        {"option", no_argument, NULL, 'o'},
         {"version", no_argument, NULL, 'V'},
         VLOG_LONG_OPTIONS,
         {NULL, 0, NULL, 0},
@@ -129,6 +131,10 @@ parse_options(int argc, char *argv[])
 
         case 'h':
             usage(NULL);
+
+        case 'o':
+            print_options(long_options);
+            exit(EXIT_SUCCESS);
 
         case 'V':
             ovs_print_version(0, 0);
@@ -184,4 +190,3 @@ usage(void *userdata OVS_UNUSED)
            "  -V, --version               display version information\n");
     exit(EXIT_SUCCESS);
 }
-

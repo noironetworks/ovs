@@ -28,14 +28,13 @@ openvswitch_headers = \
 	flow.h \
 	flow_netlink.h \
 	flow_table.h \
-	mpls.h \
 	vlan.h \
 	vport.h \
 	vport-internal_dev.h \
 	vport-netdev.h
 
 openvswitch_extras = \
-	README
+	README.md
 
 dist_sources = $(foreach module,$(dist_modules),$($(module)_sources))
 dist_headers = $(foreach module,$(dist_modules),$($(module)_headers))

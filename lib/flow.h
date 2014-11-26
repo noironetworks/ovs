@@ -38,7 +38,7 @@ struct pkt_metadata;
 /* This sequence number should be incremented whenever anything involving flows
  * or the wildcarding of flows changes.  This will cause build assertion
  * failures in places which likely need to be updated. */
-#define FLOW_WC_SEQ 27
+#define FLOW_WC_SEQ 28
 
 /* Number of Open vSwitch extension 32-bit registers. */
 #define FLOW_N_REGS 8
@@ -67,6 +67,8 @@ BUILD_ASSERT_DECL(FLOW_NW_FRAG_LATER == NX_IP_FRAG_LATER);
 #define FLOW_TNL_F_KEY (1 << 2)
 #define FLOW_TNL_F_OAM (1 << 3)
 
+#define FLOW_TNL_F_MASK ((1 << 4) - 1)
+
 const char *flow_tun_flag_to_string(uint32_t flags);
 
 /* Maximum number of supported MPLS labels. */
@@ -81,8 +83,8 @@ const char *flow_tun_flag_to_string(uint32_t flags);
  *
  * The meaning of 'in_port' is context-dependent.  In most cases, it is a
  * 16-bit OpenFlow 1.0 port number.  In the software datapath interface (dpif)
- * layer and its implementations (e.g. dpif-linux, dpif-netdev), it is instead
- * a 32-bit datapath port number.
+ * layer and its implementations (e.g. dpif-netlink, dpif-netdev), it is
+ * instead a 32-bit datapath port number.
  *
  * The fields are organized in four segments to facilitate staged lookup, where
  * lower layer fields are first used to determine if the later fields need to
@@ -92,7 +94,7 @@ const char *flow_tun_flag_to_string(uint32_t flags);
  * reflected in miniflow_extract()!
  */
 struct flow {
-    /* L1 */
+    /* Metadata */
     struct flow_tnl tunnel;     /* Encapsulating tunnel parameters. */
     ovs_be64 metadata;          /* OpenFlow Metadata. */
     uint32_t regs[FLOW_N_REGS]; /* Registers. */
@@ -100,10 +102,12 @@ struct flow {
     uint32_t pkt_mark;          /* Packet mark. */
     uint32_t recirc_id;         /* Must be exact match. */
     union flow_in_port in_port; /* Input port.*/
+    ofp_port_t actset_output;   /* Output port in action set. */
+    ovs_be16 pad1;              /* Pad to 32 bits. */
 
     /* L2, Order the same as in the Ethernet header! */
-    uint8_t dl_dst[6];          /* Ethernet destination address. */
-    uint8_t dl_src[6];          /* Ethernet source address. */
+    uint8_t dl_dst[ETH_ADDR_LEN]; /* Ethernet destination address. */
+    uint8_t dl_src[ETH_ADDR_LEN]; /* Ethernet source address. */
     ovs_be16 dl_type;           /* Ethernet frame type. */
     ovs_be16 vlan_tci;          /* If 802.1Q, TCI | VLAN_CFI; otherwise 0. */
     ovs_be32 mpls_lse[FLOW_MAX_MPLS_LABELS]; /* MPLS label stack entry. */
@@ -118,11 +122,11 @@ struct flow {
     uint8_t nw_tos;             /* IP ToS (including DSCP and ECN). */
     uint8_t nw_ttl;             /* IP TTL/Hop Limit. */
     uint8_t nw_proto;           /* IP protocol or low 8 bits of ARP opcode. */
-    uint8_t arp_sha[6];         /* ARP/ND source hardware address. */
-    uint8_t arp_tha[6];         /* ARP/ND target hardware address. */
+    uint8_t arp_sha[ETH_ADDR_LEN]; /* ARP/ND source hardware address. */
+    uint8_t arp_tha[ETH_ADDR_LEN]; /* ARP/ND target hardware address. */
     struct in6_addr nd_target;  /* IPv6 neighbor discovery (ND) target. */
     ovs_be16 tcp_flags;         /* TCP flags. With L3 to avoid matching L4. */
-    ovs_be16 pad;               /* Padding. */
+    ovs_be16 pad2;              /* Pad to 32 bits. */
 
     /* L4 */
     ovs_be16 tp_src;            /* TCP/UDP/SCTP source port. */
@@ -136,10 +140,24 @@ BUILD_ASSERT_DECL(sizeof(struct flow) % 4 == 0);
 
 #define FLOW_U32S (sizeof(struct flow) / 4)
 
+/* Some flow fields are mutually exclusive or only appear within the flow
+ * pipeline.  IPv6 headers are bigger than IPv4 and MPLS, and IPv6 ND packets
+ * are bigger than TCP,UDP and IGMP packets. */
+#define FLOW_MAX_PACKET_U32S (FLOW_U32S                                   \
+    /* Unused in datapath */  - FLOW_U32_SIZE(regs)                       \
+                              - FLOW_U32_SIZE(metadata)                   \
+                              - FLOW_U32_SIZE(actset_output)              \
+    /* L2.5/3 */              - FLOW_U32_SIZE(nw_src)                     \
+                              - FLOW_U32_SIZE(nw_dst)                     \
+                              - FLOW_U32_SIZE(mpls_lse)                   \
+    /* L4 */                  - FLOW_U32_SIZE(tcp_flags) /* incl. pad. */ \
+                              - FLOW_U32_SIZE(igmp_group_ip4)             \
+                             )
+
 /* Remember to update FLOW_WC_SEQ when changing 'struct flow'. */
 BUILD_ASSERT_DECL(offsetof(struct flow, dp_hash) + sizeof(uint32_t)
-                  == sizeof(struct flow_tnl) + 176
-                  && FLOW_WC_SEQ == 27);
+                  == sizeof(struct flow_tnl) + 180
+                  && FLOW_WC_SEQ == 28);
 
 /* Incremental points at which flow classification may be performed in
  * segments.
@@ -305,7 +323,16 @@ struct flow_wildcards {
     struct flow masks;
 };
 
+#define WC_MASK_FIELD(WC, FIELD) \
+    memset(&(WC)->masks.FIELD, 0xff, sizeof (WC)->masks.FIELD)
+#define WC_UNMASK_FIELD(WC, FIELD) \
+    memset(&(WC)->masks.FIELD, 0, sizeof (WC)->masks.FIELD)
+
 void flow_wildcards_init_catchall(struct flow_wildcards *);
+
+void flow_wildcards_init_for_packet(struct flow_wildcards *,
+                                    const struct flow *);
+uint64_t flow_wc_map(const struct flow *);
 
 void flow_wildcards_clear_non_packet_fields(struct flow_wildcards *);
 
@@ -348,7 +375,10 @@ bool flow_equal_except(const struct flow *a, const struct flow *b,
 
 /* Compressed flow. */
 
-#define MINI_N_INLINE (sizeof(void *) == 4 ? 7 : 8)
+/* Number of 32-bit words present in struct miniflow. */
+#define MINI_N_INLINE 8
+
+/* Maximum number of 32-bit words supported. */
 BUILD_ASSERT_DECL(FLOW_U32S <= 63);
 
 /* A sparse representation of a "struct flow".
@@ -369,6 +399,11 @@ BUILD_ASSERT_DECL(FLOW_U32S <= 63);
  * the first element of the values array, the next 1-bit is in the next array
  * element, and so on.
  *
+ * MINI_N_INLINE is the default number of inline words.  When a miniflow is
+ * dynamically allocated the actual amount of inline storage may be different.
+ * In that case 'inline_values' contains storage at least for the number
+ * of words indicated by 'map' (one uint32_t for each 1-bit in the map).
+ *
  * Elements in values array are allowed to be zero.  This is useful for "struct
  * minimatch", for which ensuring that the miniflow and minimask members have
  * same 'map' allows optimization.  This allowance applies only to a miniflow
@@ -380,9 +415,11 @@ struct miniflow {
     uint64_t values_inline:1;
     union {
         uint32_t *offline_values;
-        uint32_t inline_values[MINI_N_INLINE];
+        uint32_t inline_values[MINI_N_INLINE]; /* Minimum inline size. */
     };
 };
+BUILD_ASSERT_DECL(sizeof(struct miniflow)
+                  == sizeof(uint64_t) + MINI_N_INLINE * sizeof(uint32_t));
 
 #define MINIFLOW_VALUES_SIZE(COUNT) ((COUNT) * sizeof(uint32_t))
 
@@ -476,31 +513,45 @@ flow_get_next_in_map(const struct flow *flow, uint64_t map, uint32_t *value)
     (((UINT64_C(1) << FLOW_U32_SIZE(FIELD)) - 1)  \
      << (offsetof(struct flow, FIELD) / 4))
 
-static inline uint32_t
-mf_get_next_in_map(uint64_t *fmap, uint64_t rm1bit, const uint32_t **fp,
-                   uint32_t *value)
-{
-    *value = 0;
-    if (*fmap & rm1bit) {
-        uint64_t trash = *fmap & (rm1bit - 1);
+struct mf_for_each_in_map_aux {
+    const uint32_t *values;
+    uint64_t fmap;
+    uint64_t map;
+};
 
-        if (trash) {
-            *fmap -= trash;
-            *fp += count_1bits(trash);
+static inline bool
+mf_get_next_in_map(struct mf_for_each_in_map_aux *aux, uint32_t *value)
+{
+    if (aux->map) {
+        uint64_t rm1bit = rightmost_1bit(aux->map);
+        aux->map -= rm1bit;
+
+        if (aux->fmap & rm1bit) {
+            /* Advance 'aux->values' to point to the value for 'rm1bit'. */
+            uint64_t trash = aux->fmap & (rm1bit - 1);
+            if (trash) {
+                aux->fmap -= trash;
+                aux->values += count_1bits(trash);
+            }
+
+            /* Retrieve the value for 'rm1bit' then advance past it. */
+            aux->fmap -= rm1bit;
+            *value = *aux->values++;
+        } else {
+            *value = 0;
         }
-        *value = **fp;
+        return true;
+    } else {
+        return false;
     }
-    return rm1bit != 0;
 }
 
-/* Iterate through all miniflow u32 values specified by 'MAP'.
- * This works as the first statement in a block.*/
+/* Iterate through all miniflow u32 values specified by 'MAP'. */
 #define MINIFLOW_FOR_EACH_IN_MAP(VALUE, FLOW, MAP)                      \
-    const uint32_t *fp_ = miniflow_get_u32_values(FLOW);                \
-    uint64_t rm1bit_, fmap_, map_;                                      \
-    for (fmap_ = (FLOW)->map, map_ = (MAP), rm1bit_ = rightmost_1bit(map_); \
-         mf_get_next_in_map(&fmap_, rm1bit_, &fp_, &(VALUE));           \
-         map_ -= rm1bit_, rm1bit_ = rightmost_1bit(map_))
+    for (struct mf_for_each_in_map_aux aux__                            \
+             = { miniflow_get_u32_values(FLOW), (FLOW)->map, MAP };     \
+         mf_get_next_in_map(&aux__, &(VALUE));                          \
+        )
 
 /* Get the value of 'FIELD' of an up to 4 byte wide integer type 'TYPE' of
  * a miniflow. */

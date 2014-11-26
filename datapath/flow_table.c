@@ -114,7 +114,7 @@ err:
 	return ERR_PTR(-ENOMEM);
 }
 
-int ovs_flow_tbl_count(struct flow_table *table)
+int ovs_flow_tbl_count(const struct flow_table *table)
 {
 	return table->count;
 }
@@ -146,11 +146,11 @@ static void flow_free(struct sw_flow *flow)
 {
 	int node;
 
-	kfree((struct sw_flow_actions __force *)flow->sf_acts);
+	kfree(rcu_dereference_raw(flow->sf_acts));
 	for_each_node(node)
 		if (flow->stats[node])
 			kmem_cache_free(flow_stats_cache,
-					(struct flow_stats __force *)flow->stats[node]);
+					rcu_dereference_raw(flow->stats[node]));
 	kmem_cache_free(flow_cache, flow);
 }
 
@@ -331,13 +331,14 @@ skip_flows:
 }
 
 /* No need for locking this function is called from RCU callback or
- * error path. */
+ * error path.
+ */
 void ovs_flow_tbl_destroy(struct flow_table *table)
 {
-	struct table_instance *ti = (struct table_instance __force *)table->ti;
+	struct table_instance *ti = rcu_dereference_raw(table->ti);
 
 	free_percpu(table->mask_cache);
-	kfree((struct mask_array __force *)table->mask_array);
+	kfree(rcu_dereference_raw(table->mask_array));
 	table_instance_destroy(ti, false);
 }
 
@@ -482,7 +483,7 @@ static bool flow_cmp_masked_key(const struct sw_flow *flow,
 }
 
 bool ovs_flow_cmp_unmasked_key(const struct sw_flow *flow,
-			       struct sw_flow_match *match)
+			       const struct sw_flow_match *match)
 {
 	struct sw_flow_key *key = match->key;
 	int key_start = flow_key_start(key);
@@ -493,7 +494,7 @@ bool ovs_flow_cmp_unmasked_key(const struct sw_flow *flow,
 
 static struct sw_flow *masked_flow_lookup(struct table_instance *ti,
 					  const struct sw_flow_key *unmasked,
-					  struct sw_flow_mask *mask,
+					  const struct sw_flow_mask *mask,
 					  u32 *n_mask_hit)
 {
 	struct sw_flow *flow;
@@ -521,7 +522,7 @@ static struct sw_flow *masked_flow_lookup(struct table_instance *ti,
  */
 static struct sw_flow *flow_lookup(struct flow_table *tbl,
 				   struct table_instance *ti,
-				   struct mask_array *ma,
+				   const struct mask_array *ma,
 				   const struct sw_flow_key *key,
 				   u32 *n_mask_hit,
 				   u32 *index)
@@ -564,7 +565,7 @@ static struct sw_flow *flow_lookup(struct flow_table *tbl,
  * cache entry in mask cache.
  * This is per cpu cache and is divided in MC_HASH_SEGS segments.
  * In case of a hash collision the entry is hashed in next segment.
- * */
+ */
 struct sw_flow *ovs_flow_tbl_lookup_stats(struct flow_table *tbl,
 					  const struct sw_flow_key *key,
 					  u32 skb_hash,
@@ -627,7 +628,7 @@ struct sw_flow *ovs_flow_tbl_lookup(struct flow_table *tbl,
 }
 
 struct sw_flow *ovs_flow_tbl_lookup_exact(struct flow_table *tbl,
-					  struct sw_flow_match *match)
+					  const struct sw_flow_match *match)
 {
 	struct mask_array *ma = ovsl_dereference(tbl->mask_array);
 	int i;
@@ -715,7 +716,8 @@ void ovs_flow_tbl_remove(struct flow_table *table, struct sw_flow *flow)
 	table->count--;
 
 	/* RCU delete the mask. 'flow->mask' is not NULLed, as it should be
-	 * accessible as long as the RCU read lock is held. */
+	 * accessible as long as the RCU read lock is held.
+	 */
 	flow_mask_remove(table, flow->mask);
 }
 
@@ -761,7 +763,7 @@ static struct sw_flow_mask *flow_mask_find(const struct flow_table *tbl,
 
 /* Add 'mask' into the mask list, if it is not already there. */
 static int flow_mask_insert(struct flow_table *tbl, struct sw_flow *flow,
-			    struct sw_flow_mask *new)
+			    const struct sw_flow_mask *new)
 {
 	struct sw_flow_mask *mask;
 
@@ -814,7 +816,7 @@ static int flow_mask_insert(struct flow_table *tbl, struct sw_flow *flow,
 
 /* Must be called with OVS mutex held. */
 int ovs_flow_tbl_insert(struct flow_table *table, struct sw_flow *flow,
-			struct sw_flow_mask *mask)
+			const struct sw_flow_mask *mask)
 {
 	struct table_instance *new_ti = NULL;
 	struct table_instance *ti;
@@ -845,7 +847,8 @@ int ovs_flow_tbl_insert(struct flow_table *table, struct sw_flow *flow,
 }
 
 /* Initializes the flow module.
- * Returns zero if successful or a negative error code. */
+ * Returns zero if successful or a negative error code.
+ */
 int ovs_flow_init(void)
 {
 	BUILD_BUG_ON(__alignof__(struct sw_flow_key) % __alignof__(long));

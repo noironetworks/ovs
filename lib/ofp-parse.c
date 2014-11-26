@@ -145,7 +145,7 @@ str_to_be64(const char *str, ovs_be64 *valuep)
  * Returns NULL if successful, otherwise a malloc()'d string describing the
  * error.  The caller is responsible for freeing the returned string. */
 char * WARN_UNUSED_RESULT
-str_to_mac(const char *str, uint8_t mac[6])
+str_to_mac(const char *str, uint8_t mac[ETH_ADDR_LEN])
 {
     if (!ovs_scan(str, ETH_ADDR_SCAN_FMT, ETH_ADDR_SCAN_ARGS(mac))) {
         return xasprintf("invalid mac address %s", str);
@@ -248,6 +248,7 @@ parse_ofp_str__(struct ofputil_flow_mod *fm, int command, char *string,
     enum {
         F_OUT_PORT = 1 << 0,
         F_ACTIONS = 1 << 1,
+        F_IMPORTANCE = 1 << 2,
         F_TIMEOUT = 1 << 3,
         F_PRIORITY = 1 << 4,
         F_FLAGS = 1 << 5,
@@ -264,7 +265,7 @@ parse_ofp_str__(struct ofputil_flow_mod *fm, int command, char *string,
         break;
 
     case OFPFC_ADD:
-        fields = F_ACTIONS | F_TIMEOUT | F_PRIORITY | F_FLAGS;
+        fields = F_ACTIONS | F_TIMEOUT | F_PRIORITY | F_FLAGS | F_IMPORTANCE;
         break;
 
     case OFPFC_DELETE:
@@ -305,6 +306,7 @@ parse_ofp_str__(struct ofputil_flow_mod *fm, int command, char *string,
     fm->buffer_id = UINT32_MAX;
     fm->out_port = OFPP_ANY;
     fm->flags = 0;
+    fm->importance = 0;
     fm->out_group = OFPG11_ANY;
     fm->delete_reason = OFPRR_DELETE;
     if (fields & F_ACTIONS) {
@@ -366,6 +368,8 @@ parse_ofp_str__(struct ofputil_flow_mod *fm, int command, char *string,
                 error = str_to_u16(value, name, &fm->idle_timeout);
             } else if (fields & F_TIMEOUT && !strcmp(name, "hard_timeout")) {
                 error = str_to_u16(value, name, &fm->hard_timeout);
+            } else if (fields & F_IMPORTANCE && !strcmp(name, "importance")) {
+                error = str_to_u16(value, name, &fm->importance);
             } else if (!strcmp(name, "cookie")) {
                 char *mask = strchr(value, '/');
 
@@ -588,7 +592,8 @@ parse_ofp_meter_mod_str__(struct ofputil_meter_mod *mm, char *string,
                     if (error) {
                         return error;
                     }
-                    if (mm->meter.meter_id > OFPM13_MAX) {
+                    if (mm->meter.meter_id > OFPM13_MAX
+                        || !mm->meter.meter_id) {
                         return xasprintf("invalid value for %s", name);
                     }
                 }
@@ -730,11 +735,11 @@ parse_flow_monitor_request__(struct ofputil_flow_monitor_request *fmr,
                              const char *str_, char *string,
                              enum ofputil_protocol *usable_protocols)
 {
-    static atomic_uint32_t id = ATOMIC_VAR_INIT(0);
+    static atomic_count id = ATOMIC_COUNT_INIT(0);
     char *save_ptr = NULL;
     char *name;
 
-    atomic_add(&id, 1, &fmr->id);
+    fmr->id = atomic_count_inc(&id);
 
     fmr->flags = (NXFMF_INITIAL | NXFMF_ADD | NXFMF_DELETE | NXFMF_MODIFY
                   | NXFMF_OWN | NXFMF_ACTIONS);
@@ -1092,6 +1097,7 @@ parse_bucket_str(struct ofputil_bucket *bucket, char *str_,
     char *error;
 
     bucket->weight = 1;
+    bucket->bucket_id = OFPG15_BUCKET_ALL;
     bucket->watch_port = OFPP_ANY;
     bucket->watch_group = OFPG11_ANY;
 
@@ -1114,6 +1120,13 @@ parse_bucket_str(struct ofputil_bucket *bucket, char *str_,
                 error = xasprintf("invalid watch_group id %"PRIu32,
                                   bucket->watch_group);
             }
+        } else if (!strcasecmp(key, "bucket_id")) {
+            error = str_to_u32(value, &bucket->bucket_id);
+            if (!error && bucket->bucket_id > OFPG15_BUCKET_MAX) {
+                error = xasprintf("invalid bucket_id id %"PRIu32,
+                                  bucket->bucket_id);
+            }
+            *usable_protocols &= OFPUTIL_P_OF15_UP;
         } else if (!strcasecmp(key, "action") || !strcasecmp(key, "actions")) {
             ds_put_format(&actions, "%s,", value);
         } else {
@@ -1151,11 +1164,14 @@ parse_ofp_group_mod_str__(struct ofputil_group_mod *gm, uint16_t command,
                           enum ofputil_protocol *usable_protocols)
 {
     enum {
-        F_GROUP_TYPE  = 1 << 0,
-        F_BUCKETS     = 1 << 1,
+        F_GROUP_TYPE            = 1 << 0,
+        F_BUCKETS               = 1 << 1,
+        F_COMMAND_BUCKET_ID     = 1 << 2,
+        F_COMMAND_BUCKET_ID_ALL = 1 << 3,
     } fields;
     char *save_ptr = NULL;
     bool had_type = false;
+    bool had_command_bucket_id = false;
     char *name;
     struct ofputil_bucket *bucket;
     char *error = NULL;
@@ -1175,6 +1191,16 @@ parse_ofp_group_mod_str__(struct ofputil_group_mod *gm, uint16_t command,
         fields = F_GROUP_TYPE | F_BUCKETS;
         break;
 
+    case OFPGC15_INSERT_BUCKET:
+        fields = F_BUCKETS | F_COMMAND_BUCKET_ID;
+        *usable_protocols &= OFPUTIL_P_OF15_UP;
+        break;
+
+    case OFPGC15_REMOVE_BUCKET:
+        fields = F_COMMAND_BUCKET_ID | F_COMMAND_BUCKET_ID_ALL;
+        *usable_protocols &= OFPUTIL_P_OF15_UP;
+        break;
+
     default:
         OVS_NOT_REACHED();
     }
@@ -1182,6 +1208,7 @@ parse_ofp_group_mod_str__(struct ofputil_group_mod *gm, uint16_t command,
     memset(gm, 0, sizeof *gm);
     gm->command = command;
     gm->group_id = OFPG_ANY;
+    gm->command_bucket_id = OFPG15_BUCKET_ALL;
     list_init(&gm->buckets);
     if (command == OFPGC11_DELETE && string[0] == '\0') {
         gm->group_id = OFPG_ALL;
@@ -1191,7 +1218,7 @@ parse_ofp_group_mod_str__(struct ofputil_group_mod *gm, uint16_t command,
     *usable_protocols = OFPUTIL_P_OF11_UP;
 
     if (fields & F_BUCKETS) {
-        char *bkt_str = strstr(string, "bucket");
+        char *bkt_str = strstr(string, "bucket=");
 
         if (bkt_str) {
             *bkt_str = '\0';
@@ -1207,7 +1234,7 @@ parse_ofp_group_mod_str__(struct ofputil_group_mod *gm, uint16_t command,
             }
             bkt_str++;
 
-            next_bkt_str = strstr(bkt_str, "bucket");
+            next_bkt_str = strstr(bkt_str, "bucket=");
             if (next_bkt_str) {
                 *next_bkt_str = '\0';
             }
@@ -1234,7 +1261,38 @@ parse_ofp_group_mod_str__(struct ofputil_group_mod *gm, uint16_t command,
             goto out;
         }
 
-        if (!strcmp(name, "group_id")) {
+        if (!strcmp(name, "command_bucket_id")) {
+            if (!(fields & F_COMMAND_BUCKET_ID)) {
+                error = xstrdup("command bucket id is not needed");
+                goto out;
+            }
+            if (!strcmp(value, "all")) {
+                gm->command_bucket_id = OFPG15_BUCKET_ALL;
+            } else if (!strcmp(value, "first")) {
+                gm->command_bucket_id = OFPG15_BUCKET_FIRST;
+            } else if (!strcmp(value, "last")) {
+                gm->command_bucket_id = OFPG15_BUCKET_LAST;
+            } else {
+                char *error = str_to_u32(value, &gm->command_bucket_id);
+                if (error) {
+                    goto out;
+                }
+                if (gm->command_bucket_id > OFPG15_BUCKET_MAX
+                    && (gm->command_bucket_id != OFPG15_BUCKET_FIRST
+                        && gm->command_bucket_id != OFPG15_BUCKET_LAST
+                        && gm->command_bucket_id != OFPG15_BUCKET_ALL)) {
+                    error = xasprintf("invalid command bucket id %"PRIu32,
+                                      gm->command_bucket_id);
+                    goto out;
+                }
+            }
+            if (gm->command_bucket_id == OFPG15_BUCKET_ALL
+                && !(fields & F_COMMAND_BUCKET_ID_ALL)) {
+                error = xstrdup("command_bucket_id=all is not permitted");
+                goto out;
+            }
+            had_command_bucket_id = true;
+        } else if (!strcmp(name, "group_id")) {
             if(!strcmp(value, "all")) {
                 gm->group_id = OFPG_ALL;
             } else {
@@ -1281,6 +1339,16 @@ parse_ofp_group_mod_str__(struct ofputil_group_mod *gm, uint16_t command,
     }
     if (fields & F_GROUP_TYPE && !had_type) {
         error = xstrdup("must specify a type");
+        goto out;
+    }
+
+    if (fields & F_COMMAND_BUCKET_ID) {
+        if (!(fields & F_COMMAND_BUCKET_ID_ALL || had_command_bucket_id)) {
+            error = xstrdup("must specify a command bucket id");
+            goto out;
+        }
+    } else if (had_command_bucket_id) {
+        error = xstrdup("command bucket id is not needed");
         goto out;
     }
 

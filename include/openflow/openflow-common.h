@@ -50,7 +50,7 @@
 #ifndef OPENFLOW_COMMON_H
 #define OPENFLOW_COMMON_H 1
 
-#include "openvswitch/types.h"
+#include <openvswitch/types.h>
 
 #ifdef SWIG
 #define OFP_ASSERT(EXPR)        /* SWIG can't handle OFP_ASSERT. */
@@ -271,7 +271,10 @@ enum ofp_capabilities {
 enum ofp_packet_in_reason {
     OFPR_NO_MATCH,          /* No matching flow. */
     OFPR_ACTION,            /* Action explicitly output to controller. */
-    OFPR_INVALID_TTL        /* Packet has invalid TTL. */,
+    OFPR_INVALID_TTL,       /* Packet has invalid TTL. */
+    OFPR_ACTION_SET,        /* Output to controller in action set */
+    OFPR_GROUP,             /* Output to controller in group bucket */
+    OFPR_PACKET_OUT,        /* Output to controller in packet-out */
     OFPR_N_REASONS
 };
 

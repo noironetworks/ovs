@@ -62,6 +62,14 @@ enum slow_path_reason {
 #undef SPR
 };
 
+/* Mask of all slow_path_reasons. */
+enum {
+    SLOW_PATH_REASON_MASK = 0
+#define SPR(ENUM, STRING, EXPLANATION) | 1 << ENUM##_INDEX 
+    SLOW_PATH_REASONS
+#undef SPR
+};
+
 const char *slow_path_reason_to_explanation(enum slow_path_reason);
 
 #define ODPP_LOCAL ODP_PORT_C(OVSP_LOCAL)
@@ -125,7 +133,7 @@ void odp_portno_names_destroy(struct hmap *portno_names);
  * add another field and forget to adjust this value.
  */
 #define ODPUTIL_FLOW_KEY_BYTES 512
-BUILD_ASSERT_DECL(FLOW_WC_SEQ == 27);
+BUILD_ASSERT_DECL(FLOW_WC_SEQ == 28);
 
 /* A buffer with sufficient size and alignment to hold an nlattr-formatted flow
  * key.  An array of "struct nlattr" might not, in theory, be sufficiently
@@ -183,10 +191,14 @@ const char *odp_key_fitness_to_string(enum odp_key_fitness);
 
 void commit_odp_tunnel_action(const struct flow *, struct flow *base,
                               struct ofpbuf *odp_actions);
+void commit_masked_set_action(struct ofpbuf *odp_actions,
+                              enum ovs_key_attr key_type, const void *key,
+                              const void *mask, size_t key_size);
 enum slow_path_reason commit_odp_actions(const struct flow *,
                                          struct flow *base,
                                          struct ofpbuf *odp_actions,
-                                         struct flow_wildcards *wc);
+                                         struct flow_wildcards *wc,
+                                         bool use_masked);
 
 /* ofproto-dpif interface.
  *
@@ -229,17 +241,19 @@ union user_action_cookie {
     } flow_sample;
 
     struct {
-        uint16_t type;          /* USER_ACTION_COOKIE_IPFIX. */
+        uint16_t   type;            /* USER_ACTION_COOKIE_IPFIX. */
+        odp_port_t output_odp_port; /* The output odp port. */
     } ipfix;
 };
 BUILD_ASSERT_DECL(sizeof(union user_action_cookie) == 16);
 
 size_t odp_put_userspace_action(uint32_t pid,
                                 const void *userdata, size_t userdata_size,
+                                odp_port_t tunnel_out_port,
                                 struct ofpbuf *odp_actions);
 void odp_put_tunnel_action(const struct flow_tnl *tunnel,
                            struct ofpbuf *odp_actions);
-void odp_put_pkt_mark_action(const uint32_t pkt_mark,
-                             struct ofpbuf *odp_actions);
 
+void odp_put_tnl_push_action(struct ofpbuf *odp_actions,
+                             struct ovs_action_push_tnl *data);
 #endif /* odp-util.h */

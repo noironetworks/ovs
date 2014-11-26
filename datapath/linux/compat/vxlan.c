@@ -19,7 +19,6 @@
  */
 
 #include <linux/version.h>
-#if LINUX_VERSION_CODE < KERNEL_VERSION(3,12,0)
 
 #define pr_fmt(fmt) KBUILD_MODNAME ": " fmt
 
@@ -43,6 +42,7 @@
 #include <net/arp.h>
 #include <net/ndisc.h>
 #include <net/ip.h>
+#include <net/gre.h>
 #include <net/ip_tunnels.h>
 #include <net/icmp.h>
 #include <net/udp.h>
@@ -58,6 +58,7 @@
 #include "datapath.h"
 #include "gso.h"
 #include "vlan.h"
+#ifndef USE_KERNEL_TUNNEL_API
 
 #define VXLAN_HLEN (sizeof(struct udphdr) + sizeof(struct vxlanhdr))
 
@@ -250,7 +251,8 @@ int vxlan_xmit_skb(struct vxlan_sock *vs,
 	if (err)
 		return err;
 
-	return iptunnel_xmit(rt, skb, src, dst, IPPROTO_UDP, tos, ttl, df, false);
+	return iptunnel_xmit(vs->sock->sk, rt, skb, src, dst, IPPROTO_UDP,
+			     tos, ttl, df, false);
 }
 
 static void rcu_free_vs(struct rcu_head *rcu)

@@ -15,16 +15,15 @@
  */
 
 #include <config.h>
+#undef NDEBUG
+#include "hash.h"
+#include <assert.h>
 #include <inttypes.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
-#include "hash.h"
 #include "jhash.h"
 #include "ovstest.h"
-
-#undef NDEBUG
-#include <assert.h>
 
 static void
 set_bit(uint32_t array[3], int bit)
@@ -129,7 +128,9 @@ test_hash_main(int argc OVS_UNUSED, char *argv[] OVS_UNUSED)
      * Given a random distribution, the probability of at least one collision
      * in any set of 11 bits is approximately
      *
-     *                      1 - ((2**11 - 1)/2**11)**C(33,2)
+     *                      1 - (proportion of same_bits)
+     *                          **(binomial_coefficient(n_bits_in_data + 1, 2))
+     *                   == 1 - ((2**11 - 1)/2**11)**C(33,2)
      *                   == 1 - (2047/2048)**528
      *                   =~ 0.22
      *

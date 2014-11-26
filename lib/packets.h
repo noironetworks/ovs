@@ -46,6 +46,8 @@ struct flow_tnl {
     uint8_t  ivxlan_flags;
     uint8_t ip_tos;
     uint8_t ip_ttl;
+    ovs_be16 tp_src;
+    ovs_be16 tp_dst;
 };
 
 /* Unfortunately, a "struct flow" sometimes has to handle OpenFlow port
@@ -70,7 +72,7 @@ struct pkt_metadata {
 };
 
 #define PKT_METADATA_INITIALIZER(PORT) \
-    (struct pkt_metadata){ 0, 0, { 0, 0, 0, 0, 0, 0, 0, 0}, 0, 0, {(PORT)} }
+    (struct pkt_metadata){ .in_port.odp_port = PORT }
 
 bool dpid_from_string(const char *s, uint64_t *dpidp);
 
@@ -88,23 +90,23 @@ static const uint8_t eth_addr_lacp[ETH_ADDR_LEN] OVS_UNUSED
 static const uint8_t eth_addr_bfd[ETH_ADDR_LEN] OVS_UNUSED
     = { 0x00, 0x23, 0x20, 0x00, 0x00, 0x01 };
 
-static inline bool eth_addr_is_broadcast(const uint8_t ea[6])
+static inline bool eth_addr_is_broadcast(const uint8_t ea[ETH_ADDR_LEN])
 {
     return (ea[0] & ea[1] & ea[2] & ea[3] & ea[4] & ea[5]) == 0xff;
 }
 
-static inline bool eth_addr_is_multicast(const uint8_t ea[6])
+static inline bool eth_addr_is_multicast(const uint8_t ea[ETH_ADDR_LEN])
 {
     return ea[0] & 1;
 }
-static inline bool eth_addr_is_local(const uint8_t ea[6])
+static inline bool eth_addr_is_local(const uint8_t ea[ETH_ADDR_LEN])
 {
     /* Local if it is either a locally administered address or a Nicira random
      * address. */
     return ea[0] & 2
        || (ea[0] == 0x00 && ea[1] == 0x23 && ea[2] == 0x20 && ea[3] & 0x80);
 }
-static inline bool eth_addr_is_zero(const uint8_t ea[6])
+static inline bool eth_addr_is_zero(const uint8_t ea[ETH_ADDR_LEN])
 {
     return !(ea[0] | ea[1] | ea[2] | ea[3] | ea[4] | ea[5]);
 }
@@ -241,6 +243,7 @@ ovs_be32 set_mpls_lse_values(uint8_t ttl, uint8_t tc, uint8_t bos,
 
 #define ETH_TYPE_IP            0x0800
 #define ETH_TYPE_ARP           0x0806
+#define ETH_TYPE_TEB           0x6558
 #define ETH_TYPE_VLAN_8021Q    0x8100
 #define ETH_TYPE_VLAN          ETH_TYPE_VLAN_8021Q
 #define ETH_TYPE_VLAN_8021AD   0x88a8
@@ -286,6 +289,11 @@ struct llc_header {
     uint8_t llc_cntl;
 });
 BUILD_ASSERT_DECL(LLC_HEADER_LEN == sizeof(struct llc_header));
+
+/* LLC field values used for STP frames. */
+#define STP_LLC_SSAP 0x42
+#define STP_LLC_DSAP 0x42
+#define STP_LLC_CNTL 0x03
 
 #define SNAP_ORG_ETHERNET "\0\0" /* The compiler adds a null byte, so
                                     sizeof(SNAP_ORG_ETHERNET) == 3. */
@@ -498,6 +506,7 @@ struct ip_header {
     ovs_16aligned_be32 ip_src;
     ovs_16aligned_be32 ip_dst;
 };
+
 BUILD_ASSERT_DECL(IP_HEADER_LEN == sizeof(struct ip_header));
 
 #define ICMP_HEADER_LEN 8
@@ -636,6 +645,15 @@ struct ovs_16aligned_ip6_frag {
     ovs_16aligned_be32 ip6f_ident;
 };
 
+#define ICMP6_HEADER_LEN 4
+struct icmp6_header {
+    uint8_t icmp6_type;
+    uint8_t icmp6_code;
+    ovs_be16 icmp6_cksum;
+    uint8_t icmp6_data[0];
+};
+BUILD_ASSERT_DECL(ICMP6_HEADER_LEN == sizeof(struct icmp6_header));
+
 /* The IPv6 flow label is in the lower 20 bits of the first 32-bit word. */
 #define IPV6_LABEL_MASK 0x000fffff
 
@@ -681,23 +699,47 @@ static inline bool dl_type_is_ip_any(ovs_be16 dl_type)
         || dl_type == htons(ETH_TYPE_IPV6);
 }
 
+/* Tunnel header */
 #define GENEVE_CRIT_OPT_TYPE (1 << 7)
 struct geneve_opt {
     ovs_be16  opt_class;
     uint8_t   type;
-#ifdef LITTLE_ENDIAN
-    uint8_t   length:5;
-    uint8_t   r3:1;
-    uint8_t   r2:1;
+#ifdef WORDS_BIGENDIAN
     uint8_t   r1:1;
+    uint8_t   r2:1;
+    uint8_t   r3:1;
+    uint8_t   length:5;
 #else
-    uint8_t   r1:1;
-    uint8_t   r2:1;
-    uint8_t   r3:1;
     uint8_t   length:5;
+    uint8_t   r3:1;
+    uint8_t   r2:1;
+    uint8_t   r1:1;
 #endif
     uint8_t   opt_data[];
 };
+
+/* GRE protocol header */
+struct gre_base_hdr {
+    ovs_be16 flags;
+    ovs_be16 protocol;
+};
+
+#define GRE_CSUM        0x8000
+#define GRE_ROUTING     0x4000
+#define GRE_KEY         0x2000
+#define GRE_SEQ         0x1000
+#define GRE_STRICT      0x0800
+#define GRE_REC         0x0700
+#define GRE_FLAGS       0x00F8
+#define GRE_VERSION     0x0007
+
+/* VXLAN protocol header */
+struct vxlanhdr {
+    ovs_16aligned_be32 vx_flags;
+    ovs_16aligned_be32 vx_vni;
+};
+
+#define VXLAN_FLAGS 0x08000000  /* struct vxlanhdr.vx_flags required value. */
 
 void format_ipv6_addr(char *addr_str, const struct in6_addr *addr);
 void print_ipv6_addr(struct ds *string, const struct in6_addr *addr);
@@ -726,5 +768,7 @@ void packet_set_sctp_port(struct ofpbuf *, ovs_be16 src, ovs_be16 dst);
 
 void packet_format_tcp_flags(struct ds *, uint16_t);
 const char *packet_tcp_flag_to_string(uint32_t flag);
+void compose_arp(struct ofpbuf *b, const uint8_t eth_src[ETH_ADDR_LEN],
+                 ovs_be32 ip_src, ovs_be32 ip_dst);
 
 #endif /* packets.h */
