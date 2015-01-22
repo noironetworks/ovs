@@ -1355,12 +1355,11 @@ odp_tun_key_from_attr(const struct nlattr *attr, struct flow_tnl *tun)
             tun->flags |= FLOW_TNL_F_OAM;
             break;
         case OVS_TUNNEL_KEY_ATTR_GENEVE_OPTS: {
+            /* It is necessary to reproduce options exactly (including order)
+             * so it's easiest to just echo them back. */
             if (geneve_nlattr_to_tun_metadata(a, tun->metadata)) {
                 return ODP_FIT_ERROR;
             }
-            /* It is necessary to reproduce options exactly (including order)
-             * so it's easiest to just echo them back. */
-            unknown = true;
             break;
         }
         default:
