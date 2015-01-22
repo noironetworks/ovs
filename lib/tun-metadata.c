@@ -343,9 +343,9 @@ geneve_nlattr_to_tun_metadata(const struct nlattr *attr,
         }
 
         entry = find_tun_meta_entry((uint8_t *)opt);
-        if (entry && entry->len == opt->length * 4) {
+        if (entry && entry->len == (len - 1)) {
             memcpy(metadata + entry->ofs, opt, 3);
-            memcpy(metadata + entry->ofs + 3, opt->opt_data, entry->len);
+            memcpy(metadata + entry->ofs + 3, opt->opt_data, entry->len - 3);
         } else if (opt->type & GENEVE_CRIT_OPT_TYPE) {
             return -EINVAL;
         }

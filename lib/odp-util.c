@@ -1420,8 +1420,10 @@ tun_key_to_attr(struct ofpbuf *a, const struct flow_tnl *tun_key)
     }
     if (!is_all_zeros(tun_key->metadata, TUN_METADATA_LEN)) {
         len = tun_metadata_to_geneve_nlattr(tun_key->metadata, tun_metadata);
-        nl_msg_put_unspec(a, OVS_TUNNEL_KEY_ATTR_GENEVE_OPTS,
-                          tun_metadata, len);
+        if (len) {
+            nl_msg_put_unspec(a, OVS_TUNNEL_KEY_ATTR_GENEVE_OPTS,
+                              tun_metadata, len);
+        }
     }
     nl_msg_end_nested(a, tun_key_ofs);
 }
