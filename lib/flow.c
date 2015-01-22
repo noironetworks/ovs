@@ -922,6 +922,7 @@ void flow_wildcards_init_for_packet(struct flow_wildcards *wc,
         WC_MASK_FIELD(wc, tunnel.ip_ttl);
         WC_MASK_FIELD(wc, tunnel.tp_src);
         WC_MASK_FIELD(wc, tunnel.tp_dst);
+        WC_MASK_FIELD(wc, tunnel.metadata);
     } else if (flow->tunnel.tun_id) {
         WC_MASK_FIELD(wc, tunnel.tun_id);
     }
