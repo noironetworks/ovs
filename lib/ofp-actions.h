@@ -92,6 +92,7 @@
     OFPACT(SET_QUEUE,       ofpact_queue,       ofpact, "set_queue")    \
     OFPACT(POP_QUEUE,       ofpact_null,        ofpact, "pop_queue")    \
     OFPACT(FIN_TIMEOUT,     ofpact_fin_timeout, ofpact, "fin_timeout")  \
+    OFPACT(TUN_METADATA,    ofpact_tun_metadata,ofpact, "tun_metadata") \
                                                                         \
     /* Flow table interaction. */                                       \
     OFPACT(RESUBMIT,        ofpact_resubmit,    ofpact, "resubmit")     \
@@ -432,6 +433,15 @@ struct ofpact_fin_timeout {
     struct ofpact ofpact;
     uint16_t fin_idle_timeout;
     uint16_t fin_hard_timeout;
+};
+
+/* OFPACT_TUN_METADATA.
+ *
+ * Used for NXAST_TUN_METADATA. */
+struct ofpact_tun_metadata {
+    struct ofpact ofpact;
+    uint8_t data_len;
+    uint8_t data[255];
 };
 
 /* OFPACT_WRITE_METADATA.

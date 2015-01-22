@@ -218,10 +218,11 @@ parse_field(const struct mf_field *mf, const char *s, struct match *match,
 {
     union mf_value value, mask;
     char *error;
+    int len;
 
-    error = mf_parse(mf, s, &value, &mask);
+    error = mf_parse(mf, s, &value, &mask, &len);
     if (!error) {
-        *usable_protocols &= mf_set(mf, &value, &mask, match);
+        *usable_protocols &= mf_set(mf, &value, &mask, match, len);
     }
     return error;
 }
@@ -1040,7 +1041,7 @@ parse_ofp_exact_flow(struct flow *flow, struct flow *mask, const char *s,
                 goto exit;
             }
 
-            if (!mf_is_zero(mf, flow)) {
+            if (mf->id != MFF_TUN_METADATA && !mf_is_zero(mf, flow)) {
                 error = xasprintf("%s: field %s set multiple times", s, key);
                 goto exit;
             }

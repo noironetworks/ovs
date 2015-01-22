@@ -21,6 +21,7 @@
 #include "dynamic-string.h"
 #include "ofp-util.h"
 #include "packets.h"
+#include "tun-metadata.h"
 
 /* Converts the flow in 'flow' into a match in 'match', with the given
  * 'wildcards'. */
@@ -854,6 +855,25 @@ format_flow_tunnel(struct ds *s, const struct match *match)
     if (wc->masks.tunnel.flags) {
         format_flags(s, flow_tun_flag_to_string, tnl->flags, '|');
         ds_put_char(s, ',');
+    }
+    if (!is_all_zeros(wc->masks.tunnel.metadata, TUN_METADATA_LEN)) {
+        uint16_t len, ofs = 0;
+        int i;
+        while (tun_metadata_get_len(ofs, &len)) {
+            if (tun_metadata_valid(tnl->metadata + ofs, len, ofs)) {
+                ds_put_format(s, "tun_metadata=");
+                for (i = 0; i < len; i++) {
+                    ds_put_format(s, "%02"SCNx8, tnl->metadata[ofs + i]);
+                }
+                ds_put_char(s, '/');
+                for (i = 0; i < len; i++) {
+                    ds_put_format(s, "%02"SCNx8, wc->masks.tunnel.metadata[ofs + i]);
+                }
+                ds_put_char(s, ',');
+            }
+            ofs += len;
+            ovs_assert(ofs <= TUN_METADATA_LEN);
+        }
     }
 }
 

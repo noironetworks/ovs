@@ -56,6 +56,7 @@
 #include "ovs-router.h"
 #include "tnl-ports.h"
 #include "tunnel.h"
+#include "tun-metadata.h"
 #include "openvswitch/vlog.h"
 
 COVERAGE_DEFINE(xlate_actions);
@@ -3750,6 +3751,7 @@ ofpact_needs_recirculation_after_mpls(const struct ofpact *a, struct xlate_ctx *
     case OFPACT_WRITE_ACTIONS:
     case OFPACT_CLEAR_ACTIONS:
     case OFPACT_SAMPLE:
+    case OFPACT_TUN_METADATA:
         return false;
 
     case OFPACT_POP_MPLS:
@@ -4102,6 +4104,17 @@ do_xlate_actions(const struct ofpact *ofpacts, size_t ofpacts_len,
         case OFPACT_SAMPLE:
             xlate_sample_action(ctx, ofpact_get_SAMPLE(a));
             break;
+
+        case OFPACT_TUN_METADATA: {
+            struct ofpact_tun_metadata *otm = ofpact_get_TUN_METADATA(a);
+            int ofs = action_find_or_add_tun_meta_entry(otm->data,
+                                                        otm->data_len);
+            if (ofs != -1) {
+                memcpy(flow->tunnel.metadata + ofs, otm->data, otm->data_len);
+                memset(wc->masks.tunnel.metadata + ofs, 0xff, otm->data_len);
+            }
+            break;
+        }
         }
     }
 }
