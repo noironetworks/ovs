@@ -293,9 +293,7 @@ int rpl_ip_local_out(struct sk_buff *skb)
 	}
 	return ret;
 }
-#endif /* 3.16 */
 
-#if LINUX_VERSION_CODE < KERNEL_VERSION(3,12,0)
 struct sk_buff *ovs_iptunnel_handle_offloads(struct sk_buff *skb,
                                              bool csum_help,
 					     void (*fix_segment)(struct sk_buff *))
@@ -344,4 +342,5 @@ error:
 	kfree_skb(skb);
 	return ERR_PTR(err);
 }
-#endif /* 3.12 */
+
+#endif /* 3.16 */
