@@ -2,6 +2,7 @@
 #define __LINUX_GSO_WRAPPER_H
 
 #include <linux/version.h>
+typedef void (*gso_fix_segment_t)(struct sk_buff *);
 #if LINUX_VERSION_CODE < KERNEL_VERSION(3,12,0)
 
 #include <linux/netdevice.h>
@@ -9,7 +10,6 @@
 #include <net/protocol.h>
 
 #include "datapath.h"
-typedef void (*gso_fix_segment_t)(struct sk_buff *);
 
 struct ovs_gso_cb {
 	struct ovs_skb_cb dp_cb;
@@ -65,13 +65,11 @@ static inline void skb_reset_inner_headers(struct sk_buff *skb)
 
 	OVS_GSO_CB(skb)->fix_segment = NULL;
 }
+#endif /* 3.12 */
 
 struct sk_buff *ovs_iptunnel_handle_offloads(struct sk_buff *skb,
                                              bool csum_help,
 					     gso_fix_segment_t fix_segment);
-
-
-#endif /* 3.12 */
 
 #if LINUX_VERSION_CODE < KERNEL_VERSION(3,16,0)
 #define ip_local_out rpl_ip_local_out

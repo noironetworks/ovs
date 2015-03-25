@@ -389,6 +389,20 @@ EXPORT_SYMBOL(udp_set_csum);
 
 #endif
 
+static void vxlan_sock_put(struct sk_buff *skb)
+{
+        sock_put(skb->sk);
+}
+
+/* On transmit, associate with the tunnel socket */
+static void vxlan_set_owner(struct sock *sk, struct sk_buff *skb)
+{
+        skb_orphan(skb);
+        sock_hold(sk);
+        skb->sk = sk;
+        skb->destructor = vxlan_sock_put;
+}
+
 static int ivxlan_xmit_skb(struct vxlan_sock *vs,
                     struct rtable *rt, struct sk_buff *skb,
                     __be32 src, __be32 dst, __u8 tos, __u8 ttl, __be16 df,
@@ -453,6 +467,8 @@ static int ivxlan_xmit_skb(struct vxlan_sock *vs,
 
 	udp_set_csum(false, skb,
 		     src, dst, skb->len);
+
+	vxlan_set_owner(vs->sock->sk, skb);
 
 	return iptunnel_xmit(vs->sock->sk, rt, skb, src, dst, IPPROTO_UDP,
 			     tos, ttl, df, xnet);
