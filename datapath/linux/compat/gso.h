@@ -3,7 +3,6 @@
 
 #include <linux/version.h>
 typedef void (*gso_fix_segment_t)(struct sk_buff *);
-#if LINUX_VERSION_CODE < KERNEL_VERSION(3,12,0)
 
 #include <linux/netdevice.h>
 #include <linux/skbuff.h>
@@ -23,6 +22,7 @@ struct ovs_gso_cb {
 };
 #define OVS_GSO_CB(skb) ((struct ovs_gso_cb *)(skb)->cb)
 
+#if LINUX_VERSION_CODE < KERNEL_VERSION(3,12,0)
 #define skb_inner_network_header rpl_skb_inner_network_header
 
 #ifdef NET_SKBUFF_DATA_USES_OFFSET

@@ -234,6 +234,9 @@ static inline __sum16 udp_v4_check(int len, __be32 saddr,
 
 #ifndef HAVE_UDP_SET_CSUM
 static void udp_set_csum(bool nocheck, struct sk_buff *skb,
+                  __be32 saddr, __be32 daddr, int len) __maybe_unused;
+
+static void udp_set_csum(bool nocheck, struct sk_buff *skb,
                   __be32 saddr, __be32 daddr, int len)
 {
         struct udphdr *uh = udp_hdr(skb);
@@ -265,7 +268,6 @@ static void udp_set_csum(bool nocheck, struct sk_buff *skb,
                 skb->ip_summed = CHECKSUM_UNNECESSARY;
         }
 }
-EXPORT_SYMBOL(udp_set_csum);
 
 #endif
 

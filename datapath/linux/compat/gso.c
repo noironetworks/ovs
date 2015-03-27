@@ -17,7 +17,6 @@
  */
 
 #include <linux/version.h>
-#if LINUX_VERSION_CODE < KERNEL_VERSION(3,16,0)
 
 #include <linux/module.h>
 #include <linux/if.h>
@@ -32,14 +31,18 @@
 #include <linux/skbuff.h>
 #include <linux/spinlock.h>
 
+#if LINUX_VERSION_CODE < KERNEL_VERSION(3,16,0)
 #include <net/gre.h>
 #include <net/icmp.h>
 #include <net/mpls.h>
 #include <net/protocol.h>
 #include <net/route.h>
 #include <net/xfrm.h>
+#endif
 
 #include "gso.h"
+
+#if LINUX_VERSION_CODE < KERNEL_VERSION(3,16,0)
 #include "vlan.h"
 
 #if LINUX_VERSION_CODE < KERNEL_VERSION(2,6,37) && \
@@ -293,6 +296,7 @@ int rpl_ip_local_out(struct sk_buff *skb)
 	}
 	return ret;
 }
+#endif /* 3.16 */
 
 struct sk_buff *ovs_iptunnel_handle_offloads(struct sk_buff *skb,
                                              bool csum_help,
@@ -343,4 +347,3 @@ error:
 	return ERR_PTR(err);
 }
 
-#endif /* 3.16 */
