@@ -42,7 +42,16 @@ You do not need to be the superuser to build the Debian packages.
    properly, dpkg-checkbuilddeps will exit without printing anything.
    If you forgot to install some dependencies, it will tell you which ones.
 
-4. Run:
+4. If you intend to install other applications that require Openvswitch
+   shared libraries, then set environment variable WITH_LIB_PACKAGE, e.g.
+       export WITH_LIB_PACKAGE=1
+   This will create additional packages (openvswitch-lib and
+   openvswitch-lib-dev) that contain Openvswitch shared libraries and
+   development files respectively. Note that with this option all OVS
+   binaries/utilities will use shared libraries instead of linking
+   against them statically.
+
+5. Run:
 
        `fakeroot debian/rules binary`
 
@@ -56,7 +65,7 @@ You do not need to be the superuser to build the Debian packages.
 
        `DEB_BUILD_OPTIONS='parallel=8 nocheck' fakeroot debian/rules binary`
 
-5. The generated .deb files will be in the parent directory of the
+6. The generated .deb files will be in the parent directory of the
    Open vSwitch source distribution.
 
 

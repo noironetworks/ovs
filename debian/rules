@@ -29,6 +29,16 @@ else
 CFLAGS += -O2
 endif
 
+ENABLE_SHARED =
+INSTALL_LIB_DIR =
+EXCLUDE_LIB_PKG = --no-package=openvswitch-lib --no-package=openvswitch-lib-dev
+ifneq (,$(WITH_LIB_PACKAGE))
+ENABLE_SHARED = --enable-shared
+EXCLUDE_LIB_PKG =
+DEB_HOST_MULTIARCH ?= $(shell dpkg-architecture -qDEB_HOST_MULTIARCH)
+INSTALL_LIB_DIR = --libdir=\$${prefix}/lib/$(DEB_HOST_MULTIARCH)
+endif
+
 # Old versions of dpkg-buildflags do not understand --export=configure.
 # When dpkg-buildflags does not understand an option, it prints its full
 # --help output on stdout, so we have to avoid that here.
@@ -52,6 +62,7 @@ configure-stamp:
 	cd _debian && ( \
 		test -e Makefile || \
 		../configure --prefix=/usr --localstatedir=/var --enable-ssl \
+			$(INSTALL_LIB_DIR) $(ENABLE_SHARED) \
 			--sysconfdir=/etc --host=$(DEB_HOST_GNU_TYPE) CFLAGS="$(CFLAGS)" \
 			$(buildflags) $(DATAPATH_CONFIGURE_OPTS))
 	touch configure-stamp
@@ -123,8 +134,10 @@ install-arch: build-arch
 	dh_prep -s
 	dh_installdirs -s
 	$(MAKE) -C _debian DESTDIR=$(CURDIR)/debian/tmp install
+	# Temporary install of headers for library until headers are reorganized
+	find lib ofproto -name "*.h" -exec cp --parents -t $(CURDIR)/debian/tmp/usr/include/openvswitch/ {} \;
 	cp debian/openvswitch-switch.template debian/openvswitch-switch/usr/share/openvswitch/switch/default.template
-	dh_install -s
+	dh_install -s $(EXCLUDE_LIB_PKG)
 	dh_link -s
 
 # Must not depend on anything. This is to be called by
@@ -148,11 +161,11 @@ binary-common:
 	dh_python2
 	dh_perl
 	dh_makeshlibs
-	dh_installdeb
+	dh_installdeb $(EXCLUDE_LIB_PKG)
 	dh_shlibdeps
-	dh_gencontrol
+	dh_gencontrol $(EXCLUDE_LIB_PKG)
 	dh_md5sums
-	dh_builddeb
+	dh_builddeb $(EXCLUDE_LIB_PKG)
 binary-indep: install-indep
 	$(MAKE) -f debian/rules DH_OPTIONS=-i binary-common
 binary-arch: install-arch
