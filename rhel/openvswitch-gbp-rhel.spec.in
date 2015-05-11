@@ -33,7 +33,7 @@ Release: %{buildversion}%{?dist}
 Source: http://openvswitch.org/releases/openvswitch-%{version}.tar.gz
 
 BuildRequires: autoconf
-BuildRequires: systemd-units openssl openssl-devel
+BuildRequires: systemd-units openssl openssl-devel python
 
 Requires: openssl iproute module-init-tools
 #Upstream kernel commit 4f647e0a3c37b8d5086214128614a136064110c3

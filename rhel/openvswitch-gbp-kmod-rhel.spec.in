@@ -25,6 +25,7 @@ License: GPLv2
 Release: %{buildversion}%{?dist}
 Source: openvswitch-%{version}.tar.gz
 BuildRequires: %kernel_module_package_buildreqs
+BuildRequires: openssl-devel
 Provides: openvswitch-gbp-kmod
 Obsoletes: openvswitch-kmod
 
