@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2008, 2009, 2010, 2012, 2013, 2015 Nicira, Inc.
+ * Copyright (c) 2008, 2009, 2010, 2012, 2013 Nicira, Inc.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -19,6 +19,7 @@
 
 #include <stdbool.h>
 #include <stdlib.h>
+#include "ovs-atomic.h"
 #include "util.h"
 
 #ifdef  __cplusplus
@@ -67,12 +68,6 @@ struct hmap {
 /* Initializer for an empty hash map. */
 #define HMAP_INITIALIZER(HMAP) \
     { (struct hmap_node **const) &(HMAP)->one, NULL, 0, 0 }
-
-/* Initializer for an immutable struct hmap 'HMAP' that contains a single
- * 'NODE'. */
-#define HMAP_CONST1(HMAP, NODE) {                                   \
-        CONST_CAST(struct hmap_node **, &(HMAP)->one), NODE, 0, 1 }
-#define HMAP_NODE_INIT(HASH) { HASH, NULL }
 
 /* Initialization. */
 void hmap_init(struct hmap *);
@@ -129,19 +124,15 @@ struct hmap_node *hmap_random_node(const struct hmap *);
  * iteration).
  *
  * HASH is only evaluated once.
- *
- * When the loop terminates normally, meaning the iteration has completed
- * without using 'break', NODE will be NULL.  This is true for all of the
- * HMAP_FOR_EACH_*() macros.
  */
 #define HMAP_FOR_EACH_WITH_HASH(NODE, MEMBER, HASH, HMAP)               \
     for (INIT_CONTAINER(NODE, hmap_first_with_hash(HMAP, HASH), MEMBER); \
-         (NODE != OBJECT_CONTAINING(NULL, NODE, MEMBER)) || (NODE = NULL); \
+         NODE != OBJECT_CONTAINING(NULL, NODE, MEMBER);                  \
          ASSIGN_CONTAINER(NODE, hmap_next_with_hash(&(NODE)->MEMBER),   \
                           MEMBER))
 #define HMAP_FOR_EACH_IN_BUCKET(NODE, MEMBER, HASH, HMAP)               \
     for (INIT_CONTAINER(NODE, hmap_first_in_bucket(HMAP, HASH), MEMBER); \
-         (NODE != OBJECT_CONTAINING(NULL, NODE, MEMBER)) || (NODE = NULL); \
+         NODE != OBJECT_CONTAINING(NULL, NODE, MEMBER);                  \
          ASSIGN_CONTAINER(NODE, hmap_next_in_bucket(&(NODE)->MEMBER), MEMBER))
 
 static inline struct hmap_node *hmap_first_with_hash(const struct hmap *,
@@ -158,14 +149,14 @@ bool hmap_contains(const struct hmap *, const struct hmap_node *);
 /* Iterates through every node in HMAP. */
 #define HMAP_FOR_EACH(NODE, MEMBER, HMAP)                               \
     for (INIT_CONTAINER(NODE, hmap_first(HMAP), MEMBER);                \
-         (NODE != OBJECT_CONTAINING(NULL, NODE, MEMBER)) || (NODE = NULL); \
+         NODE != OBJECT_CONTAINING(NULL, NODE, MEMBER);                  \
          ASSIGN_CONTAINER(NODE, hmap_next(HMAP, &(NODE)->MEMBER), MEMBER))
 
 /* Safe when NODE may be freed (not needed when NODE may be removed from the
  * hash map but its members remain accessible and intact). */
 #define HMAP_FOR_EACH_SAFE(NODE, NEXT, MEMBER, HMAP)                    \
     for (INIT_CONTAINER(NODE, hmap_first(HMAP), MEMBER);                \
-         ((NODE != OBJECT_CONTAINING(NULL, NODE, MEMBER)) || (NODE = NULL) \
+         (NODE != OBJECT_CONTAINING(NULL, NODE, MEMBER)                  \
           ? INIT_CONTAINER(NEXT, hmap_next(HMAP, &(NODE)->MEMBER), MEMBER), 1 \
           : 0);                                                         \
          (NODE) = (NEXT))
@@ -173,7 +164,7 @@ bool hmap_contains(const struct hmap *, const struct hmap_node *);
 /* Continues an iteration from just after NODE. */
 #define HMAP_FOR_EACH_CONTINUE(NODE, MEMBER, HMAP)                      \
     for (ASSIGN_CONTAINER(NODE, hmap_next(HMAP, &(NODE)->MEMBER), MEMBER); \
-         (NODE != OBJECT_CONTAINING(NULL, NODE, MEMBER)) || (NODE = NULL); \
+         NODE != OBJECT_CONTAINING(NULL, NODE, MEMBER);                  \
          ASSIGN_CONTAINER(NODE, hmap_next(HMAP, &(NODE)->MEMBER), MEMBER))
 
 static inline struct hmap_node *hmap_first(const struct hmap *);

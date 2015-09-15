@@ -27,10 +27,7 @@ In particular:
 
 Testing is also important:
 
-  - A patch that modifies existing code should be tested with
-    `make check` before submission.
-
-  - A patch that adds or deletes files should also be tested with
+  - A patch that adds or deletes files should be tested with
     `make distcheck` before submission.
 
   - A patch that modifies Linux kernel code should be at least
@@ -156,17 +153,6 @@ Examples of common tags follow.
         actually provide the tag; usually the patch submitter makes
         the tag himself in response to an email indicating successful
         testing results.
-
-    Tested-at: <URL>
-
-        When a test report is publicly available, this provides a way
-        to reference it.  Typical <URL>s would be build logs from
-        autobuilders or references to mailing list archives.
-
-        Some autobuilders only retain their logs for a limited amount
-        of time.  It is less useful to cite these because they may be
-        dead links for a developer reading the commit message months
-        or years later.
 
     Reported-by: Reporter Name <reporter.name@email.address...>
 

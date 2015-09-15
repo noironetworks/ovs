@@ -245,14 +245,9 @@ coverage_read(struct svec *lines)
 
 /* Runs approximately every COVERAGE_CLEAR_INTERVAL amount of time to
  * synchronize per-thread counters with global counters. Every thread maintains
- * a separate timer to ensure all counters are periodically aggregated.
- *
- * Uses 'ovs_mutex_trylock()' if 'trylock' is true.  This is to prevent
- * multiple performance-critical threads contending over the 'coverage_mutex'.
- *
- * */
-static void
-coverage_clear__(bool trylock)
+ * a separate timer to ensure all counters are periodically aggregated. */
+void
+coverage_clear(void)
 {
     long long int now, *thread_time;
 
@@ -267,15 +262,7 @@ coverage_clear__(bool trylock)
     if (now >= *thread_time) {
         size_t i;
 
-        if (trylock) {
-            /* Returns if cannot acquire lock. */
-            if (ovs_mutex_trylock(&coverage_mutex)) {
-                return;
-            }
-        } else {
-            ovs_mutex_lock(&coverage_mutex);
-        }
-
+        ovs_mutex_lock(&coverage_mutex);
         for (i = 0; i < n_coverage_counters; i++) {
             struct coverage_counter *c = coverage_counters[i];
             c->total += c->count();
@@ -283,18 +270,6 @@ coverage_clear__(bool trylock)
         ovs_mutex_unlock(&coverage_mutex);
         *thread_time = now + COVERAGE_CLEAR_INTERVAL;
     }
-}
-
-void
-coverage_clear(void)
-{
-    coverage_clear__(false);
-}
-
-void
-coverage_try_clear(void)
-{
-    coverage_clear__(true);
 }
 
 /* Runs approximately every COVERAGE_RUN_INTERVAL amount of time to update the

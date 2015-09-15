@@ -23,13 +23,12 @@
 #include "flow.h"
 #include "mac-learning.h"
 #include "odp-util.h"
-#include "ofpbuf.h"
 #include "ofp-actions.h"
 #include "ofp-util.h"
+#include "ofpbuf.h"
 #include "ofproto.h"
 #include "ofproto-provider.h"
 #include "pktbuf.h"
-#include "dp-packet.h"
 #include "poll-loop.h"
 #include "rconn.h"
 #include "timeval.h"
@@ -119,24 +118,23 @@ static void
 send_bogus_packet_ins(struct fail_open *fo)
 {
     struct ofproto_packet_in pin;
-    struct eth_addr mac;
-    struct dp_packet b;
+    uint8_t mac[ETH_ADDR_LEN];
+    struct ofpbuf b;
 
-    dp_packet_init(&b, 128);
-    eth_addr_nicira_random(&mac);
+    ofpbuf_init(&b, 128);
+    eth_addr_nicira_random(mac);
     compose_rarp(&b, mac);
 
     memset(&pin, 0, sizeof pin);
-    pin.up.packet = dp_packet_data(&b);
-    pin.up.packet_len = dp_packet_size(&b);
+    pin.up.packet = ofpbuf_data(&b);
+    pin.up.packet_len = ofpbuf_size(&b);
     pin.up.reason = OFPR_NO_MATCH;
-    match_init_catchall(&pin.up.flow_metadata);
-    match_set_in_port(&pin.up.flow_metadata, OFPP_LOCAL);
-    pin.send_len = dp_packet_size(&b);
+    pin.up.fmd.in_port = OFPP_LOCAL;
+    pin.send_len = ofpbuf_size(&b);
     pin.miss_type = OFPROTO_PACKET_IN_NO_MISS;
     connmgr_send_packet_in(fo->connmgr, &pin);
 
-    dp_packet_uninit(&b);
+    ofpbuf_uninit(&b);
 }
 
 /* Enter fail-open mode if we should be in it. */
@@ -233,7 +231,7 @@ fail_open_flushed(struct fail_open *fo)
 
         match_init_catchall(&match);
         ofproto_add_flow(fo->ofproto, &match, FAIL_OPEN_PRIORITY,
-                         ofpacts.data, ofpacts.size);
+                         ofpbuf_data(&ofpacts), ofpbuf_size(&ofpacts));
 
         ofpbuf_uninit(&ofpacts);
     }

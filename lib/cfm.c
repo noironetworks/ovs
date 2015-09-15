@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2010, 2011, 2012, 2013, 2014, 2015 Nicira, Inc.
+ * Copyright (c) 2010, 2011, 2012, 2013, 2014 Nicira, Inc.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -23,13 +23,12 @@
 
 #include "byte-order.h"
 #include "connectivity.h"
-#include "dp-packet.h"
 #include "dynamic-string.h"
 #include "flow.h"
 #include "hash.h"
 #include "hmap.h"
 #include "netdev.h"
-#include "ovs-atomic.h"
+#include "ofpbuf.h"
 #include "packets.h"
 #include "poll-loop.h"
 #include "random.h"
@@ -44,10 +43,11 @@ VLOG_DEFINE_THIS_MODULE(cfm);
 #define CFM_MAX_RMPS 256
 
 /* Ethernet destination address of CCM packets. */
-static const struct eth_addr eth_addr_ccm = {
-    { { 0x01, 0x80, 0xC2, 0x00, 0x00, 0x30 } } };
-static const struct eth_addr eth_addr_ccm_x = {
-    { { 0x01, 0x23, 0x20, 0x00, 0x00, 0x30 } } };
+static const uint8_t eth_addr_ccm[ETH_ADDR_LEN] = {
+    0x01, 0x80, 0xC2, 0x00, 0x00, 0x30 };
+static const uint8_t eth_addr_ccm_x[ETH_ADDR_LEN] = {
+    0x01, 0x23, 0x20, 0x00, 0x00, 0x30
+};
 
 #define ETH_TYPE_CFM 0x8902
 
@@ -184,7 +184,7 @@ cfm_rx_packets(const struct cfm *cfm) OVS_REQUIRES(mutex)
     }
 }
 
-static struct eth_addr
+static const uint8_t *
 cfm_ccm_addr(struct cfm *cfm)
 {
     bool extended;
@@ -563,8 +563,8 @@ cfm_should_send_ccm(struct cfm *cfm) OVS_EXCLUDED(mutex)
 /* Composes a CCM message into 'packet'.  Messages generated with this function
  * should be sent whenever cfm_should_send_ccm() indicates. */
 void
-cfm_compose_ccm(struct cfm *cfm, struct dp_packet *packet,
-                const struct eth_addr eth_src) OVS_EXCLUDED(mutex)
+cfm_compose_ccm(struct cfm *cfm, struct ofpbuf *packet,
+                uint8_t eth_src[ETH_ADDR_LEN]) OVS_EXCLUDED(mutex)
 {
     uint16_t ccm_vlan;
     struct ccm *ccm;
@@ -586,7 +586,7 @@ cfm_compose_ccm(struct cfm *cfm, struct dp_packet *packet,
 
     atomic_read_relaxed(&cfm->extended, &extended);
 
-    ccm = dp_packet_l3(packet);
+    ccm = ofpbuf_l3(packet);
     ccm->mdlevel_version = 0;
     ccm->opcode = CCM_OPCODE;
     ccm->tlv_offset = 70;
@@ -629,12 +629,10 @@ cfm_compose_ccm(struct cfm *cfm, struct dp_packet *packet,
     ovs_mutex_unlock(&mutex);
 }
 
-long long int
+void
 cfm_wait(struct cfm *cfm) OVS_EXCLUDED(mutex)
 {
-    long long int wake_time = cfm_wake_time(cfm);
-    poll_timer_wait_until(wake_time);
-    return wake_time;
+    poll_timer_wait_until(cfm_wake_time(cfm));
 }
 
 
@@ -749,7 +747,7 @@ cfm_should_process_flow(const struct cfm *cfm_, const struct flow *flow,
  * every packet whose flow returned true when passed to
  * cfm_should_process_flow. */
 void
-cfm_process_heartbeat(struct cfm *cfm, const struct dp_packet *p)
+cfm_process_heartbeat(struct cfm *cfm, const struct ofpbuf *p)
     OVS_EXCLUDED(mutex)
 {
     struct ccm *ccm;
@@ -760,8 +758,8 @@ cfm_process_heartbeat(struct cfm *cfm, const struct dp_packet *p)
 
     atomic_read_relaxed(&cfm->extended, &extended);
 
-    eth = dp_packet_l2(p);
-    ccm = dp_packet_at(p, (uint8_t *)dp_packet_l3(p) - (uint8_t *)dp_packet_data(p),
+    eth = ofpbuf_l2(p);
+    ccm = ofpbuf_at(p, (uint8_t *)ofpbuf_l3(p) - (uint8_t *)ofpbuf_data(p),
                     CCM_ACCEPT_LEN);
 
     if (!ccm) {

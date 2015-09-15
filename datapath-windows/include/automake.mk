@@ -1,6 +1,4 @@
-if WIN32
 BUILT_SOURCES += $(srcdir)/datapath-windows/include/OvsDpInterface.h
-endif
 
 $(srcdir)/datapath-windows/include/OvsDpInterface.h: \
          datapath/linux/compat/include/linux/openvswitch.h \

@@ -1,4 +1,4 @@
-/* Copyright (c) 2009, 2010, 2011, 2012, 2013, 2014, 2015 Nicira, Inc.
+/* Copyright (c) 2009, 2010, 2011, 2012, 2013, 2014 Nicira, Inc.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -22,10 +22,6 @@
  * requests to an OVSDB database server and parses the responses, converting
  * raw JSON into data structures that are easier for clients to digest.  Most
  * notably, references to rows via UUID become C pointers.
- *
- * The IDL always presents a consistent snapshot of the database to its client,
- * that is, it won't present the effects of some part of a transaction applied
- * at the database server without presenting all of its effects.
  *
  * The IDL also assists with issuing database transactions.  The client creates
  * a transaction, manipulates the IDL data structures, and commits or aborts
@@ -222,25 +218,5 @@ const struct ovsdb_idl_row *ovsdb_idl_txn_insert(
     const struct uuid *);
 
 struct ovsdb_idl *ovsdb_idl_txn_get_idl (struct ovsdb_idl_txn *);
-void ovsdb_idl_get_initial_snapshot(struct ovsdb_idl *);
-
-
-/* ovsdb_idl_loop provides an easy way to manage the transactions related
- * to 'idl' and to cope with different status during transaction. */
-struct ovsdb_idl_loop {
-    struct ovsdb_idl *idl;
-    unsigned int skip_seqno;
-
-    struct ovsdb_idl_txn *committing_txn;
-    unsigned int precommit_seqno;
-
-    struct ovsdb_idl_txn *open_txn;
-};
-
-#define OVSDB_IDL_LOOP_INITIALIZER(IDL) { .idl = (IDL) }
-
-void ovsdb_idl_loop_destroy(struct ovsdb_idl_loop *);
-struct ovsdb_idl_txn *ovsdb_idl_loop_run(struct ovsdb_idl_loop *);
-void ovsdb_idl_loop_commit_and_wait(struct ovsdb_idl_loop *);
 
 #endif /* ovsdb-idl.h */

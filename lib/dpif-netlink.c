@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2008, 2009, 2010, 2011, 2012, 2013, 2014, 2015 Nicira, Inc.
+ * Copyright (c) 2008, 2009, 2010, 2011, 2012, 2013, 2014 Nicira, Inc.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -645,7 +645,6 @@ destroy_all_channels(struct dpif_netlink *dpif)
         vport_request.cmd = OVS_VPORT_CMD_SET;
         vport_request.dp_ifindex = dpif->dp_ifindex;
         vport_request.port_no = u32_to_odp(i);
-        vport_request.n_upcall_pids = 1;
         vport_request.upcall_pids = &upcall_pids;
         dpif_netlink_vport_transact(&vport_request, NULL, NULL);
 
@@ -759,14 +758,14 @@ get_vport_type(const struct dpif_netlink_vport *vport)
     case OVS_VPORT_TYPE_GRE:
         return "gre";
 
+    case OVS_VPORT_TYPE_GRE64:
+        return "gre64";
+
     case OVS_VPORT_TYPE_VXLAN:
         return "vxlan";
 
     case OVS_VPORT_TYPE_LISP:
         return "lisp";
-
-    case OVS_VPORT_TYPE_STT:
-        return "stt";
 
     case OVS_VPORT_TYPE_UNSPEC:
     case __OVS_VPORT_TYPE_MAX:
@@ -787,10 +786,10 @@ netdev_to_ovs_vport_type(const struct netdev *netdev)
         return OVS_VPORT_TYPE_NETDEV;
     } else if (!strcmp(type, "internal")) {
         return OVS_VPORT_TYPE_INTERNAL;
-    } else if (strstr(type, "stt")) {
-        return OVS_VPORT_TYPE_STT;
     } else if (!strcmp(type, "geneve")) {
         return OVS_VPORT_TYPE_GENEVE;
+    } else if (strstr(type, "gre64")) {
+        return OVS_VPORT_TYPE_GRE64;
     } else if (strstr(type, "gre")) {
         return OVS_VPORT_TYPE_GRE;
     } else if (!strcmp(type, "vxlan")) {
@@ -849,26 +848,12 @@ dpif_netlink_port_add__(struct dpif_netlink *dpif, struct netdev *netdev,
     }
 
     tnl_cfg = netdev_get_tunnel_config(netdev);
-    if (tnl_cfg && (tnl_cfg->dst_port != 0 || tnl_cfg->exts)) {
+    if (tnl_cfg && tnl_cfg->dst_port != 0) {
         ofpbuf_use_stack(&options, options_stub, sizeof options_stub);
-        if (tnl_cfg->dst_port) {
-            nl_msg_put_u16(&options, OVS_TUNNEL_ATTR_DST_PORT,
-                           ntohs(tnl_cfg->dst_port));
-        }
-        if (tnl_cfg->exts) {
-            size_t ext_ofs;
-            int i;
-
-            ext_ofs = nl_msg_start_nested(&options, OVS_TUNNEL_ATTR_EXTENSION);
-            for (i = 0; i < 32; i++) {
-                if (tnl_cfg->exts & (1 << i)) {
-                    nl_msg_put_flag(&options, i);
-                }
-            }
-            nl_msg_end_nested(&options, ext_ofs);
-        }
-        request.options = options.data;
-        request.options_len = options.size;
+        nl_msg_put_u16(&options, OVS_TUNNEL_ATTR_DST_PORT,
+                       ntohs(tnl_cfg->dst_port));
+        request.options = ofpbuf_data(&options);
+        request.options_len = ofpbuf_size(&options);
     }
 
     request.port_no = *port_nop;
@@ -1335,8 +1320,8 @@ dpif_netlink_init_flow_del(struct dpif_netlink *dpif,
                            const struct dpif_flow_del *del,
                            struct dpif_netlink_flow *request)
 {
-    dpif_netlink_init_flow_del__(dpif, del->key, del->key_len,
-                                 del->ufid, del->terse, request);
+    return dpif_netlink_init_flow_del__(dpif, del->key, del->key_len,
+                                        del->ufid, del->terse, request);
 }
 
 struct dpif_netlink_flow_dump {
@@ -1443,9 +1428,9 @@ dpif_netlink_flow_to_dpif_flow(struct dpif *dpif, struct dpif_flow *dpif_flow,
     dpif_flow->actions = datapath_flow->actions;
     dpif_flow->actions_len = datapath_flow->actions_len;
     dpif_flow->ufid_present = datapath_flow->ufid_present;
-    dpif_flow->pmd_id = PMD_ID_NULL;
     if (datapath_flow->ufid_present) {
         dpif_flow->ufid = datapath_flow->ufid;
+    dpif_flow->pmd_id = PMD_ID_NULL;
     } else {
         ovs_assert(datapath_flow->key && datapath_flow->key_len);
         dpif_flow_hash(dpif, datapath_flow->key, datapath_flow->key_len,
@@ -1469,7 +1454,7 @@ dpif_netlink_flow_dump_next(struct dpif_flow_dump_thread *thread_,
 
     n_flows = 0;
     while (!n_flows
-           || (n_flows < max_flows && thread->nl_flows.size)) {
+           || (n_flows < max_flows && ofpbuf_size(&thread->nl_flows))) {
         struct dpif_netlink_flow datapath_flow;
         struct ofpbuf nl_flow;
         int error;
@@ -1524,7 +1509,7 @@ dpif_netlink_encode_execute(int dp_ifindex, const struct dpif_execute *d_exec,
     size_t key_ofs;
 
     ofpbuf_prealloc_tailroom(buf, (64
-                                   + dp_packet_size(d_exec->packet)
+                                   + ofpbuf_size(d_exec->packet)
                                    + ODP_KEY_METADATA_SIZE
                                    + d_exec->actions_len));
 
@@ -1535,29 +1520,26 @@ dpif_netlink_encode_execute(int dp_ifindex, const struct dpif_execute *d_exec,
     k_exec->dp_ifindex = dp_ifindex;
 
     nl_msg_put_unspec(buf, OVS_PACKET_ATTR_PACKET,
-                      dp_packet_data(d_exec->packet),
-                      dp_packet_size(d_exec->packet));
+                      ofpbuf_data(d_exec->packet),
+                      ofpbuf_size(d_exec->packet));
 
     key_ofs = nl_msg_start_nested(buf, OVS_PACKET_ATTR_KEY);
-    odp_key_from_pkt_metadata(buf, &d_exec->packet->md);
+    odp_key_from_pkt_metadata(buf, &d_exec->md);
     nl_msg_end_nested(buf, key_ofs);
 
     nl_msg_put_unspec(buf, OVS_PACKET_ATTR_ACTIONS,
                       d_exec->actions, d_exec->actions_len);
     if (d_exec->probe) {
-        nl_msg_put_flag(buf, OVS_PACKET_ATTR_PROBE);
+        nl_msg_put_flag(buf, OVS_FLOW_ATTR_PROBE);
     }
 }
 
-/* Executes, against 'dpif', up to the first 'n_ops' operations in 'ops'.
- * Returns the number actually executed (at least 1, if 'n_ops' is
- * positive). */
-static size_t
+#define MAX_OPS 50
+
+static void
 dpif_netlink_operate__(struct dpif_netlink *dpif,
                        struct dpif_op **ops, size_t n_ops)
 {
-    enum { MAX_OPS = 50 };
-
     struct op_auxdata {
         struct nl_transaction txn;
 
@@ -1571,12 +1553,13 @@ dpif_netlink_operate__(struct dpif_netlink *dpif,
     struct nl_transaction *txnsp[MAX_OPS];
     size_t i;
 
-    n_ops = MIN(n_ops, MAX_OPS);
+    ovs_assert(n_ops <= MAX_OPS);
     for (i = 0; i < n_ops; i++) {
         struct op_auxdata *aux = &auxes[i];
         struct dpif_op *op = ops[i];
         struct dpif_flow_put *put;
         struct dpif_flow_del *del;
+        struct dpif_execute *execute;
         struct dpif_flow_get *get;
         struct dpif_netlink_flow flow;
 
@@ -1609,24 +1592,9 @@ dpif_netlink_operate__(struct dpif_netlink *dpif,
             break;
 
         case DPIF_OP_EXECUTE:
-            /* Can't execute a packet that won't fit in a Netlink attribute. */
-            if (OVS_UNLIKELY(nl_attr_oversized(
-                                 dp_packet_size(op->u.execute.packet)))) {
-                /* Report an error immediately if this is the first operation.
-                 * Otherwise the easiest thing to do is to postpone to the next
-                 * call (when this will be the first operation). */
-                if (i == 0) {
-                    VLOG_ERR_RL(&error_rl,
-                                "dropping oversized %"PRIu32"-byte packet",
-                                dp_packet_size(op->u.execute.packet));
-                    op->error = ENOBUFS;
-                    return 1;
-                }
-                n_ops = i;
-            } else {
-                dpif_netlink_encode_execute(dpif->dp_ifindex, &op->u.execute,
-                                            &aux->request);
-            }
+            execute = &op->u.execute;
+            dpif_netlink_encode_execute(dpif->dp_ifindex, execute,
+                                        &aux->request);
             break;
 
         case DPIF_OP_FLOW_GET:
@@ -1710,8 +1678,6 @@ dpif_netlink_operate__(struct dpif_netlink *dpif,
         ofpbuf_uninit(&aux->request);
         ofpbuf_uninit(&aux->reply);
     }
-
-    return n_ops;
 }
 
 static void
@@ -1720,7 +1686,8 @@ dpif_netlink_operate(struct dpif *dpif_, struct dpif_op **ops, size_t n_ops)
     struct dpif_netlink *dpif = dpif_netlink_cast(dpif_);
 
     while (n_ops > 0) {
-        size_t chunk = dpif_netlink_operate__(dpif, ops, n_ops);
+        size_t chunk = MIN(n_ops, MAX_OPS);
+        dpif_netlink_operate__(dpif, ops, chunk);
         ops += chunk;
         n_ops -= chunk;
     }
@@ -1964,7 +1931,6 @@ parse_odp_packet(const struct dpif_netlink *dpif, struct ofpbuf *buf,
         /* OVS_PACKET_CMD_ACTION only. */
         [OVS_PACKET_ATTR_USERDATA] = { .type = NL_A_UNSPEC, .optional = true },
         [OVS_PACKET_ATTR_EGRESS_TUN_KEY] = { .type = NL_A_NESTED, .optional = true },
-        [OVS_PACKET_ATTR_ACTIONS] = { .type = NL_A_NESTED, .optional = true },
     };
 
     struct ovs_header *ovs_header;
@@ -1974,7 +1940,7 @@ parse_odp_packet(const struct dpif_netlink *dpif, struct ofpbuf *buf,
     struct ofpbuf b;
     int type;
 
-    ofpbuf_use_const(&b, buf->data, buf->size);
+    ofpbuf_use_const(&b, ofpbuf_data(buf), ofpbuf_size(buf));
 
     nlmsg = ofpbuf_try_pull(&b, sizeof *nlmsg);
     genl = ofpbuf_try_pull(&b, sizeof *genl);
@@ -2001,17 +1967,16 @@ parse_odp_packet(const struct dpif_netlink *dpif, struct ofpbuf *buf,
     dpif_flow_hash(&dpif->dpif, upcall->key, upcall->key_len, &upcall->ufid);
     upcall->userdata = a[OVS_PACKET_ATTR_USERDATA];
     upcall->out_tun_key = a[OVS_PACKET_ATTR_EGRESS_TUN_KEY];
-    upcall->actions = a[OVS_PACKET_ATTR_ACTIONS];
 
     /* Allow overwriting the netlink attribute header without reallocating. */
-    dp_packet_use_stub(&upcall->packet,
+    ofpbuf_use_stub(&upcall->packet,
                     CONST_CAST(struct nlattr *,
                                nl_attr_get(a[OVS_PACKET_ATTR_PACKET])) - 1,
                     nl_attr_get_size(a[OVS_PACKET_ATTR_PACKET]) +
                     sizeof(struct nlattr));
-    dp_packet_set_data(&upcall->packet,
-                    (char *)dp_packet_data(&upcall->packet) + sizeof(struct nlattr));
-    dp_packet_set_size(&upcall->packet, nl_attr_get_size(a[OVS_PACKET_ATTR_PACKET]));
+    ofpbuf_set_data(&upcall->packet,
+                    (char *)ofpbuf_data(&upcall->packet) + sizeof(struct nlattr));
+    ofpbuf_set_size(&upcall->packet, nl_attr_get_size(a[OVS_PACKET_ATTR_PACKET]));
 
     *dp_ifindex = ovs_header->dp_ifindex;
 
@@ -2276,7 +2241,6 @@ dpif_netlink_get_datapath_version(void)
 
 const struct dpif_class dpif_netlink_class = {
     "system",
-    NULL,                       /* init */
     dpif_netlink_enumerate,
     NULL,
     dpif_netlink_open,
@@ -2309,7 +2273,6 @@ const struct dpif_class dpif_netlink_class = {
     dpif_netlink_recv,
     dpif_netlink_recv_wait,
     dpif_netlink_recv_purge,
-    NULL,                       /* register_dp_purge_cb */
     NULL,                       /* register_upcall_cb */
     NULL,                       /* enable_upcall */
     NULL,                       /* disable_upcall */
@@ -2397,7 +2360,7 @@ dpif_netlink_vport_from_ofpbuf(struct dpif_netlink_vport *vport,
 
     dpif_netlink_vport_init(vport);
 
-    ofpbuf_use_const(&b, buf->data, buf->size);
+    ofpbuf_use_const(&b, ofpbuf_data(buf), ofpbuf_size(buf));
     nlmsg = ofpbuf_try_pull(&b, sizeof *nlmsg);
     genl = ofpbuf_try_pull(&b, sizeof *genl);
     ovs_header = ofpbuf_try_pull(&b, sizeof *ovs_header);
@@ -2565,7 +2528,7 @@ dpif_netlink_dp_from_ofpbuf(struct dpif_netlink_dp *dp, const struct ofpbuf *buf
 
     dpif_netlink_dp_init(dp);
 
-    ofpbuf_use_const(&b, buf->data, buf->size);
+    ofpbuf_use_const(&b, ofpbuf_data(buf), ofpbuf_size(buf));
     nlmsg = ofpbuf_try_pull(&b, sizeof *nlmsg);
     genl = ofpbuf_try_pull(&b, sizeof *genl);
     ovs_header = ofpbuf_try_pull(&b, sizeof *ovs_header);
@@ -2723,7 +2686,7 @@ dpif_netlink_flow_from_ofpbuf(struct dpif_netlink_flow *flow,
 
     dpif_netlink_flow_init(flow);
 
-    ofpbuf_use_const(&b, buf->data, buf->size);
+    ofpbuf_use_const(&b, ofpbuf_data(buf), ofpbuf_size(buf));
     nlmsg = ofpbuf_try_pull(&b, sizeof *nlmsg);
     genl = ofpbuf_try_pull(&b, sizeof *genl);
     ovs_header = ofpbuf_try_pull(&b, sizeof *ovs_header);

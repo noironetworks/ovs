@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2009, 2010, 2011, 2012, 2013, 2014, 2015 Nicira, Inc.
+ * Copyright (c) 2009, 2010, 2011, 2012, 2013, 2014 Nicira, Inc.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -46,12 +46,6 @@ struct ofport;
 struct ofproto;
 struct shash;
 struct simap;
-struct smap;
-struct netdev_stats;
-struct ovs_list;
-struct lldp_status;
-struct aa_settings;
-struct aa_mapping_settings;
 
 /* Needed for the lock annotations. */
 extern struct ovs_mutex ofproto_mutex;
@@ -188,11 +182,6 @@ struct ofproto_mcast_snooping_settings {
     unsigned int max_entries;   /* Size of the multicast snooping table. */
 };
 
-struct ofproto_mcast_snooping_port_settings {
-    bool flood;                 /* If true, flood multicast traffic */
-    bool flood_reports;         /* If true, flood Reports traffic */
-};
-
 /* How the switch should act if the controller cannot be contacted. */
 enum ofproto_fail_mode {
     OFPROTO_FAIL_SECURE,        /* Preserve flow table. */
@@ -314,7 +303,7 @@ void ofproto_set_mac_table_config(struct ofproto *, unsigned idle_time,
 int ofproto_set_mcast_snooping(struct ofproto *ofproto,
                               const struct ofproto_mcast_snooping_settings *s);
 int ofproto_port_set_mcast_snooping(struct ofproto *ofproto, void *aux,
-                          const struct ofproto_mcast_snooping_port_settings *s);
+                                    bool flood);
 void ofproto_set_threads(int n_handlers, int n_revalidators);
 void ofproto_set_n_dpdk_rxqs(int n_rxqs);
 void ofproto_set_cpu_mask(const char *cmask);
@@ -441,16 +430,6 @@ int ofproto_mirror_unregister(struct ofproto *, void *aux);
 int ofproto_mirror_get_stats(struct ofproto *, void *aux,
                              uint64_t *packets, uint64_t *bytes);
 
-void ofproto_port_set_lldp(struct ofproto *ofproto, ofp_port_t ofp_port,
-                           const struct smap *cfg);
-int ofproto_set_aa(struct ofproto *ofproto, void *aux,
-                   const struct aa_settings *s);
-int ofproto_aa_mapping_register(struct ofproto *ofproto, void *aux,
-                             const struct aa_mapping_settings *s);
-int ofproto_aa_mapping_unregister(struct ofproto *ofproto, void *aux);
-int ofproto_aa_vlan_get_queued(struct ofproto *ofproto, struct ovs_list *list);
-unsigned int ofproto_aa_vlan_get_queue_size(struct ofproto *ofproto);
-
 int ofproto_set_flood_vlans(struct ofproto *, unsigned long *flood_vlans);
 bool ofproto_is_mirror_output_bundle(const struct ofproto *, void *aux);
 
@@ -459,18 +438,14 @@ struct ofproto_table_settings {
     char *name;                 /* Name exported via OpenFlow or NULL. */
     unsigned int max_flows;     /* Maximum number of flows or UINT_MAX. */
 
-    /* These members, together with OpenFlow OFPT_TABLE_MOD, determine the
-     * handling of an attempt to add a flow that would cause the table to have
-     * more than 'max_flows' flows:
+    /* These members determine the handling of an attempt to add a flow that
+     * would cause the table to have more than 'max_flows' flows.
      *
-     *    - If 'enable_eviction' is false and OFPT_TABLE_MOD does not enable
-     *      eviction, overflows will be rejected with an error.
+     * If 'groups' is NULL, overflows will be rejected with an error.
      *
-     *    - If 'enable_eviction' is true or OFPT_TABLE_MOD enables eviction, an
-     *      overflow will cause a flow to be removed.  The flow to be removed
-     *      is chosen to give fairness among groups distinguished by different
-     *      values for the 'n_groups' subfields within 'groups'. */
-    bool enable_eviction;
+     * If 'groups' is nonnull, an overflow will cause a flow to be removed.
+     * The flow to be removed is chosen to give fairness among groups
+     * distinguished by different values for the subfields within 'groups'. */
     struct mf_subfield *groups;
     size_t n_groups;
 

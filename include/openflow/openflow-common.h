@@ -103,7 +103,7 @@ enum ofp_version {
  */
 #define OF_VENDOR_ID    0
 #define HPL_VENDOR_ID   0x000004EA /* HP Labs. */
-#define NTR_VENDOR_ID   0x00001540 /* Netronome. */
+#define NMX_VENDOR_ID   0x00001540 /* Netronome. */
 #define NX_VENDOR_ID    0x00002320 /* Nicira. */
 #define ONF_VENDOR_ID   0x4f4e4600 /* Open Networking Foundation. */
 
@@ -112,6 +112,8 @@ enum ofp_version {
 
 #define OFP_OLD_PORT  6633
 #define OFP_PORT  6653
+
+#define OFP_ETH_ALEN 6          /* Bytes in an Ethernet address. */
 
 #define OFP_DEFAULT_MISS_SEND_LEN   128
 
@@ -299,8 +301,6 @@ enum ofp_flow_removed_reason {
     OFPRR_GROUP_DELETE,         /* Group was removed. */
     OFPRR_METER_DELETE,         /* Meter was removed. */
     OFPRR_EVICTION,             /* Switch eviction to free resources. */
-
-    OVS_OFPRR_NONE              /* OVS internal_use only, keep last!. */
 };
 
 /* What changed about the physical port */

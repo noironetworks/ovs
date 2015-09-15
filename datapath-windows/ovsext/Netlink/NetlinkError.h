@@ -195,16 +195,14 @@ typedef enum _NL_ERROR_
     NL_ERROR_TIMEDOUT = ((ULONG)-138),
     /* The given text file is busy */
     NL_ERROR_TXTBSY = ((ULONG)-139),
-    /* The operation would block */
+    /*the operation would block */
     NL_ERROR_WOULDBLOCK = ((ULONG)-140),
-    /* The operation is not finished */
-    NL_ERROR_PENDING = ((ULONG)-141),
 } NL_ERROR;
 
 static __inline
 NlMapStatusToNlErr(NTSTATUS status)
 {
-    NL_ERROR ret;
+    NL_ERROR ret = NL_ERROR_INVAL;
 
     switch (status)
     {
@@ -217,20 +215,7 @@ NlMapStatusToNlErr(NTSTATUS status)
     case STATUS_SUCCESS:
       ret = NL_ERROR_SUCCESS;
       break;
-    case STATUS_PENDING:
-      ret = NL_ERROR_PENDING;
-      break;
-    case STATUS_CANCELLED:
-      ret = NL_ERROR_CANCELED;
-      break;
-    case STATUS_INVALID_PARAMETER:
-      ret = NL_ERROR_INVAL;
-      break;
-    case STATUS_OBJECT_NAME_EXISTS:
-      ret = NL_ERROR_EXIST;
-      break;
     default:
-      ret = NL_ERROR_OTHER;
       break;
     }
 

@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2008, 2009, 2010, 2011, 2012, 2013, 2014, 2015 Nicira, Inc.
+ * Copyright (c) 2008, 2009, 2010, 2011, 2012, 2013, 2014 Nicira, Inc.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -109,28 +109,7 @@ enum nx_hash_fields {
      *  - NXM_OF_IP_SRC / NXM_OF_IP_DST
      *  - NXM_OF_TCP_SRC / NXM_OF_TCP_DST
      */
-    NX_HASH_FIELDS_SYMMETRIC_L4,
-
-    /* L3+L4 only, including the following fields:
-     *
-     *  - NXM_OF_IP_PROTO
-     *  - NXM_OF_IP_SRC / NXM_OF_IP_DST
-     *  - NXM_OF_SCTP_SRC / NXM_OF_SCTP_DST
-     *  - NXM_OF_TCP_SRC / NXM_OF_TCP_DST
-     */
-    NX_HASH_FIELDS_SYMMETRIC_L3L4,
-
-    /* L3+L4 only with UDP ports, including the following fields:
-     *
-     *  - NXM_OF_IP_PROTO
-     *  - NXM_OF_IP_SRC / NXM_OF_IP_DST
-     *  - NXM_OF_SCTP_SRC / NXM_OF_SCTP_DST
-     *  - NXM_OF_TCP_SRC / NXM_OF_TCP_DST
-     *  - NXM_OF_UDP_SRC / NXM_OF_UDP_DST
-     */
-    NX_HASH_FIELDS_SYMMETRIC_L3L4_UDP
-
-
+    NX_HASH_FIELDS_SYMMETRIC_L4
 };
 
 /* This command enables or disables an Open vSwitch extension that allows a
@@ -499,9 +478,6 @@ OFP_ASSERT(sizeof(struct nx_async_config) == 24);
 /* Bits in the value of NXM_NX_IP_FRAG. */
 #define NX_IP_FRAG_ANY   (1 << 0) /* Is this a fragment? */
 #define NX_IP_FRAG_LATER (1 << 1) /* Is this a fragment with nonzero offset? */
-
-/* Bits in the value of NXM_NX_TUN_FLAGS. */
-#define NX_TUN_FLAG_OAM  (1 << 0) /* Is this an OAM packet? */
 
 /* ## --------------------- ## */
 /* ## Requests and replies. ## */
@@ -923,75 +899,5 @@ struct nx_flow_monitor_cancel {
     ovs_be32 id;                /* 'id' from nx_flow_monitor_request. */
 };
 OFP_ASSERT(sizeof(struct nx_flow_monitor_cancel) == 4);
-
-/* Geneve option table maintenance commands.
- *
- * In order to work with Geneve options, we need to maintain a mapping
- * table between an option (defined by <class, type, length>) and
- * an NXM field that can be operated on for the purposes of matches,
- * actions, etc. This mapping must be explicitly specified by the
- * user.
- *
- * There are two primary groups of OpenFlow messages that are introduced
- * as Nicira extensions: modification commands (add, delete, clear mappings)
- * and table status request/reply to dump the current table along with switch
- * information.
- *
- * Note that mappings should not be changed while they are in active use by
- * a flow. The result of doing so is undefined. */
-
-/* Geneve table commands */
-enum nx_geneve_table_mod_command {
-    NXGTMC_ADD,          /* New mappings (fails if an option is already
-                            mapped). */
-    NXGTMC_DELETE,       /* Delete mappings, identified by index
-                          * (unmapped options are ignored). */
-    NXGTMC_CLEAR,        /* Clear all mappings. Additional information
-                            in this command is ignored. */
-};
-
-/* Map between a Geneve option and an NXM field. */
-struct nx_geneve_map {
-    ovs_be16 option_class; /* Geneve option class. */
-    uint8_t  option_type;  /* Geneve option type. */
-    uint8_t  option_len;   /* Geneve option length (multiple of 4). */
-    ovs_be16 index;        /* NXM_NX_TUN_METADATA<n> index */
-    uint8_t  pad[2];
-};
-OFP_ASSERT(sizeof(struct nx_geneve_map) == 8);
-
-/* NXT_GENEVE_TABLE_MOD.
- *
- * Use to configure a mapping between Geneve options (class, type, length)
- * and NXM fields (NXM_NX_TUN_METADATA<n> where 'index' is <n>).
- *
- * This command is atomic: all operations on different options will
- * either succeed or fail. */
-struct nx_geneve_table_mod {
-    ovs_be16 command;           /* One of NTGTMC_* */
-    uint8_t pad[6];
-    /* struct nx_geneve_map[0]; Array of maps between indicies and Geneve
-                                options. The number of elements is
-                                inferred from the length field in the
-                                header. */
-};
-OFP_ASSERT(sizeof(struct nx_geneve_table_mod) == 8);
-
-/* NXT_GENEVE_TABLE_REPLY.
- *
- * Issued in reponse to an NXT_GENEVE_TABLE_REQUEST to give information
- * about the current status of the Geneve table in the switch. Provides
- * both static information about the switch's capabilities as well as
- * the configured Geneve option table. */
-struct nx_geneve_table_reply {
-    ovs_be32 max_option_space; /* Maximum total of option sizes supported. */
-    ovs_be16 max_fields;       /* Maximum number of match fields supported. */
-    uint8_t reserved[10];
-    /* struct nx_geneve_map[0]; Array of maps between indicies and Geneve
-                                options. The number of elements is
-                                inferred from the length field in the
-                                header. */
-};
-OFP_ASSERT(sizeof(struct nx_geneve_table_reply) == 16);
 
 #endif /* openflow/nicira-ext.h */

@@ -31,6 +31,7 @@
 #pragma warning( push )
 #pragma warning( disable:4127 )
 
+extern PNDIS_SPIN_LOCK gOvsCtrlLock;
 extern POVS_SWITCH_CONTEXT gOvsSwitchContext;
 extern UINT64 ovsTimeIncrementPerTick;
 
@@ -102,8 +103,7 @@ const NL_POLICY nlFlowPolicy[] = {
                              .maxLen = sizeof(struct ovs_flow_stats),
                              .optional = TRUE},
     [OVS_FLOW_ATTR_TCP_FLAGS] = {NL_A_U8, .optional = TRUE},
-    [OVS_FLOW_ATTR_USED] = {NL_A_U64, .optional = TRUE},
-    [OVS_FLOW_ATTR_PROBE] = {.type = NL_A_FLAG, .optional = TRUE}
+    [OVS_FLOW_ATTR_USED] = {NL_A_U64, .optional = TRUE}
 };
 
 /* For Parsing nested OVS_FLOW_ATTR_KEY attributes.
@@ -172,7 +172,6 @@ const NL_POLICY nlFlowKeyPolicy[] = {
                                 .maxLen = 4, .optional = TRUE},
     [OVS_KEY_ATTR_MPLS] = {.type = NL_A_VAR_LEN, .optional = TRUE}
 };
-const UINT32 nlFlowKeyPolicyLen = ARRAY_SIZE(nlFlowKeyPolicy);
 
 /* For Parsing nested OVS_KEY_ATTR_TUNNEL attributes */
 const NL_POLICY nlFlowTunnelKeyPolicy[] = {
@@ -254,7 +253,7 @@ OvsFlowNlCmdHandler(POVS_USER_PARAMS_CONTEXT usrParamsCtx,
     PNL_MSG_HDR nlMsgHdr = &(msgIn->nlMsg);
     PGENL_MSG_HDR genlMsgHdr = &(msgIn->genlMsg);
     POVS_HDR ovsHdr = &(msgIn->ovsHdr);
-    PNL_ATTR flowAttrs[__OVS_FLOW_ATTR_MAX];
+    PNL_ATTR nlAttrs[__OVS_FLOW_ATTR_MAX];
     UINT32 attrOffset = NLMSG_HDRLEN + GENL_HDRLEN + OVS_HDRLEN;
     OvsFlowPut mappedFlow;
     OvsFlowStats stats;
@@ -274,8 +273,7 @@ OvsFlowNlCmdHandler(POVS_USER_PARAMS_CONTEXT usrParamsCtx,
 
     /* Get all the top level Flow attributes */
     if ((NlAttrParse(nlMsgHdr, attrOffset, NlMsgAttrsLen(nlMsgHdr),
-                     nlFlowPolicy, ARRAY_SIZE(nlFlowPolicy),
-                     flowAttrs, ARRAY_SIZE(flowAttrs)))
+                     nlFlowPolicy, nlAttrs, ARRAY_SIZE(nlAttrs)))
                      != TRUE) {
         OVS_LOG_ERROR("Attr Parsing failed for msg: %p",
                        nlMsgHdr);
@@ -285,7 +283,7 @@ OvsFlowNlCmdHandler(POVS_USER_PARAMS_CONTEXT usrParamsCtx,
 
     /* FLOW_DEL command w/o any key input is a flush case. */
     if ((genlMsgHdr->cmd == OVS_FLOW_CMD_DEL) &&
-        (!(flowAttrs[OVS_FLOW_ATTR_KEY]))) {
+        (!(nlAttrs[OVS_FLOW_ATTR_KEY]))) {
 
         rc = OvsFlushFlowIoctl(ovsHdr->dp_ifindex);
 
@@ -310,14 +308,8 @@ OvsFlowNlCmdHandler(POVS_USER_PARAMS_CONTEXT usrParamsCtx,
        goto done;
     }
 
-    if (flowAttrs[OVS_FLOW_ATTR_PROBE]) {
-        OVS_LOG_ERROR("Attribute OVS_FLOW_ATTR_PROBE not supported");
-        nlError = NL_ERROR_NOENT;
-        goto done;
-    }
-
-    if ((rc = _MapNlToFlowPut(msgIn, flowAttrs[OVS_FLOW_ATTR_KEY],
-        flowAttrs[OVS_FLOW_ATTR_ACTIONS], flowAttrs[OVS_FLOW_ATTR_CLEAR],
+    if ((rc = _MapNlToFlowPut(msgIn, nlAttrs[OVS_FLOW_ATTR_KEY],
+         nlAttrs[OVS_FLOW_ATTR_ACTIONS], nlAttrs[OVS_FLOW_ATTR_CLEAR],
          &mappedFlow))
         != STATUS_SUCCESS) {
         OVS_LOG_ERROR("Conversion to OvsFlowPut failed");
@@ -327,7 +319,7 @@ OvsFlowNlCmdHandler(POVS_USER_PARAMS_CONTEXT usrParamsCtx,
     rc = OvsPutFlowIoctl(&mappedFlow, sizeof (struct OvsFlowPut),
                          &stats);
     if (rc != STATUS_SUCCESS) {
-        OVS_LOG_ERROR("OvsPutFlowIoctl failed.");
+        OVS_LOG_ERROR("OvsFlowPut failed.");
         goto done;
     }
 
@@ -455,8 +447,7 @@ _FlowNlGetCmdHandler(POVS_USER_PARAMS_CONTEXT usrParamsCtx,
 
     /* Get all the top level Flow attributes */
     if ((NlAttrParse(nlMsgHdr, attrOffset, NlMsgAttrsLen(nlMsgHdr),
-                     nlFlowPolicy, ARRAY_SIZE(nlFlowPolicy),
-                     nlAttrs, ARRAY_SIZE(nlAttrs)))
+                     nlFlowPolicy, nlAttrs, ARRAY_SIZE(nlAttrs)))
                      != TRUE) {
         OVS_LOG_ERROR("Attr Parsing failed for msg: %p",
                        nlMsgHdr);
@@ -470,8 +461,7 @@ _FlowNlGetCmdHandler(POVS_USER_PARAMS_CONTEXT usrParamsCtx,
     /* Get flow keys attributes */
     if ((NlAttrParseNested(nlMsgHdr, keyAttrOffset,
                            NlAttrLen(nlAttrs[OVS_FLOW_ATTR_KEY]),
-                           nlFlowKeyPolicy, ARRAY_SIZE(nlFlowKeyPolicy),
-                           keyAttrs, ARRAY_SIZE(keyAttrs)))
+                           nlFlowKeyPolicy, keyAttrs, ARRAY_SIZE(keyAttrs)))
                            != TRUE) {
         OVS_LOG_ERROR("Key Attr Parsing failed for msg: %p",
                        nlMsgHdr);
@@ -487,8 +477,7 @@ _FlowNlGetCmdHandler(POVS_USER_PARAMS_CONTEXT usrParamsCtx,
         /* Get tunnel keys attributes */
         if ((NlAttrParseNested(nlMsgHdr, tunnelKeyAttrOffset,
                                NlAttrLen(keyAttrs[OVS_KEY_ATTR_TUNNEL]),
-                               nlFlowTunnelKeyPolicy, 
-                               ARRAY_SIZE(nlFlowTunnelKeyPolicy),
+                               nlFlowTunnelKeyPolicy,
                                tunnelAttrs, ARRAY_SIZE(tunnelAttrs)))
                                != TRUE) {
             OVS_LOG_ERROR("Tunnel key Attr Parsing failed for msg: %p",
@@ -1194,8 +1183,7 @@ _MapNlToFlowPut(POVS_MESSAGE msgIn, PNL_ATTR keyAttr,
 
     /* Get flow keys attributes */
     if ((NlAttrParseNested(nlMsgHdr, keyAttrOffset, NlAttrLen(keyAttr),
-                           nlFlowKeyPolicy, ARRAY_SIZE(nlFlowKeyPolicy),
-                           keyAttrs, ARRAY_SIZE(keyAttrs)))
+                           nlFlowKeyPolicy, keyAttrs, ARRAY_SIZE(keyAttrs)))
                            != TRUE) {
         OVS_LOG_ERROR("Key Attr Parsing failed for msg: %p",
                        nlMsgHdr);
@@ -1212,7 +1200,6 @@ _MapNlToFlowPut(POVS_MESSAGE msgIn, PNL_ATTR keyAttr,
         if ((NlAttrParseNested(nlMsgHdr, tunnelKeyAttrOffset,
                                NlAttrLen(keyAttrs[OVS_KEY_ATTR_TUNNEL]),
                                nlFlowTunnelKeyPolicy,
-                               ARRAY_SIZE(nlFlowTunnelKeyPolicy),
                                tunnelAttrs, ARRAY_SIZE(tunnelAttrs)))
                                != TRUE) {
             OVS_LOG_ERROR("Tunnel key Attr Parsing failed for msg: %p",
@@ -1525,13 +1512,8 @@ OvsDeleteFlowTable(OVS_DATAPATH *datapath)
     }
 
     DeleteAllFlows(datapath);
-    OvsFreeMemoryWithTag(datapath->flowTable, OVS_FLOW_POOL_TAG);
+    OvsFreeMemory(datapath->flowTable);
     datapath->flowTable = NULL;
-
-    if (datapath->lock == NULL) {
-        return NDIS_STATUS_SUCCESS;
-    }
-
     NdisFreeRWLock(datapath->lock);
 
     return NDIS_STATUS_SUCCESS;
@@ -1552,8 +1534,8 @@ OvsAllocateFlowTable(OVS_DATAPATH *datapath,
     PLIST_ENTRY bucket;
     int i;
 
-    datapath->flowTable = OvsAllocateMemoryWithTag(
-        OVS_FLOW_TABLE_SIZE * sizeof(LIST_ENTRY), OVS_FLOW_POOL_TAG);
+    datapath->flowTable = OvsAllocateMemory(OVS_FLOW_TABLE_SIZE *
+                                            sizeof (LIST_ENTRY));
     if (!datapath->flowTable) {
         return NDIS_STATUS_RESOURCES;
     }
@@ -1562,10 +1544,6 @@ OvsAllocateFlowTable(OVS_DATAPATH *datapath,
         InitializeListHead(bucket);
     }
     datapath->lock = NdisAllocateRWLock(switchContext->NdisFilterHandle);
-
-    if (!datapath->lock) {
-        return NDIS_STATUS_RESOURCES;
-    }
 
     return NDIS_STATUS_SUCCESS;
 }
@@ -1998,7 +1976,7 @@ VOID
 FreeFlow(OvsFlow *flow)
 {
     ASSERT(flow);
-    OvsFreeMemoryWithTag(flow, OVS_FLOW_POOL_TAG);
+    OvsFreeMemory(flow);
 }
 
 NTSTATUS
@@ -2017,23 +1995,25 @@ OvsDoDumpFlows(OvsFlowDumpInput *dumpInput,
     BOOLEAN findNextNonEmpty = FALSE;
 
     dpNo = dumpInput->dpNo;
+    NdisAcquireSpinLock(gOvsCtrlLock);
     if (gOvsSwitchContext->dpNo != dpNo) {
         status = STATUS_INVALID_PARAMETER;
-        goto exit;
+        goto unlock;
     }
 
     rowIndex = dumpInput->position[0];
     if (rowIndex >= OVS_FLOW_TABLE_SIZE) {
         dumpOutput->n = 0;
         *replyLen = sizeof(*dumpOutput);
-        goto exit;
+        goto unlock;
     }
 
     columnIndex = dumpInput->position[1];
 
     datapath = &gOvsSwitchContext->datapath;
     ASSERT(datapath);
-    OvsAcquireDatapathRead(datapath, &dpLockState, FALSE);
+    ASSERT(KeGetCurrentIrql() == DISPATCH_LEVEL);
+    OvsAcquireDatapathRead(datapath, &dpLockState, TRUE);
 
     head = &datapath->flowTable[rowIndex];
     node = head->Flink;
@@ -2082,7 +2062,8 @@ OvsDoDumpFlows(OvsFlowDumpInput *dumpInput,
 dp_unlock:
     OvsReleaseDatapath(datapath, &dpLockState);
 
-exit:
+unlock:
+    NdisReleaseSpinLock(gOvsCtrlLock);
     return status;
 }
 
@@ -2143,18 +2124,21 @@ OvsPutFlowIoctl(PVOID inputBuffer,
     }
 
     dpNo = put->dpNo;
+    NdisAcquireSpinLock(gOvsCtrlLock);
     if (gOvsSwitchContext->dpNo != dpNo) {
         status = STATUS_INVALID_PARAMETER;
-        goto exit;
+        goto unlock;
     }
 
     datapath = &gOvsSwitchContext->datapath;
     ASSERT(datapath);
-    OvsAcquireDatapathWrite(datapath, &dpLockState, FALSE);
+    ASSERT(KeGetCurrentIrql() == DISPATCH_LEVEL);
+    OvsAcquireDatapathWrite(datapath, &dpLockState, TRUE);
     status = HandleFlowPut(put, datapath, stats);
     OvsReleaseDatapath(datapath, &dpLockState);
 
-exit:
+unlock:
+    NdisReleaseSpinLock(gOvsCtrlLock);
     return status;
 }
 
@@ -2186,6 +2170,7 @@ HandleFlowPut(OvsFlowPut *put,
 
         status = OvsPrepareFlow(&KernelFlow, put, hash);
         if (status != STATUS_SUCCESS) {
+            FreeFlow(KernelFlow);
             return STATUS_UNSUCCESSFUL;
         }
 
@@ -2274,8 +2259,7 @@ OvsPrepareFlow(OvsFlow **flow,
 
     do {
         *flow = localFlow =
-            OvsAllocateMemoryWithTag(sizeof(OvsFlow) + put->actionsLen,
-                                     OVS_FLOW_POOL_TAG);
+            OvsAllocateMemory(sizeof(OvsFlow) + put->actionsLen);
         if (localFlow == NULL) {
             status = STATUS_NO_MEMORY;
             break;
@@ -2321,14 +2305,16 @@ OvsGetFlowIoctl(PVOID inputBuffer,
     }
 
     dpNo = getInput->dpNo;
+    NdisAcquireSpinLock(gOvsCtrlLock);
     if (gOvsSwitchContext->dpNo != dpNo) {
         status = STATUS_INVALID_PARAMETER;
-        goto exit;
+        goto unlock;
     }
 
     datapath = &gOvsSwitchContext->datapath;
     ASSERT(datapath);
-    OvsAcquireDatapathRead(datapath, &dpLockState, FALSE);
+    ASSERT(KeGetCurrentIrql() == DISPATCH_LEVEL);
+    OvsAcquireDatapathRead(datapath, &dpLockState, TRUE);
     flow = OvsLookupFlow(datapath, &getInput->key, &hash, FALSE);
     if (!flow) {
         status = STATUS_INVALID_PARAMETER;
@@ -2340,7 +2326,8 @@ OvsGetFlowIoctl(PVOID inputBuffer,
 
 dp_unlock:
     OvsReleaseDatapath(datapath, &dpLockState);
-exit:
+unlock:
+    NdisReleaseSpinLock(gOvsCtrlLock);
     return status;
 }
 
@@ -2351,18 +2338,21 @@ OvsFlushFlowIoctl(UINT32 dpNo)
     OVS_DATAPATH *datapath = NULL;
     LOCK_STATE_EX dpLockState;
 
+    NdisAcquireSpinLock(gOvsCtrlLock);
     if (gOvsSwitchContext->dpNo != dpNo) {
         status = STATUS_INVALID_PARAMETER;
-        goto exit;
+        goto unlock;
     }
 
     datapath = &gOvsSwitchContext->datapath;
     ASSERT(datapath);
-    OvsAcquireDatapathWrite(datapath, &dpLockState, FALSE);
+    ASSERT(KeGetCurrentIrql() == DISPATCH_LEVEL);
+    OvsAcquireDatapathWrite(datapath, &dpLockState, TRUE);
     DeleteAllFlows(datapath);
     OvsReleaseDatapath(datapath, &dpLockState);
 
-exit:
+unlock:
+    NdisReleaseSpinLock(gOvsCtrlLock);
     return status;
 }
 

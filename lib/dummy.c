@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2010, 2011, 2012, 2013, 2015 Nicira, Inc.
+ * Copyright (c) 2010, 2011, 2012, 2013 Nicira, Inc.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -15,37 +15,24 @@
  */
 
 #include <config.h>
+
 #include "dummy.h"
-#include <string.h>
-#include "util.h"
 
 /* Enables support for "dummy" network devices and dpifs, which are useful for
  * testing.  A client program might call this function if it is designed
  * specifically for testing or the user enables it on the command line.
  *
- * 'arg' is parsed to determine the override level (see the definition of enum
- * dummy_level).
+ * If 'override' is false, then "dummy" dpif and netdev classes will be
+ * created.  If 'override' is true, then in addition all existing dpif and
+ * netdev classes will be deleted and replaced by dummy classes.
  *
  * There is no strong reason why dummy devices shouldn't always be enabled. */
 void
-dummy_enable(const char *arg)
+dummy_enable(bool override)
 {
-    enum dummy_level level;
-
-    if (!arg || !arg[0]) {
-        level = DUMMY_OVERRIDE_NONE;
-    } else if (!strcmp(arg, "system")) {
-        level = DUMMY_OVERRIDE_SYSTEM;
-    } else if (!strcmp(arg, "override")) {
-        level = DUMMY_OVERRIDE_ALL;
-    } else {
-        ovs_fatal(0, "%s: unknown dummy level", arg);
-    }
-
-    netdev_dummy_register(level);
-    dpif_dummy_register(level);
+    netdev_dummy_register(override);
+    dpif_dummy_register(override);
     timeval_dummy_register();
     vlandev_dummy_enable();
-    ofpact_dummy_enable();
 }
 

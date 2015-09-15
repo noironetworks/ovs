@@ -96,9 +96,9 @@ OvsCleanupEvent(POVS_OPEN_INSTANCE instance)
 
         LIST_FORALL_SAFE(&queue->elemList, link, next) {
             elem = CONTAINING_RECORD(link, OVS_EVENT_QUEUE_ELEM, link);
-            OvsFreeMemoryWithTag(elem, OVS_EVENT_POOL_TAG);
+            OvsFreeMemory(elem);
         }
-        OvsFreeMemoryWithTag(queue, OVS_EVENT_POOL_TAG);
+        OvsFreeMemory(queue);
     }
 }
 
@@ -139,8 +139,7 @@ OvsPostEvent(UINT32 portNo,
             portNo == OVS_DEFAULT_PORT_NO) {
             queue->pollAll = TRUE;
         } else {
-            elem = (POVS_EVENT_QUEUE_ELEM)OvsAllocateMemoryWithTag(
-                sizeof(*elem), OVS_EVENT_POOL_TAG);
+            elem = (POVS_EVENT_QUEUE_ELEM)OvsAllocateMemory(sizeof(*elem));
             if (elem == NULL) {
                 queue->pollAll = TRUE;
             } else {
@@ -159,7 +158,7 @@ OvsPostEvent(UINT32 portNo,
             LIST_FORALL_SAFE(&queue->elemList, curr, next) {
                 RemoveEntryList(curr);
                 elem = CONTAINING_RECORD(curr, OVS_EVENT_QUEUE_ELEM, link);
-                OvsFreeMemoryWithTag(elem, OVS_EVENT_POOL_TAG);
+                OvsFreeMemory(elem);
             }
             queue->numElems = 0;
         }
@@ -244,8 +243,7 @@ OvsSubscribeEventIoctl(PFILE_OBJECT fileObject,
     }
 
     if (request->subscribe) {
-        queue = (POVS_EVENT_QUEUE)OvsAllocateMemoryWithTag(
-            sizeof(OVS_EVENT_QUEUE), OVS_EVENT_POOL_TAG);
+        queue = (POVS_EVENT_QUEUE)OvsAllocateMemory(sizeof (OVS_EVENT_QUEUE));
         if (queue == NULL) {
             status = STATUS_NO_MEMORY;
             OVS_LOG_WARN("Fail to allocate event queue");
@@ -286,9 +284,9 @@ done_event_subscribe:
         }
         LIST_FORALL_SAFE(&queue->elemList, link, next) {
             elem = CONTAINING_RECORD(link, OVS_EVENT_QUEUE_ELEM, link);
-            OvsFreeMemoryWithTag(elem, OVS_EVENT_POOL_TAG);
+            OvsFreeMemory(elem);
         }
-        OvsFreeMemoryWithTag(queue, OVS_EVENT_POOL_TAG);
+        OvsFreeMemory(queue);
     } else {
         OvsReleaseEventQueueLock();
     }
@@ -448,7 +446,7 @@ OvsRemoveEventEntry(POVS_OPEN_INSTANCE instance,
         elem = (POVS_EVENT_QUEUE_ELEM)RemoveHeadList(&queue->elemList);
         entry->portNo = elem->portNo;
         entry->status = elem->status;
-        OvsFreeMemoryWithTag(elem, OVS_EVENT_POOL_TAG);
+        OvsFreeMemory(elem);
         queue->numElems--;
         status = STATUS_SUCCESS;
     }

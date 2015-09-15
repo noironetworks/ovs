@@ -2,17 +2,7 @@
 #
 # Some modules should be built but not distributed, e.g. third-party
 # hwtable modules.
-build_multi_modules = \
-	openvswitch
-both_modules = \
-	$(build_multi_modules) \
-	vport_geneve \
-	vport_gre \
-	vport_lisp \
-	vport_stt \
-	vport_vxlan
-# When changing the name of 'build_modules', please also update the
-# print-build-modules in Makefile.am.
+both_modules = openvswitch
 build_modules = $(both_modules)	# Modules to build
 dist_modules = $(both_modules)	# Modules to distribute
 
@@ -24,14 +14,12 @@ openvswitch_sources = \
 	flow_netlink.c \
 	flow_table.c \
 	vport.c \
+	vport-geneve.c \
+	vport-gre.c \
 	vport-internal_dev.c \
-	vport-netdev.c
-
-vport_geneve_sources = vport-geneve.c
-vport_vxlan_sources = vport-vxlan.c
-vport_gre_sources = vport-gre.c
-vport_lisp_sources = vport-lisp.c
-vport_stt_sources = vport-stt.c
+	vport-lisp.c \
+	vport-netdev.c \
+	vport-vxlan.c
 
 openvswitch_headers = \
 	compat.h \
@@ -42,8 +30,7 @@ openvswitch_headers = \
 	vlan.h \
 	vport.h \
 	vport-internal_dev.h \
-	vport-netdev.h \
-	vport-vxlan.h
+	vport-netdev.h
 
 openvswitch_extras = \
 	README.md

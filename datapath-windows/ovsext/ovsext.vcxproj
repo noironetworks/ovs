@@ -90,8 +90,6 @@
     <ClInclude Include="PacketIO.h" />
     <ClInclude Include="PacketParser.h" />
     <ClInclude Include="precomp.h" />
-    <ClInclude Include="resource.h" />
-    <ClInclude Include="Stt.h" />
     <ClInclude Include="Switch.h" />
     <ClInclude Include="Tunnel.h" />
     <ClInclude Include="TunnelIntf.h" />
@@ -185,7 +183,6 @@
       <PreCompiledHeader>Create</PreCompiledHeader>
       <PreCompiledHeaderOutputFile>$(IntDir)\precomp.h.pch</PreCompiledHeaderOutputFile>
     </ClCompile>
-    <ClCompile Include="Stt.c" />
     <ClCompile Include="Switch.c" />
     <ClCompile Include="Tunnel.c" />
     <ClCompile Include="TunnelFilter.c" />

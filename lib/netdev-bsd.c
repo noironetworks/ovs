@@ -26,7 +26,6 @@
 #include <sys/ioctl.h>
 #include <sys/socket.h>
 #include <sys/sockio.h>
-#include <net/bpf.h>
 #include <ifaddrs.h>
 #include <pcap/pcap.h>
 #include <net/if.h>
@@ -43,17 +42,19 @@
 #include <sys/sysctl.h>
 #if defined(__NetBSD__)
 #include <net/route.h>
+#include <netinet/in.h>
 #include <netinet/if_inarp.h>
 #endif
 
 #include "rtbsd.h"
 #include "coverage.h"
-#include "dp-packet.h"
 #include "dpif-netdev.h"
 #include "dynamic-string.h"
 #include "fatal-signal.h"
+#include "ofpbuf.h"
 #include "openflow/openflow.h"
 #include "ovs-thread.h"
+#include "packet-dpif.h"
 #include "packets.h"
 #include "poll-loop.h"
 #include "shash.h"
@@ -89,7 +90,7 @@ struct netdev_bsd {
     unsigned int cache_valid;
 
     int ifindex;
-    struct eth_addr etheraddr;
+    uint8_t etheraddr[ETH_ADDR_LEN];
     struct in_addr in4;
     struct in_addr netmask;
     struct in6_addr in6;
@@ -137,9 +138,9 @@ static int set_flags(const char *, int flags);
 static int do_set_addr(struct netdev *netdev,
                        unsigned long ioctl_nr, const char *ioctl_name,
                        struct in_addr addr);
-static int get_etheraddr(const char *netdev_name, struct eth_addr *ea);
+static int get_etheraddr(const char *netdev_name, uint8_t ea[ETH_ADDR_LEN]);
 static int set_etheraddr(const char *netdev_name, int hwaddr_family,
-                         int hwaddr_len, const struct eth_addr);
+                         int hwaddr_len, const uint8_t[ETH_ADDR_LEN]);
 static int get_ifindex(const struct netdev *, int *ifindexp);
 
 static int ifr_get_flags(const struct ifreq *);
@@ -360,7 +361,7 @@ netdev_bsd_construct_tap(struct netdev *netdev_)
 
     /* Turn device UP */
     ifr_set_flags(&ifr, IFF_UP);
-    ovs_strlcpy(ifr.ifr_name, kernel_name, sizeof ifr.ifr_name);
+    strncpy(ifr.ifr_name, kernel_name, sizeof ifr.ifr_name);
     error = af_inet_ioctl(SIOCSIFFLAGS, &ifr);
     if (error) {
         destroy_tap(netdev->tap_fd, kernel_name);
@@ -568,20 +569,20 @@ proc_pkt(u_char *args_, const struct pcap_pkthdr *hdr, const u_char *packet)
  * from rxq->pcap.
  */
 static int
-netdev_rxq_bsd_recv_pcap(struct netdev_rxq_bsd *rxq, struct dp_packet *buffer)
+netdev_rxq_bsd_recv_pcap(struct netdev_rxq_bsd *rxq, struct ofpbuf *buffer)
 {
     struct pcap_arg arg;
     int ret;
 
     /* prepare the pcap argument to store the packet */
-    arg.size = dp_packet_tailroom(buffer);
-    arg.data = dp_packet_data(buffer);
+    arg.size = ofpbuf_tailroom(buffer);
+    arg.data = ofpbuf_data(buffer);
 
     for (;;) {
         ret = pcap_dispatch(rxq->pcap_handle, 1, proc_pkt, (u_char *) &arg);
 
         if (ret > 0) {
-            dp_packet_set_size(buffer, dp_packet_size(buffer) + arg.retval);
+            ofpbuf_set_size(buffer, ofpbuf_size(buffer) + arg.retval);
             return 0;
         }
         if (ret == -1) {
@@ -600,14 +601,14 @@ netdev_rxq_bsd_recv_pcap(struct netdev_rxq_bsd *rxq, struct dp_packet *buffer)
  * 'rxq->fd' is initialized with the tap file descriptor.
  */
 static int
-netdev_rxq_bsd_recv_tap(struct netdev_rxq_bsd *rxq, struct dp_packet *buffer)
+netdev_rxq_bsd_recv_tap(struct netdev_rxq_bsd *rxq, struct ofpbuf *buffer)
 {
-    size_t size = dp_packet_tailroom(buffer);
+    size_t size = ofpbuf_tailroom(buffer);
 
     for (;;) {
-        ssize_t retval = read(rxq->fd, dp_packet_data(buffer), size);
+        ssize_t retval = read(rxq->fd, ofpbuf_data(buffer), size);
         if (retval >= 0) {
-            dp_packet_set_size(buffer, dp_packet_size(buffer) + retval);
+            ofpbuf_set_size(buffer, ofpbuf_size(buffer) + retval);
             return 0;
         } else if (errno != EINTR) {
             if (errno != EAGAIN) {
@@ -620,12 +621,13 @@ netdev_rxq_bsd_recv_tap(struct netdev_rxq_bsd *rxq, struct dp_packet *buffer)
 }
 
 static int
-netdev_bsd_rxq_recv(struct netdev_rxq *rxq_, struct dp_packet **packets,
+netdev_bsd_rxq_recv(struct netdev_rxq *rxq_, struct dpif_packet **packets,
                     int *c)
 {
     struct netdev_rxq_bsd *rxq = netdev_rxq_bsd_cast(rxq_);
     struct netdev *netdev = rxq->up.netdev;
-    struct dp_packet *packet;
+    struct dpif_packet *packet;
+    struct ofpbuf *buffer;
     ssize_t retval;
     int mtu;
 
@@ -633,17 +635,19 @@ netdev_bsd_rxq_recv(struct netdev_rxq *rxq_, struct dp_packet **packets,
         mtu = ETH_PAYLOAD_MAX;
     }
 
-    packet = dp_packet_new_with_headroom(VLAN_ETH_HEADER_LEN + mtu,
+    packet = dpif_packet_new_with_headroom(VLAN_ETH_HEADER_LEN + mtu,
                                            DP_NETDEV_HEADROOM);
+    buffer = &packet->ofpbuf;
+
     retval = (rxq->pcap_handle
-            ? netdev_rxq_bsd_recv_pcap(rxq, packet)
-            : netdev_rxq_bsd_recv_tap(rxq, packet));
+            ? netdev_rxq_bsd_recv_pcap(rxq, buffer)
+            : netdev_rxq_bsd_recv_tap(rxq, buffer));
 
     if (retval) {
-        dp_packet_delete(packet);
+        dpif_packet_delete(packet);
     } else {
-        dp_packet_pad(packet);
-        dp_packet_rss_invalidate(packet);
+        dp_packet_pad(buffer);
+        dpif_packet_set_dp_hash(packet, 0);
         packets[0] = packet;
         *c = 1;
     }
@@ -684,7 +688,7 @@ netdev_bsd_rxq_drain(struct netdev_rxq *rxq_)
  */
 static int
 netdev_bsd_send(struct netdev *netdev_, int qid OVS_UNUSED,
-                struct dp_packet **pkts, int cnt, bool may_steal)
+                struct dpif_packet **pkts, int cnt, bool may_steal)
 {
     struct netdev_bsd *dev = netdev_bsd_cast(netdev_);
     const char *name = netdev_get_name(netdev_);
@@ -699,8 +703,8 @@ netdev_bsd_send(struct netdev *netdev_, int qid OVS_UNUSED,
     }
 
     for (i = 0; i < cnt; i++) {
-        const void *data = dp_packet_data(pkts[i]);
-        size_t size = dp_packet_size(pkts[i]);
+        const void *data = ofpbuf_data(&pkts[i]->ofpbuf);
+        size_t size = ofpbuf_size(&pkts[i]->ofpbuf);
 
         while (!error) {
             ssize_t retval;
@@ -733,7 +737,7 @@ netdev_bsd_send(struct netdev *netdev_, int qid OVS_UNUSED,
     ovs_mutex_unlock(&dev->mutex);
     if (may_steal) {
         for (i = 0; i < cnt; i++) {
-            dp_packet_delete(pkts[i]);
+            dpif_packet_delete(pkts[i]);
         }
     }
 
@@ -769,7 +773,7 @@ netdev_bsd_send_wait(struct netdev *netdev_, int qid OVS_UNUSED)
  */
 static int
 netdev_bsd_set_etheraddr(struct netdev *netdev_,
-                         const struct eth_addr mac)
+                         const uint8_t mac[ETH_ADDR_LEN])
 {
     struct netdev_bsd *netdev = netdev_bsd_cast(netdev_);
     int error = 0;
@@ -781,7 +785,7 @@ netdev_bsd_set_etheraddr(struct netdev *netdev_,
                               ETH_ADDR_LEN, mac);
         if (!error) {
             netdev->cache_valid |= VALID_ETHERADDR;
-            netdev->etheraddr = mac;
+            memcpy(netdev->etheraddr, mac, ETH_ADDR_LEN);
             netdev_change_seq_changed(netdev_);
         }
     }
@@ -795,7 +799,8 @@ netdev_bsd_set_etheraddr(struct netdev *netdev_,
  * free the returned buffer.
  */
 static int
-netdev_bsd_get_etheraddr(const struct netdev *netdev_, struct eth_addr *mac)
+netdev_bsd_get_etheraddr(const struct netdev *netdev_,
+                         uint8_t mac[ETH_ADDR_LEN])
 {
     struct netdev_bsd *netdev = netdev_bsd_cast(netdev_);
     int error = 0;
@@ -803,13 +808,13 @@ netdev_bsd_get_etheraddr(const struct netdev *netdev_, struct eth_addr *mac)
     ovs_mutex_lock(&netdev->mutex);
     if (!(netdev->cache_valid & VALID_ETHERADDR)) {
         error = get_etheraddr(netdev_get_kernel_name(netdev_),
-                              &netdev->etheraddr);
+                              netdev->etheraddr);
         if (!error) {
             netdev->cache_valid |= VALID_ETHERADDR;
         }
     }
     if (!error) {
-        *mac = netdev->etheraddr;
+        memcpy(mac, netdev->etheraddr, ETH_ADDR_LEN);
     }
     ovs_mutex_unlock(&netdev->mutex);
 
@@ -843,7 +848,7 @@ netdev_bsd_get_mtu(const struct netdev *netdev_, int *mtup)
     }
     ovs_mutex_unlock(&netdev->mutex);
 
-    return error;
+    return 0;
 }
 
 static int
@@ -870,8 +875,8 @@ netdev_bsd_get_carrier(const struct netdev *netdev_, bool *carrier)
         struct ifmediareq ifmr;
 
         memset(&ifmr, 0, sizeof(ifmr));
-        ovs_strlcpy(ifmr.ifm_name, netdev_get_kernel_name(netdev_),
-                    sizeof ifmr.ifm_name);
+        strncpy(ifmr.ifm_name, netdev_get_kernel_name(netdev_),
+                sizeof ifmr.ifm_name);
 
         error = af_inet_ioctl(SIOCGIFMEDIA, &ifmr);
         if (!error) {
@@ -1016,8 +1021,8 @@ netdev_bsd_get_stats(const struct netdev *netdev_, struct netdev_stats *stats)
     int error;
 
     memset(&ifdr, 0, sizeof(ifdr));
-    ovs_strlcpy(ifdr.ifdr_name, netdev_get_kernel_name(netdev_),
-                sizeof(ifdr.ifdr_name));
+    strncpy(ifdr.ifdr_name, netdev_get_kernel_name(netdev_),
+            sizeof(ifdr.ifdr_name));
     error = af_link_ioctl(SIOCGIFDATA, &ifdr);
     if (!error) {
         convert_stats(netdev_, stats, &ifdr.ifdr_data);
@@ -1121,7 +1126,7 @@ netdev_bsd_get_features(const struct netdev *netdev,
     /* XXX Look into SIOCGIFCAP instead of SIOCGIFMEDIA */
 
     memset(&ifmr, 0, sizeof(ifmr));
-    ovs_strlcpy(ifmr.ifm_name, netdev_get_name(netdev), sizeof ifmr.ifm_name);
+    strncpy(ifmr.ifm_name, netdev_get_name(netdev), sizeof ifmr.ifm_name);
 
     /* We make two SIOCGIFMEDIA ioctl calls.  The first to determine the
      * number of supported modes, and a second with a buffer to retrieve
@@ -1407,7 +1412,7 @@ netdev_bsd_get_next_hop(const struct in_addr *host OVS_UNUSED,
 static int
 netdev_bsd_arp_lookup(const struct netdev *netdev OVS_UNUSED,
                       ovs_be32 ip OVS_UNUSED,
-                      struct eth_addr *mac OVS_UNUSED)
+		      uint8_t mac[ETH_ADDR_LEN] OVS_UNUSED)
 {
 #if defined(__NetBSD__)
     const struct rt_msghdr *rtm;
@@ -1677,7 +1682,7 @@ get_ifindex(const struct netdev *netdev_, int *ifindexp)
 }
 
 static int
-get_etheraddr(const char *netdev_name, struct eth_addr *ea)
+get_etheraddr(const char *netdev_name, uint8_t ea[ETH_ADDR_LEN])
 {
     struct ifaddrs *head;
     struct ifaddrs *ifa;
@@ -1710,17 +1715,17 @@ get_etheraddr(const char *netdev_name, struct eth_addr *ea)
 static int
 set_etheraddr(const char *netdev_name OVS_UNUSED, int hwaddr_family OVS_UNUSED,
               int hwaddr_len OVS_UNUSED,
-              const struct eth_addr mac OVS_UNUSED)
+              const uint8_t mac[ETH_ADDR_LEN] OVS_UNUSED)
 {
 #if defined(__FreeBSD__)
     struct ifreq ifr;
     int error;
 
     memset(&ifr, 0, sizeof ifr);
-    ovs_strlcpy(ifr.ifr_name, netdev_name, sizeof ifr.ifr_name);
+    strncpy(ifr.ifr_name, netdev_name, sizeof ifr.ifr_name);
     ifr.ifr_addr.sa_family = hwaddr_family;
     ifr.ifr_addr.sa_len = hwaddr_len;
-    memcpy(ifr.ifr_addr.sa_data, &mac, hwaddr_len);
+    memcpy(ifr.ifr_addr.sa_data, mac, hwaddr_len);
     error = af_inet_ioctl(SIOCSIFLLADDR, &ifr);
     if (error) {
         VLOG_ERR("ioctl(SIOCSIFLLADDR) on %s device failed: %s",
@@ -1743,7 +1748,7 @@ set_etheraddr(const char *netdev_name OVS_UNUSED, int hwaddr_family OVS_UNUSED,
         return EOPNOTSUPP;
     }
     memset(&req, 0, sizeof(req));
-    ovs_strlcpy(req.iflr_name, netdev_name, sizeof(req.iflr_name));
+    strncpy(req.iflr_name, netdev_name, sizeof(req.iflr_name));
     req.addr.ss_len = sizeof(req.addr);
     req.addr.ss_family = hwaddr_family;
     sdl = (struct sockaddr_dl *)&req.addr;
@@ -1759,7 +1764,7 @@ set_etheraddr(const char *netdev_name OVS_UNUSED, int hwaddr_family OVS_UNUSED,
     oldaddr = req.addr;
 
     memset(&req, 0, sizeof(req));
-    ovs_strlcpy(req.iflr_name, netdev_name, sizeof(req.iflr_name));
+    strncpy(req.iflr_name, netdev_name, sizeof(req.iflr_name));
     req.flags = IFLR_ACTIVE;
     sdl = (struct sockaddr_dl *)&req.addr;
     sdl->sdl_len = offsetof(struct sockaddr_dl, sdl_data) + hwaddr_len;
@@ -1772,7 +1777,7 @@ set_etheraddr(const char *netdev_name OVS_UNUSED, int hwaddr_family OVS_UNUSED,
     }
 
     memset(&req, 0, sizeof(req));
-    ovs_strlcpy(req.iflr_name, netdev_name, sizeof(req.iflr_name));
+    strncpy(req.iflr_name, netdev_name, sizeof(req.iflr_name));
     req.addr = oldaddr;
     return af_link_ioctl(SIOCDLIFADDR, &req);
 #else
@@ -1784,7 +1789,7 @@ static int
 ifr_get_flags(const struct ifreq *ifr)
 {
 #ifdef HAVE_STRUCT_IFREQ_IFR_FLAGSHIGH
-    return (ifr->ifr_flagshigh << 16) | (ifr->ifr_flags & 0xffff);
+    return (ifr->ifr_flagshigh << 16) | ifr->ifr_flags;
 #else
     return ifr->ifr_flags;
 #endif
@@ -1793,11 +1798,9 @@ ifr_get_flags(const struct ifreq *ifr)
 static void
 ifr_set_flags(struct ifreq *ifr, int flags)
 {
-#ifdef HAVE_STRUCT_IFREQ_IFR_FLAGSHIGH
-    ifr->ifr_flags = flags & 0xffff;
-    ifr->ifr_flagshigh = flags >> 16;
-#else
     ifr->ifr_flags = flags;
+#ifdef HAVE_STRUCT_IFREQ_IFR_FLAGSHIGH
+    ifr->ifr_flagshigh = flags >> 16;
 #endif
 }
 

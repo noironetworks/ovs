@@ -777,8 +777,7 @@ OvsCreateIPNeighEntry(PMIB_IPNET_ROW2 ipNeigh)
     UINT64 timeVal;
 
     ASSERT(ipNeigh != NULL);
-    entry = (POVS_IPNEIGH_ENTRY)OvsAllocateMemoryWithTag(
-        sizeof(OVS_IPNEIGH_ENTRY), OVS_IPHELPER_POOL_TAG);
+    entry = (POVS_IPNEIGH_ENTRY)OvsAllocateMemory(sizeof (OVS_IPNEIGH_ENTRY));
     if (entry == NULL) {
         return NULL;
     }
@@ -803,8 +802,8 @@ OvsCreateIPForwardEntry(PMIB_IPFORWARD_ROW2 ipRoute)
 
     ASSERT(ipRoute);
 
-    entry = (POVS_IPFORWARD_ENTRY)OvsAllocateMemoryWithTag(
-        sizeof(OVS_IPFORWARD_ENTRY), OVS_IPHELPER_POOL_TAG);
+    entry =
+       (POVS_IPFORWARD_ENTRY)OvsAllocateMemory(sizeof (OVS_IPFORWARD_ENTRY));
     if (entry == NULL) {
         return NULL;
     }
@@ -824,8 +823,7 @@ OvsCreateFwdEntry(POVS_FWD_INFO fwdInfo)
 {
     POVS_FWD_ENTRY entry;
 
-    entry = (POVS_FWD_ENTRY)OvsAllocateMemoryWithTag(
-        sizeof(OVS_FWD_ENTRY), OVS_IPHELPER_POOL_TAG);
+    entry = (POVS_FWD_ENTRY)OvsAllocateMemory(sizeof (OVS_FWD_ENTRY));
     if (entry == NULL) {
         return NULL;
     }
@@ -857,7 +855,7 @@ OvsRemoveFwdEntry(POVS_FWD_ENTRY fwdEntry)
     if (ipf->refCount == 0) {
         ASSERT(IsListEmpty(&ipf->fwdList));
         RemoveEntryList(&ipf->link);
-        OvsFreeMemoryWithTag(ipf, OVS_IPHELPER_POOL_TAG);
+        OvsFreeMemory(ipf);
     }
 
     if (ipn->refCount == 0) {
@@ -866,10 +864,10 @@ OvsRemoveFwdEntry(POVS_FWD_ENTRY fwdEntry)
         NdisAcquireSpinLock(&ovsIpHelperLock);
         RemoveEntryList(&ipn->slink);
         NdisReleaseSpinLock(&ovsIpHelperLock);
-        OvsFreeMemoryWithTag(ipn, OVS_IPHELPER_POOL_TAG);
+        OvsFreeMemory(ipn);
     }
 
-    OvsFreeMemoryWithTag(fwdEntry, OVS_IPHELPER_POOL_TAG);
+    OvsFreeMemory(fwdEntry);
 }
 
 
@@ -888,7 +886,7 @@ OvsRemoveIPForwardEntry(POVS_IPFORWARD_ENTRY ipf)
     ASSERT(ipf->refCount == 1);
 
     RemoveEntryList(&ipf->link);
-    OvsFreeMemoryWithTag(ipf, OVS_IPHELPER_POOL_TAG);
+    OvsFreeMemory(ipf);
 }
 
 
@@ -910,7 +908,7 @@ OvsRemoveIPNeighEntry(POVS_IPNEIGH_ENTRY ipn)
         NdisAcquireSpinLock(&ovsIpHelperLock);
         RemoveEntryList(&ipn->slink);
         NdisReleaseSpinLock(&ovsIpHelperLock);
-        OvsFreeMemoryWithTag(ipn, OVS_IPHELPER_POOL_TAG);
+        OvsFreeMemory(ipn);
     }
 }
 
@@ -1043,7 +1041,7 @@ OvsCleanupIpHelperRequestList(VOID)
                                STATUS_DEVICE_NOT_READY,
                                NULL);
         }
-        OvsFreeMemoryWithTag(request, OVS_IPHELPER_POOL_TAG);
+        OvsFreeMemory(request);
     }
 }
 
@@ -1078,8 +1076,8 @@ OvsInternalAdapterUp(UINT32 portNo,
     RtlCopyMemory(&ovsInternalNetCfgId, netCfgInstanceId, sizeof (GUID));
     RtlZeroMemory(&ovsInternalRow, sizeof (MIB_IF_ROW2));
 
-    request = (POVS_IP_HELPER_REQUEST)OvsAllocateMemoryWithTag(
-        sizeof(OVS_IP_HELPER_REQUEST), OVS_IPHELPER_POOL_TAG);
+    request =
+      (POVS_IP_HELPER_REQUEST)OvsAllocateMemory(sizeof (OVS_IP_HELPER_REQUEST));
     if (request == NULL) {
         OVS_LOG_ERROR("Fail to initialize Internal Adapter");
         return;
@@ -1105,7 +1103,7 @@ OvsHandleInternalAdapterUp(POVS_IP_HELPER_REQUEST request)
     MIB_UNICASTIPADDRESS_ROW ipEntry;
     GUID *netCfgInstanceId = &ovsInternalNetCfgId;
 
-    OvsFreeMemoryWithTag(request, OVS_IPHELPER_POOL_TAG);
+    OvsFreeMemory(request);
 
     status = OvsGetIfEntry(&ovsInternalNetCfgId, &ovsInternalRow);
 
@@ -1163,7 +1161,7 @@ OvsEnqueueIpHelperRequest(POVS_IP_HELPER_REQUEST request)
     if (ovsInternalPortNo == OVS_DEFAULT_PORT_NO ||
         ovsInternalIPConfigured == FALSE) {
         NdisReleaseSpinLock(&ovsIpHelperLock);
-        OvsFreeMemoryWithTag(request, OVS_IPHELPER_POOL_TAG);
+        OvsFreeMemory(request);
         return STATUS_NDIS_ADAPTER_NOT_READY;
     } else {
         InsertHeadList(&ovsIpHelperRequestList, &request->link);
@@ -1187,8 +1185,8 @@ OvsFwdIPHelperRequest(PNET_BUFFER_LIST nbl,
 {
     POVS_IP_HELPER_REQUEST request;
 
-    request = (POVS_IP_HELPER_REQUEST)OvsAllocateMemoryWithTag(
-        sizeof(OVS_IP_HELPER_REQUEST), OVS_IPHELPER_POOL_TAG);
+    request =
+      (POVS_IP_HELPER_REQUEST)OvsAllocateMemory(sizeof (OVS_IP_HELPER_REQUEST));
 
     if (request == NULL) {
         return STATUS_INSUFFICIENT_RESOURCES;
@@ -1330,15 +1328,15 @@ fwd_handle_nbl:
     if (status != STATUS_SUCCESS) {
         if (newFWD) {
             ASSERT(fwdEntry != NULL);
-            OvsFreeMemoryWithTag(fwdEntry, OVS_IPHELPER_POOL_TAG);
+            OvsFreeMemory(fwdEntry);
         }
         if (newIPF) {
             ASSERT(ipf && ipf->refCount == 0);
-            OvsFreeMemoryWithTag(ipf, OVS_IPHELPER_POOL_TAG);
+            OvsFreeMemory(ipf);
         }
         if (newIPN) {
             ASSERT(ipn && ipn->refCount == 0);
-            OvsFreeMemoryWithTag(ipn, OVS_IPHELPER_POOL_TAG);
+            OvsFreeMemory(ipn);
         }
         ipAddr = request->fwdReq.tunnelKey.dst;
         OVS_LOG_INFO("Fail to handle IP helper request for dst: %d.%d.%d.%d",
@@ -1354,7 +1352,7 @@ fwd_handle_nbl:
                            status,
                            status == STATUS_SUCCESS ? &fwdInfo : NULL);
     }
-    OvsFreeMemoryWithTag(request, OVS_IPHELPER_POOL_TAG);
+    OvsFreeMemory(request);
 }
 
 
@@ -1479,7 +1477,7 @@ OvsStartIpHelper(PVOID data)
                 OvsHandleFwdRequest(req);
                 break;
             default:
-                OvsFreeMemoryWithTag(req, OVS_IPHELPER_POOL_TAG);
+                OvsFreeMemory(req);
             }
             NdisAcquireSpinLock(&ovsIpHelperLock);
         }
@@ -1541,14 +1539,14 @@ OvsInitIpHelper(NDIS_HANDLE ndisFilterHandle)
     HANDLE threadHandle;
     UINT32 i;
 
-    ovsFwdHashTable = (PLIST_ENTRY)OvsAllocateMemoryWithTag(
-        sizeof(LIST_ENTRY) * OVS_FWD_HASH_TABLE_SIZE, OVS_IPHELPER_POOL_TAG);
+    ovsFwdHashTable = (PLIST_ENTRY)OvsAllocateMemory(sizeof(LIST_ENTRY) *
+                                                     OVS_FWD_HASH_TABLE_SIZE);
 
-    ovsRouteHashTable = (PLIST_ENTRY)OvsAllocateMemoryWithTag(
-        sizeof(LIST_ENTRY) * OVS_ROUTE_HASH_TABLE_SIZE, OVS_IPHELPER_POOL_TAG);
+    ovsRouteHashTable = (PLIST_ENTRY)OvsAllocateMemory(sizeof(LIST_ENTRY) *
+                                                       OVS_ROUTE_HASH_TABLE_SIZE);
 
-    ovsNeighHashTable = (PLIST_ENTRY)OvsAllocateMemoryWithTag(
-        sizeof(LIST_ENTRY) * OVS_NEIGH_HASH_TABLE_SIZE, OVS_IPHELPER_POOL_TAG);
+    ovsNeighHashTable = (PLIST_ENTRY)OvsAllocateMemory(sizeof(LIST_ENTRY) *
+                                                       OVS_NEIGH_HASH_TABLE_SIZE);
 
     RtlZeroMemory(&ovsInternalRow, sizeof(MIB_IF_ROW2));
     RtlZeroMemory(&ovsInternalIPRow, sizeof (MIB_IPINTERFACE_ROW));
@@ -1611,15 +1609,15 @@ init_cleanup:
     if (status != STATUS_SUCCESS) {
         OvsCancelChangeNotification();
         if (ovsFwdHashTable) {
-            OvsFreeMemoryWithTag(ovsFwdHashTable, OVS_IPHELPER_POOL_TAG);
+            OvsFreeMemory(ovsFwdHashTable);
             ovsFwdHashTable = NULL;
         }
         if (ovsRouteHashTable) {
-            OvsFreeMemoryWithTag(ovsRouteHashTable, OVS_IPHELPER_POOL_TAG);
+            OvsFreeMemory(ovsRouteHashTable);
             ovsRouteHashTable = NULL;
         }
         if (ovsNeighHashTable) {
-            OvsFreeMemoryWithTag(ovsNeighHashTable, OVS_IPHELPER_POOL_TAG);
+            OvsFreeMemory(ovsNeighHashTable);
             ovsNeighHashTable = NULL;
         }
         if (ovsTableLock) {
@@ -1646,9 +1644,9 @@ OvsCleanupIpHelper(VOID)
                           KernelMode, FALSE, NULL);
     ObDereferenceObject(ovsIpHelperThreadContext.threadObject);
 
-    OvsFreeMemoryWithTag(ovsFwdHashTable, OVS_IPHELPER_POOL_TAG);
-    OvsFreeMemoryWithTag(ovsRouteHashTable, OVS_IPHELPER_POOL_TAG);
-    OvsFreeMemoryWithTag(ovsNeighHashTable, OVS_IPHELPER_POOL_TAG);
+    OvsFreeMemory(ovsFwdHashTable);
+    OvsFreeMemory(ovsRouteHashTable);
+    OvsFreeMemory(ovsNeighHashTable);
 
     NdisFreeRWLock(ovsTableLock);
     NdisFreeSpinLock(&ovsIpHelperLock);
@@ -1686,6 +1684,6 @@ OvsCancelFwdIpHelperRequest(PNET_BUFFER_LIST nbl)
                            STATUS_DEVICE_NOT_READY,
                            NULL);
         }
-        OvsFreeMemoryWithTag(req, OVS_IPHELPER_POOL_TAG);
+        OvsFreeMemory(req);
     }
 }

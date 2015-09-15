@@ -605,7 +605,7 @@ OvsIssueOidRequest(POVS_SWITCH_CONTEXT switchContext,
     NDIS_STATUS status;
     PNDIS_OID_REQUEST oidRequest;
     POVS_OID_CONTEXT oidContext;
-    ULONG OvsExtOidRequestId =          'ISVO';
+    ULONG OvsExtOidRequestId = 'ISVO';
 
     DBG_UNREFERENCED_PARAMETER(inputSize);
     DBG_UNREFERENCED_PARAMETER(oidInputBuffer);
@@ -617,17 +617,15 @@ OvsIssueOidRequest(POVS_SWITCH_CONTEXT switchContext,
     ASSERT(oidOutputBuffer == NULL || outputSize != 0);
     ASSERT(KeGetCurrentIrql() == PASSIVE_LEVEL);
 
-    oidRequest = OvsAllocateMemoryWithTag(sizeof *oidRequest,
-                                          OVS_OID_POOL_TAG);
+    oidRequest = OvsAllocateMemory(sizeof *oidRequest);
     if (!oidRequest) {
         status = NDIS_STATUS_RESOURCES;
         goto done;
     }
 
-    oidContext = OvsAllocateMemoryWithTag(sizeof *oidContext,
-                                          OVS_OID_POOL_TAG);
+    oidContext = OvsAllocateMemory(sizeof *oidContext);
     if (!oidContext) {
-        OvsFreeMemoryWithTag(oidRequest, OVS_OID_POOL_TAG);
+        OvsFreeMemory(oidRequest);
         status = NDIS_STATUS_RESOURCES;
         goto done;
     }
@@ -686,8 +684,8 @@ OvsIssueOidRequest(POVS_SWITCH_CONTEXT switchContext,
     status = oidContext->status;
     ASSERT(status != NDIS_STATUS_PENDING);
 
-    OvsFreeMemoryWithTag(oidRequest, OVS_OID_POOL_TAG);
-    OvsFreeMemoryWithTag(oidContext, OVS_OID_POOL_TAG);
+    OvsFreeMemory(oidRequest);
+    OvsFreeMemory(oidContext);
 
 done:
     OVS_LOG_TRACE("Exit: status %8x.", status);
@@ -712,8 +710,7 @@ OvsQuerySwitchActivationComplete(POVS_SWITCH_CONTEXT switchContext,
     OVS_LOG_TRACE("Enter: switchContext: %p, switchActive: %p",
                   switchContext, switchActive);
 
-    switchParams = OvsAllocateMemoryWithTag(sizeof *switchParams,
-                                            OVS_OID_POOL_TAG);
+    switchParams = OvsAllocateMemory(sizeof *switchParams);
     if (!switchParams) {
         status = NDIS_STATUS_RESOURCES;
         goto done;
@@ -744,7 +741,7 @@ OvsQuerySwitchActivationComplete(POVS_SWITCH_CONTEXT switchContext,
         *switchActive = switchParams->IsActive;
     }
 
-    OvsFreeMemoryWithTag(switchParams, OVS_OID_POOL_TAG);
+    OvsFreeMemory(switchParams);
 
 done:
     OVS_LOG_TRACE("Exit: status %8x, switchActive: %d.",
@@ -772,7 +769,7 @@ OvsGetPortsOnSwitch(POVS_SWITCH_CONTEXT switchContext,
     do {
         UINT32 reqdArraySize;
 
-        portArray = OvsAllocateMemoryWithTag(arraySize, OVS_OID_POOL_TAG);
+        portArray = OvsAllocateMemory(arraySize);
         if (!portArray) {
             status = NDIS_STATUS_RESOURCES;
             goto done;
@@ -797,7 +794,7 @@ OvsGetPortsOnSwitch(POVS_SWITCH_CONTEXT switchContext,
             break;
         }
 
-        OvsFreeMemoryWithTag(portArray, OVS_OID_POOL_TAG);
+        OvsFreeMemory(portArray);
         arraySize = reqdArraySize;
         if (status != NDIS_STATUS_INVALID_LENGTH) {
             break;
@@ -830,7 +827,7 @@ OvsGetNicsOnSwitch(POVS_SWITCH_CONTEXT switchContext,
     do {
         UINT32 reqdArraySize;
 
-        nicArray = OvsAllocateMemoryWithTag(arraySize, OVS_OID_POOL_TAG);
+        nicArray = OvsAllocateMemory(arraySize);
         if (!nicArray) {
             status = NDIS_STATUS_RESOURCES;
             goto done;
@@ -855,7 +852,7 @@ OvsGetNicsOnSwitch(POVS_SWITCH_CONTEXT switchContext,
             break;
         }
 
-        OvsFreeMemoryWithTag(nicArray, OVS_OID_POOL_TAG);
+        OvsFreeMemory(nicArray);
         arraySize = reqdArraySize;
         if (status != NDIS_STATUS_INVALID_LENGTH) {
             break;
@@ -865,18 +862,4 @@ OvsGetNicsOnSwitch(POVS_SWITCH_CONTEXT switchContext,
 done:
     OVS_LOG_TRACE("Exit: status %8x.", status);
     return status;
-}
-
-VOID OvsFreeSwitchPortsArray(PNDIS_SWITCH_PORT_ARRAY portsArray)
-{
-    if (portsArray) {
-        OvsFreeMemoryWithTag(portsArray, OVS_OID_POOL_TAG);
-    }
-}
-
-VOID OvsFreeSwitchNicsArray(PNDIS_SWITCH_NIC_ARRAY nicsArray)
-{
-    if (nicsArray) {
-        OvsFreeMemoryWithTag(nicsArray, OVS_OID_POOL_TAG);
-    }
 }

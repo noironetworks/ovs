@@ -37,7 +37,8 @@
 #define OVS_TUNNEL_INDEX_START RESERVED_START_INDEX1
 #define OVS_VXLAN_VPORT_INDEX    2
 #define OVS_GRE_VPORT_INDEX      3
-#define OVS_TUNNEL_INDEX_END OVS_GRE_VPORT_INDEX
+#define OVS_GRE64_VPORT_INDEX    4
+#define OVS_TUNNEL_INDEX_END OVS_GRE64_VPORT_INDEX
 
 #define OVS_MAX_PHYS_ADAPTERS    32
 #define OVS_MAX_IP_VPOR          32
@@ -131,6 +132,8 @@ typedef struct _OVS_SWITCH_CONTEXT
     POVS_VPORT_ENTRY        virtualExternalVport;   // the virtual adapter vport
     POVS_VPORT_ENTRY        internalVport;
 
+    POVS_VPORT_ENTRY        vxlanVport;
+
     /*
      * 'portIdHashArray' ONLY contains ports that exist on the Hyper-V switch,
      * namely: VIF (vNIC) ports, external port and Hyper-V internal port.
@@ -145,15 +148,11 @@ typedef struct _OVS_SWITCH_CONTEXT
      * exist on the Hyper-V switch, and 'numNonHvVports' counts such ports in
      * 'portNoHashArray'.
      *
-     * 'tunnelVportsArray' contains tunnel ports that are added from OVS
-     * userspace. Currently only VXLAN tunnels are added in this list.
-     *
      * 'ovsPortNameHashArray' contains the same entries as 'portNoHashArray' but
      * hashed on a different key.
      */
     PLIST_ENTRY             portIdHashArray;        // based on Hyper-V portId
     PLIST_ENTRY             portNoHashArray;        // based on ovs port number
-    PLIST_ENTRY             tunnelVportsArray;      // based on ovs dst port number
     PLIST_ENTRY             ovsPortNameHashArray;   // based on ovsName
     PLIST_ENTRY             pidHashArray;           // based on packet pids
     NDIS_SPIN_LOCK          pidHashLock;            // Lock for pidHash table
@@ -203,6 +202,7 @@ OvsAcquireDatapathWrite(OVS_DATAPATH *datapath,
                            dispatch ? NDIS_RWL_AT_DISPATCH_LEVEL : 0);
 }
 
+
 static __inline VOID
 OvsReleaseDatapath(OVS_DATAPATH *datapath,
                    LOCK_STATE_EX *lockState)
@@ -211,10 +211,7 @@ OvsReleaseDatapath(OVS_DATAPATH *datapath,
     NdisReleaseRWLock(datapath->lock, lockState);
 }
 
-BOOLEAN
-OvsAcquireSwitchContext(VOID);
 
-VOID
-OvsReleaseSwitchContext(POVS_SWITCH_CONTEXT switchContext);
+PVOID OvsGetExternalVport();
 
 #endif /* __SWITCH_H_ */

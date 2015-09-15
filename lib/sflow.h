@@ -12,8 +12,6 @@
 #include "windefs.h"
 #endif
 
-#include "openvswitch/types.h"
-
 typedef enum {
     SFL_DSCLASS_IFINDEX = 0,
     SFL_DSCLASS_VLAN = 1,
@@ -83,10 +81,8 @@ typedef struct _SFLSampled_header {
 typedef struct _SFLSampled_ethernet {
     u_int32_t eth_len;       /* The length of the MAC packet excluding
 				lower layer encapsulations */
-    struct eth_addr src_mac;    /* 6 bytes */
-    u_int8_t pad1[2];           /* 2 pad */
-    struct eth_addr dst_mac;
-    u_int8_t pad2[2];
+    u_int8_t src_mac[8];    /* 6 bytes + 2 pad */
+    u_int8_t dst_mac[8];
     u_int32_t eth_type;
 } SFLSampled_ethernet;
 
@@ -531,10 +527,8 @@ typedef  union _SFLLACP_portState {
 } SFLLACP_portState;
 
 typedef struct _SFLLACP_counters {
-    struct eth_addr actorSystemID;   /* 6 bytes */
-    uint8_t pad1[2];
-    struct eth_addr partnerSystemID; /* 6 bytes */
-    uint8_t pad2[2];
+    uint8_t actorSystemID[8];   /* 6 bytes + 2 pad */
+    uint8_t partnerSystemID[8]; /* 6 bytes + 2 pad */
     uint32_t attachedAggID;
     SFLLACP_portState portState;
     uint32_t LACPDUsRx;

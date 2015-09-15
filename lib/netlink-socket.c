@@ -273,27 +273,63 @@ nl_sock_destroy(struct nl_sock *sock)
 
 #ifdef _WIN32
 /* Reads the pid for 'sock' generated in the kernel datapath. The function
- * uses a separate IOCTL instead of a transaction semantic to avoid unnecessary
- * message overhead. */
+ * follows a transaction semantic. Eventually this function should call into
+ * nl_transact. */
 static int
 get_sock_pid_from_kernel(struct nl_sock *sock)
 {
-    uint32_t pid = 0;
-    int retval = 0;
-    DWORD bytes = 0;
+    struct nl_transaction txn;
+    struct ofpbuf request;
+    uint64_t request_stub[128];
+    struct ofpbuf reply;
+    uint64_t reply_stub[128];
+    struct ovs_header *ovs_header;
+    struct nlmsghdr *nlmsg;
+    uint32_t seq;
+    int retval;
+    DWORD bytes;
+    int ovs_msg_size = sizeof (struct nlmsghdr) + sizeof (struct genlmsghdr) +
+                       sizeof (struct ovs_header);
 
-    if (!DeviceIoControl(sock->handle, OVS_IOCTL_GET_PID,
-                         NULL, 0, &pid, sizeof(pid),
+    ofpbuf_use_stub(&request, request_stub, sizeof request_stub);
+    txn.request = &request;
+    ofpbuf_use_stub(&reply, reply_stub, sizeof reply_stub);
+    txn.reply = &reply;
+
+    seq = nl_sock_allocate_seq(sock, 1);
+    nl_msg_put_genlmsghdr(&request, 0, OVS_WIN_NL_CTRL_FAMILY_ID, 0,
+                          OVS_CTRL_CMD_WIN_GET_PID, OVS_WIN_CONTROL_VERSION);
+    nlmsg = nl_msg_nlmsghdr(txn.request);
+    nlmsg->nlmsg_seq = seq;
+
+    ovs_header = ofpbuf_put_uninit(&request, sizeof *ovs_header);
+    ovs_header->dp_ifindex = 0;
+    ovs_header = ofpbuf_put_uninit(&reply, ovs_msg_size);
+
+    if (!DeviceIoControl(sock->handle, OVS_IOCTL_TRANSACT,
+                         ofpbuf_data(txn.request), ofpbuf_size(txn.request),
+                         ofpbuf_data(txn.reply), ofpbuf_size(txn.reply),
                          &bytes, NULL)) {
         retval = EINVAL;
+        goto done;
     } else {
-        if (bytes < sizeof(pid)) {
+        if (bytes < ovs_msg_size) {
             retval = EINVAL;
-        } else {
-            sock->pid = pid;
+            goto done;
         }
-    }
 
+        nlmsg = nl_msg_nlmsghdr(txn.reply);
+        if (nlmsg->nlmsg_seq != seq) {
+            retval = EINVAL;
+            goto done;
+        }
+        sock->pid = nlmsg->nlmsg_pid;
+    }
+    retval = 0;
+
+done:
+    ofpbuf_uninit(&request);
+    ofpbuf_uninit(&reply);
     return retval;
 }
 #endif  /* _WIN32 */
@@ -461,7 +497,7 @@ nl_sock_send__(struct nl_sock *sock, const struct ofpbuf *msg,
     struct nlmsghdr *nlmsg = nl_msg_nlmsghdr(msg);
     int error;
 
-    nlmsg->nlmsg_len = msg->size;
+    nlmsg->nlmsg_len = ofpbuf_size(msg);
     nlmsg->nlmsg_seq = nlmsg_seq;
     nlmsg->nlmsg_pid = sock->pid;
     do {
@@ -470,23 +506,21 @@ nl_sock_send__(struct nl_sock *sock, const struct ofpbuf *msg,
         DWORD bytes;
 
         if (!DeviceIoControl(sock->handle, OVS_IOCTL_WRITE,
-                             msg->data, msg->size, NULL, 0,
+                             ofpbuf_data(msg), ofpbuf_size(msg), NULL, 0,
                              &bytes, NULL)) {
             retval = -1;
             /* XXX: Map to a more appropriate error based on GetLastError(). */
             errno = EINVAL;
-            VLOG_DBG_RL(&rl, "fatal driver failure in write: %s",
-                ovs_lasterror_to_string());
         } else {
-            retval = msg->size;
+            retval = ofpbuf_size(msg);
         }
 #else
-        retval = send(sock->fd, msg->data, msg->size,
+        retval = send(sock->fd, ofpbuf_data(msg), ofpbuf_size(msg),
                       wait ? 0 : MSG_DONTWAIT);
 #endif
         error = retval < 0 ? errno : 0;
     } while (error == EINTR);
-    log_nlmsg(__func__, error, msg->data, msg->size, sock->protocol);
+    log_nlmsg(__func__, error, ofpbuf_data(msg), ofpbuf_size(msg), sock->protocol);
     if (!error) {
         COVERAGE_INC(netlink_sent);
     }
@@ -494,7 +528,7 @@ nl_sock_send__(struct nl_sock *sock, const struct ofpbuf *msg,
 }
 
 /* Tries to send 'msg', which must contain a Netlink message, to the kernel on
- * 'sock'.  nlmsg_len in 'msg' will be finalized to match msg->size, nlmsg_pid
+ * 'sock'.  nlmsg_len in 'msg' will be finalized to match ofpbuf_size(msg), nlmsg_pid
  * will be set to 'sock''s pid, and nlmsg_seq will be initialized to a fresh
  * sequence number, before the message is sent.
  *
@@ -508,7 +542,7 @@ nl_sock_send(struct nl_sock *sock, const struct ofpbuf *msg, bool wait)
 }
 
 /* Tries to send 'msg', which must contain a Netlink message, to the kernel on
- * 'sock'.  nlmsg_len in 'msg' will be finalized to match msg->size, nlmsg_pid
+ * 'sock'.  nlmsg_len in 'msg' will be finalized to match ofpbuf_size(msg), nlmsg_pid
  * will be set to 'sock''s pid, and nlmsg_seq will be initialized to
  * 'nlmsg_seq', before the message is sent.
  *
@@ -543,7 +577,7 @@ nl_sock_recv__(struct nl_sock *sock, struct ofpbuf *buf, bool wait)
     ovs_assert(buf->allocated >= sizeof *nlmsghdr);
     ofpbuf_clear(buf);
 
-    iov[0].iov_base = buf->base;
+    iov[0].iov_base = ofpbuf_base(buf);
     iov[0].iov_len = buf->allocated;
     iov[1].iov_base = tail;
     iov[1].iov_len = sizeof tail;
@@ -559,17 +593,14 @@ nl_sock_recv__(struct nl_sock *sock, struct ofpbuf *buf, bool wait)
      * anything in the receive buffer in that case, so we can initialize the
      * Netlink header with an impossible message length and then, upon success,
      * check whether it changed. */
-    nlmsghdr = buf->base;
+    nlmsghdr = ofpbuf_base(buf);
     do {
         nlmsghdr->nlmsg_len = UINT32_MAX;
 #ifdef _WIN32
         DWORD bytes;
         if (!DeviceIoControl(sock->handle, sock->read_ioctl,
                              NULL, 0, tail, sizeof tail, &bytes, NULL)) {
-            VLOG_DBG_RL(&rl, "fatal driver failure in transact: %s",
-                ovs_lasterror_to_string());
             retval = -1;
-            /* XXX: Map to a more appropriate error. */
             errno = EINVAL;
         } else {
             retval = bytes;
@@ -579,11 +610,11 @@ nl_sock_recv__(struct nl_sock *sock, struct ofpbuf *buf, bool wait)
             } else {
                 if (retval >= buf->allocated) {
                     ofpbuf_reinit(buf, retval);
-                    nlmsghdr = buf->base;
+                    nlmsghdr = ofpbuf_base(buf);
                     nlmsghdr->nlmsg_len = UINT32_MAX;
                 }
-                memcpy(buf->data, tail, retval);
-                buf->size = retval;
+                memcpy(ofpbuf_data(buf), tail, retval);
+                ofpbuf_set_size(buf, retval);
             }
         }
 #else
@@ -617,14 +648,14 @@ nl_sock_recv__(struct nl_sock *sock, struct ofpbuf *buf, bool wait)
         return EPROTO;
     }
 #ifndef _WIN32
-    buf->size = MIN(retval, buf->allocated);
+    ofpbuf_set_size(buf, MIN(retval, buf->allocated));
     if (retval > buf->allocated) {
         COVERAGE_INC(netlink_recv_jumbo);
         ofpbuf_put(buf, tail, retval - buf->allocated);
     }
 #endif
 
-    log_nlmsg(__func__, 0, buf->data, buf->size, sock->protocol);
+    log_nlmsg(__func__, 0, ofpbuf_data(buf), ofpbuf_size(buf), sock->protocol);
     COVERAGE_INC(netlink_received);
 
     return 0;
@@ -690,12 +721,12 @@ nl_sock_transact_multiple__(struct nl_sock *sock,
         struct nl_transaction *txn = transactions[i];
         struct nlmsghdr *nlmsg = nl_msg_nlmsghdr(txn->request);
 
-        nlmsg->nlmsg_len = txn->request->size;
+        nlmsg->nlmsg_len = ofpbuf_size(txn->request);
         nlmsg->nlmsg_seq = base_seq + i;
         nlmsg->nlmsg_pid = sock->pid;
 
-        iovs[i].iov_base = txn->request->data;
-        iovs[i].iov_len = txn->request->size;
+        iovs[i].iov_base = ofpbuf_data(txn->request);
+        iovs[i].iov_len = ofpbuf_size(txn->request);
     }
 
 #ifndef _WIN32
@@ -709,8 +740,8 @@ nl_sock_transact_multiple__(struct nl_sock *sock,
     for (i = 0; i < n; i++) {
         struct nl_transaction *txn = transactions[i];
 
-        log_nlmsg(__func__, error, txn->request->data,
-                  txn->request->size, sock->protocol);
+        log_nlmsg(__func__, error, ofpbuf_data(txn->request),
+                  ofpbuf_size(txn->request), sock->protocol);
     }
     if (!error) {
         COVERAGE_ADD(netlink_sent, n);
@@ -794,78 +825,61 @@ nl_sock_transact_multiple__(struct nl_sock *sock,
     uint8_t reply_buf[65536];
     for (i = 0; i < n; i++) {
         DWORD reply_len;
-        bool ret;
         struct nl_transaction *txn = transactions[i];
         struct nlmsghdr *request_nlmsg, *reply_nlmsg;
 
-        ret = DeviceIoControl(sock->handle, OVS_IOCTL_TRANSACT,
-                              txn->request->data,
-                              txn->request->size,
-                              reply_buf, sizeof reply_buf,
-                              &reply_len, NULL);
-
-        if (ret && reply_len == 0) {
-            /*
-             * The current transaction did not produce any data to read and that
-             * is not an error as such. Continue with the remainder of the
-             * transactions.
-             */
-            txn->error = 0;
-            if (txn->reply) {
-                ofpbuf_clear(txn->reply);
-            }
-        } else if (!ret) {
+        if (!DeviceIoControl(sock->handle, OVS_IOCTL_TRANSACT,
+                             ofpbuf_data(txn->request),
+                             ofpbuf_size(txn->request),
+                             reply_buf, sizeof reply_buf,
+                             &reply_len, NULL)) {
             /* XXX: Map to a more appropriate error. */
             error = EINVAL;
-            VLOG_DBG_RL(&rl, "fatal driver failure: %s",
-                ovs_lasterror_to_string());
             break;
         }
 
-        if (reply_len != 0) {
-            if (reply_len < sizeof *reply_nlmsg) {
-                nl_sock_record_errors__(transactions, n, 0);
-                VLOG_DBG_RL(&rl, "insufficient length of reply %#"PRIu32
-                    " for seq: %#"PRIx32, reply_len, request_nlmsg->nlmsg_seq);
-                break;
-            }
-
-            /* Validate the sequence number in the reply. */
-            request_nlmsg = nl_msg_nlmsghdr(txn->request);
-            reply_nlmsg = (struct nlmsghdr *)reply_buf;
-
-            if (request_nlmsg->nlmsg_seq != reply_nlmsg->nlmsg_seq) {
-                ovs_assert(request_nlmsg->nlmsg_seq == reply_nlmsg->nlmsg_seq);
-                VLOG_DBG_RL(&rl, "mismatched seq request %#"PRIx32
-                    ", reply %#"PRIx32, request_nlmsg->nlmsg_seq,
-                    reply_nlmsg->nlmsg_seq);
-                break;
-            }
-
-            /* Handle errors embedded within the netlink message. */
-            ofpbuf_use_stub(&tmp_reply, reply_buf, sizeof reply_buf);
-            tmp_reply.size = sizeof reply_buf;
-            if (nl_msg_nlmsgerr(&tmp_reply, &txn->error)) {
-                if (txn->reply) {
-                    ofpbuf_clear(txn->reply);
-                }
-                if (txn->error) {
-                    VLOG_DBG_RL(&rl, "received NAK error=%d (%s)",
-                                error, ovs_strerror(txn->error));
-                }
-            } else {
-                txn->error = 0;
-                if (txn->reply) {
-                    /* Copy the reply to the buffer specified by the caller. */
-                    if (reply_len > txn->reply->allocated) {
-                        ofpbuf_reinit(txn->reply, reply_len);
-                    }
-                    memcpy(txn->reply->data, reply_buf, reply_len);
-                    txn->reply->size = reply_len;
-                }
-            }
-            ofpbuf_uninit(&tmp_reply);
+        if (reply_len < sizeof *reply_nlmsg) {
+            nl_sock_record_errors__(transactions, n, 0);
+            VLOG_DBG_RL(&rl, "insufficient length of reply %#"PRIu32
+                " for seq: %#"PRIx32, reply_len, request_nlmsg->nlmsg_seq);
+            break;
         }
+
+        /* Validate the sequence number in the reply. */
+        request_nlmsg = nl_msg_nlmsghdr(txn->request);
+        reply_nlmsg = (struct nlmsghdr *)reply_buf;
+
+        if (request_nlmsg->nlmsg_seq != reply_nlmsg->nlmsg_seq) {
+            ovs_assert(request_nlmsg->nlmsg_seq == reply_nlmsg->nlmsg_seq);
+            VLOG_DBG_RL(&rl, "mismatched seq request %#"PRIx32
+                ", reply %#"PRIx32, request_nlmsg->nlmsg_seq,
+                reply_nlmsg->nlmsg_seq);
+            break;
+        }
+
+        /* Handle errors embedded within the netlink message. */
+        ofpbuf_use_stub(&tmp_reply, reply_buf, sizeof reply_buf);
+        ofpbuf_set_size(&tmp_reply, sizeof reply_buf);
+        if (nl_msg_nlmsgerr(&tmp_reply, &txn->error)) {
+            if (txn->reply) {
+                ofpbuf_clear(txn->reply);
+            }
+            if (txn->error) {
+                VLOG_DBG_RL(&rl, "received NAK error=%d (%s)",
+                            error, ovs_strerror(txn->error));
+            }
+        } else {
+            txn->error = 0;
+            if (txn->reply) {
+                /* Copy the reply to the buffer specified by the caller. */
+                if (reply_len > txn->reply->allocated) {
+                    ofpbuf_reinit(txn->reply, reply_len);
+                }
+                memcpy(ofpbuf_data(txn->reply), reply_buf, reply_len);
+                ofpbuf_set_size(txn->reply, reply_len);
+            }
+        }
+        ofpbuf_uninit(&tmp_reply);
 
         /* Count the number of successful transactions. */
         (*done)++;
@@ -914,12 +928,12 @@ nl_sock_transact_multiple(struct nl_sock *sock,
 #else
         enum { MAX_BATCH_BYTES = 4096 - 512 };
 #endif
-        bytes = transactions[0]->request->size;
+        bytes = ofpbuf_size(transactions[0]->request);
         for (count = 1; count < n && count < max_batch_count; count++) {
-            if (bytes + transactions[count]->request->size > MAX_BATCH_BYTES) {
+            if (bytes + ofpbuf_size(transactions[count]->request) > MAX_BATCH_BYTES) {
                 break;
             }
-            bytes += transactions[count]->request->size;
+            bytes += ofpbuf_size(transactions[count]->request);
         }
 
         error = nl_sock_transact_multiple__(sock, transactions, count, &done);
@@ -931,11 +945,6 @@ nl_sock_transact_multiple(struct nl_sock *sock,
         } else if (error) {
             VLOG_ERR_RL(&rl, "transaction error (%s)", ovs_strerror(error));
             nl_sock_record_errors__(transactions, n, error);
-            if (error != EAGAIN) {
-                /* A fatal error has occurred.  Abort the rest of
-                 * transactions. */
-                break;
-            }
         }
     }
 }
@@ -1016,7 +1025,7 @@ nl_dump_refill(struct nl_dump *dump, struct ofpbuf *buffer)
     struct nlmsghdr *nlmsghdr;
     int error;
 
-    while (!buffer->size) {
+    while (!ofpbuf_size(buffer)) {
         error = nl_sock_recv__(dump->sock, buffer, false);
         if (error) {
             /* The kernel never blocks providing the results of a dump, so
@@ -1066,12 +1075,12 @@ nl_dump_next__(struct ofpbuf *reply, struct ofpbuf *buffer)
  * initialized. 'buffer' should be at least NL_DUMP_BUFSIZE bytes long.
  *
  * If successful, returns true and points 'reply->data' and
- * 'reply->size' to the message that was retrieved. The caller must not
+ * 'ofpbuf_size(reply)' to the message that was retrieved. The caller must not
  * modify 'reply' (because it points within 'buffer', which will be used by
  * future calls to this function).
  *
  * On failure, returns false and sets 'reply->data' to NULL and
- * 'reply->size' to 0.  Failure might indicate an actual error or merely
+ * 'ofpbuf_size(reply)' to 0.  Failure might indicate an actual error or merely
  * the end of replies.  An error status for the entire dump operation is
  * provided when it is completed by calling nl_dump_done().
  *
@@ -1091,7 +1100,7 @@ nl_dump_next(struct nl_dump *dump, struct ofpbuf *reply, struct ofpbuf *buffer)
      * If the buffer is not empty, we don't check the dump's status.
      * Otherwise, we could end up skipping some of the dump results if thread A
      * hits EOF while thread B is in the midst of processing a batch. */
-    if (!buffer->size) {
+    if (!ofpbuf_size(buffer)) {
         ovs_mutex_lock(&dump->mutex);
         if (!dump->status) {
             /* Take the mutex here to avoid an in-kernel race.  If two threads
@@ -1121,8 +1130,8 @@ nl_dump_next(struct nl_dump *dump, struct ofpbuf *reply, struct ofpbuf *buffer)
     }
 
     if (retval) {
-        reply->data = NULL;
-        reply->size = 0;
+        ofpbuf_set_data(reply, NULL);
+        ofpbuf_set_size(reply, 0);
     }
     return !retval;
 }
@@ -1199,7 +1208,7 @@ pend_io_request(struct nl_sock *sock)
     ovs_header->dp_ifindex = 0;
 
     if (!DeviceIoControl(sock->handle, OVS_IOCTL_WRITE,
-                         request.data, request.size,
+                         ofpbuf_data(&request), ofpbuf_size(&request),
                          NULL, 0, &bytes, overlapped)) {
         error = GetLastError();
         /* Check if the I/O got pended */
@@ -1436,7 +1445,7 @@ do_lookup_genl_family(const char *name, struct nlattr **attrs,
 
     /* Set the total length of the netlink message. */
     nlmsg = nl_msg_nlmsghdr(reply);
-    nlmsg->nlmsg_len = reply->size;
+    nlmsg->nlmsg_len = ofpbuf_size(reply);
 
     if (!nl_policy_parse(reply, NLMSG_HDRLEN + GENL_HDRLEN,
                          family_policy, attrs, ARRAY_SIZE(family_policy))
@@ -1588,7 +1597,7 @@ nl_pool_release(struct nl_sock *sock)
  * reply, if any, is discarded.
  *
  * Before the message is sent, nlmsg_len in 'request' will be finalized to
- * match msg->size, nlmsg_pid will be set to the pid of the socket used
+ * match ofpbuf_size(msg), nlmsg_pid will be set to the pid of the socket used
  * for sending the request, and nlmsg_seq will be initialized.
  *
  * The caller is responsible for destroying 'request'.

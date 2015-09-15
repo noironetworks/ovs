@@ -1,6 +1,5 @@
 #include <linux/kernel.h>
 #include <asm/div64.h>
-#include <linux/module.h>
 #include <linux/reciprocal_div.h>
 
 /*
@@ -8,7 +7,7 @@
  * include/linux/reciprocal_div.h
  */
 
-struct reciprocal_value rpl_reciprocal_value(u32 d)
+struct reciprocal_value reciprocal_value(u32 d)
 {
 	struct reciprocal_value R;
 	u64 m;
@@ -24,4 +23,3 @@ struct reciprocal_value rpl_reciprocal_value(u32 d)
 
 	return R;
 }
-EXPORT_SYMBOL_GPL(rpl_reciprocal_value);

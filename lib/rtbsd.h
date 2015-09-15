@@ -17,7 +17,6 @@
 #ifndef RTBSD_H
 #define RTBSD_H 1
 
-#include <net/if.h>
 #include "list.h"
 
 /*

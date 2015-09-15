@@ -9,7 +9,6 @@
 #include <stdlib.h>
 #include "ofpbuf.h"
 #include "ovstest.h"
-#include "dp-packet.h"
 #include "packets.h"
 #include "openvswitch/vlog.h"
 
@@ -75,7 +74,7 @@ new_test_case(void)
 
 /* This callback is called with rstp_mutex held. */
 static void
-send_bpdu(struct dp_packet *pkt, void *port_, void *b_)
+send_bpdu(struct ofpbuf *pkt, void *port_, void *b_)
     OVS_REQUIRES(rstp_mutex)
 {
     struct bridge *b = b_;
@@ -86,8 +85,8 @@ send_bpdu(struct dp_packet *pkt, void *port_, void *b_)
     assert(port_no < b->n_ports);
     lan = b->ports[port_no];
     if (lan) {
-        const void *data = dp_packet_l3(pkt);
-        size_t size = (char *) dp_packet_tail(pkt) - (char *) data;
+        const void *data = ofpbuf_l3(pkt);
+        size_t size = (char *) ofpbuf_tail(pkt) - (char *) data;
         int i;
 
         for (i = 0; i < lan->n_conns; i++) {
@@ -104,7 +103,7 @@ send_bpdu(struct dp_packet *pkt, void *port_, void *b_)
             }
         }
     }
-    dp_packet_delete(pkt);
+    ofpbuf_delete(pkt);
 }
 
 static struct bridge *

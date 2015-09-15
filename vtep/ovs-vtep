@@ -40,7 +40,6 @@ vlog = ovs.vlog.Vlog("ovs-vtep")
 exiting = False
 
 ps_name = ""
-ps_type = ""
 Tunnel_Ip = ""
 Lswitches = {}
 Bindings = {}
@@ -104,12 +103,7 @@ class Logical_Switch(object):
             self.tunnel_key = 0
             vlog.warn("invalid tunnel key for %s, using 0" % self.name)
 
-        if ps_type:
-            ovs_vsctl("--may-exist add-br %s -- set Bridge %s datapath_type=%s"
-                      % (self.short_name, self.short_name, ps_type))
-        else:
-            ovs_vsctl("--may-exist add-br %s" % self.short_name)
-
+        ovs_vsctl("--may-exist add-br %s" % self.short_name)
         ovs_vsctl("br-set-external-id %s vtep_logical_switch true"
                   % self.short_name)
         ovs_vsctl("br-set-external-id %s logical_switch_name %s"
@@ -519,7 +513,7 @@ def add_binding(binding, ls):
 def del_binding(binding, ls):
     vlog.info("removing binding %s" % binding)
 
-    vlan, pp_name = binding.split("-", 1)
+    vlan, pp_name = binding.split("-")
     pbinding = binding+"-p"
     lbinding = binding+"-l"
 
@@ -601,9 +595,6 @@ def setup():
     if (ps_name not in br_list):
         ovs.util.ovs_fatal(0, "couldn't find OVS bridge %s" % ps_name, vlog)
 
-    global ps_type
-    ps_type = ovs_vsctl("get Bridge %s datapath_type" % ps_name).strip('"')
-
     call_prog("vtep-ctl", ["set", "physical_switch", ps_name,
                            'description="OVS VTEP Emulator"'])
 
@@ -645,11 +636,7 @@ def setup():
 
             ovs_vsctl("del-br %s" % br)
 
-    if ps_type:
-        ovs_vsctl("add-br %s -- set Bridge %s datapath_type=%s"
-                  % (bfd_bridge, bfd_bridge, ps_type))
-    else:
-        ovs_vsctl("add-br %s" % bfd_bridge)
+    ovs_vsctl("add-br %s" % bfd_bridge)
 
 
 def main():

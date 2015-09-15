@@ -16,15 +16,10 @@
 
 #include <config.h>
 #undef NDEBUG
-#include "fatal-signal.h"
 #include "ovs-atomic.h"
+#include "util.h"
 #include "ovstest.h"
 #include "ovs-thread.h"
-#include "timeval.h"
-#include "util.h"
-#include "openvswitch/vlog.h"
-
-VLOG_DEFINE_THIS_MODULE(test_atomic);
 
 #define TEST_ATOMIC_TYPE(ATOMIC_TYPE, BASE_TYPE)        \
     {                                                   \
@@ -191,7 +186,6 @@ atomic_consumer(void * arg1 OVS_UNUSED)
 {
     struct atomic_aux *old_aux = NULL;
     uint64_t count;
-    long long int stop_time = time_msec() + 1000;
 
     do {
         struct atomic_aux *aux;
@@ -208,14 +202,7 @@ atomic_consumer(void * arg1 OVS_UNUSED)
         ovs_assert(b == count + 42);
 
         old_aux = aux;
-    } while (count < ATOMIC_ITEM_COUNT - 1 && time_msec() < stop_time);
-
-    if (time_msec() >= stop_time) {
-        if (count < 10) {
-            VLOG_WARN("atomic_consumer test stopped due to excessive runtime. "
-                      "Count = %"PRIu64, count);
-        }
-    }
+    } while (count < ATOMIC_ITEM_COUNT - 1);
 
     return NULL;
 }
@@ -262,8 +249,6 @@ atomic_reader(void *aux_)
     struct atomic_aux *aux = aux_;
     uint64_t count;
     uint64_t data;
-    long long int now = time_msec();
-    long long int stop_time = now + 1000;
 
     do {
         /* Non-synchronized add. */
@@ -271,15 +256,7 @@ atomic_reader(void *aux_)
 
         do {
             atomic_read_explicit(&aux->data64, &data, memory_order_acquire);
-        } while (!data && (now = time_msec()) < stop_time);
-
-        if (now >= stop_time) {
-            if (count < 10) {
-                VLOG_WARN("atomic_reader test stopped due to excessive "
-                          "runtime. Count = %"PRIu64, count);
-            }
-            break;
-        }
+        } while (!data);
 
         ovs_assert(data == a && data == aux->b && a == aux->b);
 
@@ -300,22 +277,12 @@ atomic_writer(void *aux_)
     uint64_t old_count;
     uint64_t data;
     size_t i;
-    long long int now = time_msec();
-    long long int stop_time = now + 1000;
 
     for (i = 0; i < ATOMIC_ITEM_COUNT; i++) {
         /* Wait for the reader to be done with the data. */
         do {
             atomic_read_explicit(&aux->data64, &data, memory_order_acquire);
-        } while (data && (now = time_msec()) < stop_time);
-
-        if (now >= stop_time) {
-            if (i < 10) {
-                VLOG_WARN("atomic_writer test stopped due to excessive "
-                          "runtime, Count = %"PRIuSIZE, i);
-            }
-            break;
-        }
+        } while (data);
 
         a = i + 1;
         atomic_add_explicit(&aux->count, 1, &old_count, memory_order_relaxed);
@@ -414,7 +381,6 @@ test_atomic_seq_cst(void)
 static void
 test_atomic_main(int argc OVS_UNUSED, char *argv[] OVS_UNUSED)
 {
-    fatal_signal_init();
     test_atomic_plain();
     test_atomic_relaxed();
     test_atomic_consume();

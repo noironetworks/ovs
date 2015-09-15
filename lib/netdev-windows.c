@@ -17,7 +17,6 @@
 #include <stdlib.h>
 #include <config.h>
 #include <errno.h>
-#include <iphlpapi.h>
 
 #include <net/if.h>
 
@@ -53,7 +52,7 @@ struct netdev_windows {
 
     unsigned int cache_valid;
     int ifindex;
-    struct eth_addr mac;
+    uint8_t mac[ETH_ADDR_LEN];
     uint32_t mtu;
     unsigned int ifi_flags;
 };
@@ -70,7 +69,7 @@ struct netdev_windows_netdev_info {
 
     /* General information of a network device. */
     const char *name;
-    struct eth_addr mac_address;
+    uint8_t mac_address[ETH_ADDR_LEN];
     uint32_t mtu;
     uint32_t ifi_flags;
 };
@@ -153,6 +152,7 @@ static int
 netdev_windows_system_construct(struct netdev *netdev_)
 {
     struct netdev_windows *netdev = netdev_windows_cast(netdev_);
+    uint8_t mac[ETH_ADDR_LEN];
     struct netdev_windows_netdev_info info;
     struct ofpbuf *buf;
     int ret;
@@ -168,7 +168,7 @@ netdev_windows_system_construct(struct netdev *netdev_)
     netdev->dev_type = info.ovs_type;
     netdev->port_no = info.port_no;
 
-    netdev->mac = info.mac_address;
+    memcpy(netdev->mac, info.mac_address, ETH_ADDR_LEN);
     netdev->cache_valid = VALID_ETHERADDR;
     netdev->ifindex = -EOPNOTSUPP;
 
@@ -232,7 +232,7 @@ netdev_windows_netdev_from_ofpbuf(struct netdev_windows_netdev_info *info,
 
     netdev_windows_info_init(info);
 
-    ofpbuf_use_const(&b, buf->data, buf->size);
+    ofpbuf_use_const(&b, ofpbuf_data(buf), ofpbuf_size(buf));
     nlmsg = ofpbuf_try_pull(&b, sizeof *nlmsg);
     genl = ofpbuf_try_pull(&b, sizeof *genl);
     ovs_header = ofpbuf_try_pull(&b, sizeof *ovs_header);
@@ -248,7 +248,7 @@ netdev_windows_netdev_from_ofpbuf(struct netdev_windows_netdev_info *info,
     info->port_no = nl_attr_get_odp_port(a[OVS_WIN_NETDEV_ATTR_PORT_NO]);
     info->ovs_type = nl_attr_get_u32(a[OVS_WIN_NETDEV_ATTR_TYPE]);
     info->name = nl_attr_get_string(a[OVS_WIN_NETDEV_ATTR_NAME]);
-    memcpy(&info->mac_address, nl_attr_get_unspec(a[OVS_WIN_NETDEV_ATTR_MAC_ADDR],
+    memcpy(info->mac_address, nl_attr_get_unspec(a[OVS_WIN_NETDEV_ATTR_MAC_ADDR],
                sizeof(info->mac_address)), sizeof(info->mac_address));
     info->mtu = nl_attr_get_u32(a[OVS_WIN_NETDEV_ATTR_MTU]);
     info->ifi_flags = nl_attr_get_u32(a[OVS_WIN_NETDEV_ATTR_IF_FLAGS]);
@@ -317,13 +317,13 @@ netdev_windows_dealloc(struct netdev *netdev_)
 
 static int
 netdev_windows_get_etheraddr(const struct netdev *netdev_,
-                             struct eth_addr *mac)
+                             uint8_t mac[ETH_ADDR_LEN])
 {
     struct netdev_windows *netdev = netdev_windows_cast(netdev_);
 
     ovs_assert((netdev->cache_valid & VALID_ETHERADDR) != 0);
     if (netdev->cache_valid & VALID_ETHERADDR) {
-        *mac = netdev->mac;
+        memcpy(mac, netdev->mac, ETH_ADDR_LEN);
     } else {
         return EINVAL;
     }
@@ -348,7 +348,7 @@ netdev_windows_get_mtu(const struct netdev *netdev_, int *mtup)
  * But vswitchd bringup expects this to be implemented. */
 static int
 netdev_windows_set_etheraddr(const struct netdev *netdev_,
-                             const struct eth_addr mac)
+                             uint8_t mac[ETH_ADDR_LEN])
 {
     return 0;
 }
@@ -373,117 +373,6 @@ netdev_windows_update_flags(struct netdev *netdev_,
     return 0;
 }
 
-/* Looks up in the ARP table entry for a given 'ip'. If it is found, the
- * corresponding MAC address will be copied in 'mac' and return 0. If no
- * matching entry is found or an error occurs it will log it and return ENXIO.
- */
-static int
-netdev_windows_arp_lookup(const struct netdev *netdev,
-                          ovs_be32 ip, struct eth_addr *mac)
-{
-    PMIB_IPNETTABLE arp_table = NULL;
-    /* The buffer length of all ARP entries */
-    uint32_t buffer_length = 0;
-    uint32_t ret_val = 0;
-    uint32_t counter = 0;
-
-    ret_val = GetIpNetTable(arp_table, &buffer_length, false);
-
-    if (ret_val != ERROR_INSUFFICIENT_BUFFER ) {
-        VLOG_ERR("Call to GetIpNetTable failed with error: %s",
-                 ovs_format_message(ret_val));
-        return ENXIO;
-    }
-
-    arp_table = (MIB_IPNETTABLE *) malloc(buffer_length);
-
-    if (arp_table == NULL) {
-        VLOG_ERR("Could not allocate memory for all the interfaces");
-        return ENXIO;
-    }
-
-    ret_val = GetIpNetTable(arp_table, &buffer_length, false);
-
-    if (ret_val == NO_ERROR) {
-        for (counter = 0; counter < arp_table->dwNumEntries; counter++) {
-            if (arp_table->table[counter].dwAddr == ip) {
-                memcpy(mac, arp_table->table[counter].bPhysAddr, ETH_ADDR_LEN);
-
-                free(arp_table);
-                return 0;
-            }
-        }
-    } else {
-        VLOG_ERR("Call to GetIpNetTable failed with error: %s",
-                 ovs_format_message(ret_val));
-    }
-
-    free(arp_table);
-    return ENXIO;
-}
-
-static int
-netdev_windows_get_next_hop(const struct in_addr *host,
-                            struct in_addr *next_hop,
-                            char **netdev_name)
-{
-    uint32_t ret_val = 0;
-    /* The buffer length of all addresses */
-    uint32_t buffer_length = 1000;
-    PIP_ADAPTER_ADDRESSES all_addr = NULL;
-    PIP_ADAPTER_ADDRESSES cur_addr = NULL;
-
-    ret_val = GetAdaptersAddresses(AF_INET,
-                                   GAA_FLAG_INCLUDE_PREFIX |
-                                   GAA_FLAG_INCLUDE_GATEWAYS,
-                                   NULL, all_addr, &buffer_length);
-
-    if (ret_val != ERROR_INSUFFICIENT_BUFFER ) {
-        VLOG_ERR("Call to GetAdaptersAddresses failed with error: %s",
-                 ovs_format_message(ret_val));
-        return ENXIO;
-    }
-
-    all_addr = (IP_ADAPTER_ADDRESSES *) malloc(buffer_length);
-
-    if (all_addr == NULL) {
-        VLOG_ERR("Could not allocate memory for all the interfaces");
-        return ENXIO;
-    }
-
-    ret_val = GetAdaptersAddresses(AF_INET,
-                                   GAA_FLAG_INCLUDE_PREFIX |
-                                   GAA_FLAG_INCLUDE_GATEWAYS,
-                                   NULL, all_addr, &buffer_length);
-
-    if (ret_val == NO_ERROR) {
-        cur_addr = all_addr;
-        while (cur_addr) {
-            if(cur_addr->FirstGatewayAddress &&
-               cur_addr->FirstGatewayAddress->Address.lpSockaddr) {
-                struct sockaddr_in *ipv4 = (struct sockaddr_in *)
-                                           cur_addr->FirstGatewayAddress->Address.lpSockaddr;
-                next_hop->s_addr = ipv4->sin_addr.S_un.S_addr;
-                *netdev_name = xstrdup((char *)cur_addr->FriendlyName);
-
-                free(all_addr);
-
-                return 0;
-            }
-
-            cur_addr = cur_addr->Next;
-        }
-    } else {
-        VLOG_ERR("Call to GetAdaptersAddresses failed with error: %s",
-                 ovs_format_message(ret_val));
-    }
-
-    if (all_addr) {
-        free(all_addr);
-    }
-    return ENXIO;
-}
-
 static int
 netdev_windows_internal_construct(struct netdev *netdev_)
 {
@@ -501,8 +390,6 @@ netdev_windows_internal_construct(struct netdev *netdev_)
     .get_etheraddr      = netdev_windows_get_etheraddr,                 \
     .set_etheraddr      = netdev_windows_set_etheraddr,                 \
     .update_flags       = netdev_windows_update_flags,                  \
-    .get_next_hop       = netdev_windows_get_next_hop,                  \
-    .arp_lookup         = netdev_windows_arp_lookup,                    \
 }
 
 const struct netdev_class netdev_windows_class =

@@ -1,4 +1,4 @@
-/* Copyright (c) 2011, 2012, 2013, 2014, 2015 Nicira, Inc.
+/* Copyright (c) 2011, 2012, 2013, 2014 Nicira, Inc.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -22,8 +22,7 @@
 #include "dynamic-string.h"
 #include "hash.h"
 #include "hmap.h"
-#include "dp-packet.h"
-#include "ovs-atomic.h"
+#include "ofpbuf.h"
 #include "packets.h"
 #include "poll-loop.h"
 #include "seq.h"
@@ -53,7 +52,7 @@ VLOG_DEFINE_THIS_MODULE(lacp);
 OVS_PACKED(
 struct lacp_info {
     ovs_be16 sys_priority;            /* System priority. */
-    struct eth_addr sys_id;           /* System ID. */
+    uint8_t sys_id[ETH_ADDR_LEN];     /* System ID. */
     ovs_be16 key;                     /* Operational key. */
     ovs_be16 port_priority;           /* Port priority. */
     ovs_be16 port_id;                 /* Port ID. */
@@ -62,6 +61,7 @@ struct lacp_info {
 BUILD_ASSERT_DECL(LACP_INFO_LEN == sizeof(struct lacp_info));
 
 #define LACP_PDU_LEN 110
+OVS_PACKED(
 struct lacp_pdu {
     uint8_t subtype;          /* Always 1. */
     uint8_t version;          /* Always 1. */
@@ -80,7 +80,7 @@ struct lacp_pdu {
     uint8_t collector_len;    /* Always 16. */
     ovs_be16 collector_delay; /* Maximum collector delay. Set to UINT16_MAX. */
     uint8_t z3[64];           /* Combination of several fields.  Always 0. */
-};
+});
 BUILD_ASSERT_DECL(LACP_PDU_LEN == sizeof(struct lacp_pdu));
 
 /* Implementation. */
@@ -94,7 +94,7 @@ enum slave_status {
 struct lacp {
     struct ovs_list node;         /* Node in all_lacps list. */
     char *name;                   /* Name of this lacp object. */
-    struct eth_addr sys_id;       /* System ID. */
+    uint8_t sys_id[ETH_ADDR_LEN]; /* System ID. */
     uint16_t sys_priority;        /* System Priority. */
     bool active;                  /* Active or Passive. */
 
@@ -181,11 +181,11 @@ compose_lacp_pdu(const struct lacp_info *actor,
  * supported by OVS.  Otherwise, it returns a pointer to the lacp_pdu contained
  * within 'b'. */
 static const struct lacp_pdu *
-parse_lacp_packet(const struct dp_packet *p)
+parse_lacp_packet(const struct ofpbuf *b)
 {
     const struct lacp_pdu *pdu;
 
-    pdu = dp_packet_at(p, (uint8_t *)dp_packet_l3(p) - (uint8_t *)dp_packet_data(p),
+    pdu = ofpbuf_at(b, (uint8_t *)ofpbuf_l3(b) - (uint8_t *)ofpbuf_data(b),
                     LACP_PDU_LEN);
 
     if (pdu && pdu->subtype == 1
@@ -286,7 +286,7 @@ lacp_configure(struct lacp *lacp, const struct lacp_settings *s)
 
     if (!eth_addr_equals(lacp->sys_id, s->id)
         || lacp->sys_priority != s->priority) {
-        lacp->sys_id = s->id;
+        memcpy(lacp->sys_id, s->id, ETH_ADDR_LEN);
         lacp->sys_priority = s->priority;
         lacp->update = true;
     }
@@ -319,7 +319,7 @@ lacp_is_active(const struct lacp *lacp) OVS_EXCLUDED(mutex)
  */
 void
 lacp_process_packet(struct lacp *lacp, const void *slave_,
-                    const struct dp_packet *packet)
+                    const struct ofpbuf *packet)
     OVS_EXCLUDED(mutex)
 {
     static struct vlog_rate_limit rl = VLOG_RATE_LIMIT_INIT(1, 5);
@@ -732,7 +732,7 @@ slave_get_actor(struct slave *slave, struct lacp_info *actor)
     actor->port_priority = htons(slave->port_priority);
     actor->port_id = htons(slave->port_id);
     actor->sys_priority = htons(lacp->sys_priority);
-    actor->sys_id = lacp->sys_id;
+    memcpy(&actor->sys_id, lacp->sys_id, ETH_ADDR_LEN);
 }
 
 /* Given 'slave', populates 'priority' with data representing its LACP link
@@ -1002,8 +1002,12 @@ lacp_get_slave_stats(const struct lacp *lacp, const void *slave_, struct lacp_sl
     if (slave) {
 	ret = true;
 	slave_get_actor(slave, &actor);
-	stats->dot3adAggPortActorSystemID = actor.sys_id;
-	stats->dot3adAggPortPartnerOperSystemID = slave->partner.sys_id;
+	memcpy(&stats->dot3adAggPortActorSystemID,
+	       actor.sys_id,
+	       ETH_ADDR_LEN);
+	memcpy(&stats->dot3adAggPortPartnerOperSystemID,
+	       slave->partner.sys_id,
+	       ETH_ADDR_LEN);
 	stats->dot3adAggPortAttachedAggID = (lacp->key_slave->key ?
 					     lacp->key_slave->key :
 					     lacp->key_slave->port_id);

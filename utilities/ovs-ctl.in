@@ -30,19 +30,6 @@ done
 ## start ##
 ## ----- ##
 
-# Keep track of removed vports so we can reload them if needed
-removed_vports=""
-
-insert_mods () {
-    # Try loading openvswitch again.
-    action "Inserting openvswitch module" modprobe openvswitch
-
-    for vport in $removed_vports; do
-        # Don't treat failures to load vports as fatal error
-        action "Inserting $vport module" modprobe $vport || true
-    done
-}
-
 insert_mod_if_required () {
     # If this kernel has no module support, expect we're done.
     if test ! -e /proc/modules
@@ -56,7 +43,7 @@ insert_mod_if_required () {
      return 0
 
     # Load openvswitch.  If that's successful then we're done.
-    insert_mods && return 0
+    action "Inserting openvswitch module" modprobe openvswitch && return 0
 
     # If the bridge module is loaded, then that might be blocking
     # openvswitch.  Try to unload it, if there are no bridges.
@@ -69,7 +56,7 @@ insert_mod_if_required () {
     action "removing bridge module" rmmod bridge || return 1
 
     # Try loading openvswitch again.
-    insert_mods
+    action "Inserting openvswitch module" modprobe openvswitch
 }
 
 ovs_vsctl () {
@@ -177,12 +164,6 @@ check_force_cores () {
     fi
 }
 
-del_transient_ports () {
-    for port in `ovs-vsctl --bare -- --columns=name find port other_config:transient=true`; do
-        ovs_vsctl -- del-port "$port"
-    done
-}
-
 start_ovsdb () {
     check_force_cores
 
@@ -222,11 +203,8 @@ start_ovsdb () {
         set_system_ids || return 1
         if test X"$DELETE_BRIDGES" = Xyes; then
             for bridge in `ovs_vsctl list-br`; do
-                ovs_vsctl del-br $bridge
+        ovs_vsctl del-br $bridge
             done
-        fi
-        if test X"$DELETE_TRANSIENT_PORTS" = Xyes; then
-            del_transient_ports
         fi
     fi
 }
@@ -331,12 +309,6 @@ save_ofports_if_required () {
     esac
 }
 
-save_flows_if_required () {
-    if test X"$DELETE_BRIDGES" != Xyes; then
-        action "Saving flows" ovs_save save-flows "${script_flows}"
-    fi
-}
-
 save_interfaces () {
     "$datadir/scripts/ovs-save" save-interfaces ${ifaces} \
         > "${script_interfaces}"
@@ -387,7 +359,9 @@ force_reload_kmod () {
     action "Detected internal interfaces: $ifaces" true
 
     init_restore_scripts
-    save_flows_if_required
+
+    action "Saving flows" ovs_save save-flows "${script_flows}"
+
     save_ofports_if_required
 
     # Restart the database first, since a large database may take a
@@ -412,13 +386,6 @@ force_reload_kmod () {
 
     for dp in `ovs-dpctl dump-dps`; do
         action "Removing datapath: $dp" ovs-dpctl del-dp "$dp"
-    done
-
-    for vport in `awk '/^vport_/ { print $1 }' /proc/modules`; do
-        action "Removing $vport module" rmmod $vport
-        if ! grep -q $vport /proc/modules; then
-            removed_vports="$removed_vports $vport"
-        fi
     done
 
     # try both old and new names in case this is post upgrade
@@ -463,7 +430,7 @@ restart () {
     if daemon_is_running ovsdb-server && daemon_is_running ovs-vswitchd; then
         init_restore_scripts
         save_interfaces_if_required
-        save_flows_if_required
+        action "Saving flows" ovs_save save-flows "${script_flows}"
         save_ofports_if_required
     fi
 
@@ -545,7 +512,6 @@ set_defaults () {
     SYSTEM_ID=
 
     DELETE_BRIDGES=no
-    DELETE_TRANSIENT_PORTS=no
 
     DAEMON_CWD=/
     FORCE_COREFILES=yes
@@ -731,7 +697,7 @@ do
 done
 case $command in
     start)
-        start_ovsdb || exit 1
+        start_ovsdb
         start_forwarding
         add_managers
         ;;

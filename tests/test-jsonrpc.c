@@ -35,19 +35,16 @@
 
 OVS_NO_RETURN static void usage(void);
 static void parse_options(int argc, char *argv[]);
-static struct ovs_cmdl_command *get_all_commands(void);
+static struct command *get_all_commands(void);
 
 static void
 test_jsonrpc_main(int argc, char *argv[])
 {
-    struct ovs_cmdl_context ctx = { .argc = 0, };
-    ovs_cmdl_proctitle_init(argc, argv);
+    proctitle_init(argc, argv);
     set_program_name(argv[0]);
     service_start(&argc, &argv);
     parse_options(argc, argv);
-    ctx.argc = argc - optind;
-    ctx.argv = argv + optind;
-    ovs_cmdl_run_command(&ctx, get_all_commands());
+    run_command(argc - optind, argv + optind, get_all_commands());
 }
 
 static void
@@ -65,7 +62,7 @@ parse_options(int argc, char *argv[])
         STREAM_SSL_LONG_OPTIONS,
         {NULL, 0, NULL, 0},
     };
-    char *short_options = ovs_cmdl_long_options_to_short_options(long_options);
+    char *short_options = long_options_to_short_options(long_options);
 
     for (;;) {
         int c = getopt_long(argc, argv, short_options, long_options, NULL);
@@ -169,7 +166,7 @@ handle_rpc(struct jsonrpc *rpc, struct jsonrpc_msg *msg, bool *done)
 }
 
 static void
-do_listen(struct ovs_cmdl_context *ctx)
+do_listen(int argc OVS_UNUSED, char *argv[])
 {
     struct pstream *pstream;
     struct jsonrpc **rpcs;
@@ -177,9 +174,9 @@ do_listen(struct ovs_cmdl_context *ctx)
     bool done;
     int error;
 
-    error = jsonrpc_pstream_open(ctx->argv[1], &pstream, DSCP_DEFAULT);
+    error = jsonrpc_pstream_open(argv[1], &pstream, DSCP_DEFAULT);
     if (error) {
-        ovs_fatal(error, "could not listen on \"%s\"", ctx->argv[1]);
+        ovs_fatal(error, "could not listen on \"%s\"", argv[1]);
     }
 
     daemonize();
@@ -252,7 +249,7 @@ do_listen(struct ovs_cmdl_context *ctx)
 }
 
 static void
-do_request(struct ovs_cmdl_context *ctx)
+do_request(int argc OVS_UNUSED, char *argv[])
 {
     struct jsonrpc_msg *msg;
     struct jsonrpc *rpc;
@@ -262,18 +259,18 @@ do_request(struct ovs_cmdl_context *ctx)
     char *string;
     int error;
 
-    method = ctx->argv[2];
-    params = parse_json(ctx->argv[3]);
+    method = argv[2];
+    params = parse_json(argv[3]);
     msg = jsonrpc_create_request(method, params, NULL);
     string = jsonrpc_msg_is_valid(msg);
     if (string) {
         ovs_fatal(0, "not a valid JSON-RPC request: %s", string);
     }
 
-    error = stream_open_block(jsonrpc_stream_open(ctx->argv[1], &stream,
+    error = stream_open_block(jsonrpc_stream_open(argv[1], &stream,
                               DSCP_DEFAULT), &stream);
     if (error) {
-        ovs_fatal(error, "could not open \"%s\"", ctx->argv[1]);
+        ovs_fatal(error, "could not open \"%s\"", argv[1]);
     }
     rpc = jsonrpc_open(stream);
 
@@ -292,7 +289,7 @@ do_request(struct ovs_cmdl_context *ctx)
 }
 
 static void
-do_notify(struct ovs_cmdl_context *ctx)
+do_notify(int argc OVS_UNUSED, char *argv[])
 {
     struct jsonrpc_msg *msg;
     struct jsonrpc *rpc;
@@ -302,18 +299,18 @@ do_notify(struct ovs_cmdl_context *ctx)
     char *string;
     int error;
 
-    method = ctx->argv[2];
-    params = parse_json(ctx->argv[3]);
+    method = argv[2];
+    params = parse_json(argv[3]);
     msg = jsonrpc_create_notify(method, params);
     string = jsonrpc_msg_is_valid(msg);
     if (string) {
         ovs_fatal(0, "not a JSON RPC-valid notification: %s", string);
     }
 
-    error = stream_open_block(jsonrpc_stream_open(ctx->argv[1], &stream,
+    error = stream_open_block(jsonrpc_stream_open(argv[1], &stream,
                               DSCP_DEFAULT), &stream);
     if (error) {
-        ovs_fatal(error, "could not open \"%s\"", ctx->argv[1]);
+        ovs_fatal(error, "could not open \"%s\"", argv[1]);
     }
     rpc = jsonrpc_open(stream);
 
@@ -325,12 +322,12 @@ do_notify(struct ovs_cmdl_context *ctx)
 }
 
 static void
-do_help(struct ovs_cmdl_context *ctx OVS_UNUSED)
+do_help(int argc OVS_UNUSED, char *argv[] OVS_UNUSED)
 {
     usage();
 }
 
-static struct ovs_cmdl_command all_commands[] = {
+static struct command all_commands[] = {
     { "listen", NULL, 1, 1, do_listen },
     { "request", NULL, 3, 3, do_request },
     { "notify", NULL, 3, 3, do_notify },
@@ -338,7 +335,7 @@ static struct ovs_cmdl_command all_commands[] = {
     { NULL, NULL, 0, 0, NULL },
 };
 
-static struct ovs_cmdl_command *
+static struct command *
 get_all_commands(void)
 {
     return all_commands;

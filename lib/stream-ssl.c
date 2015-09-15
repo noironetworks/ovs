@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2008, 2009, 2010, 2011, 2012, 2013, 2014, 2015 Nicira, Inc.
+ * Copyright (c) 2008, 2009, 2010, 2011, 2012, 2013, 2014 Nicira, Inc.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -317,7 +317,7 @@ ssl_open(const char *name, char *suffix, struct stream **streamp, uint8_t dscp)
         return error;
     }
 
-    error = inet_open_active(SOCK_STREAM, suffix, OFP_PORT, NULL, &fd,
+    error = inet_open_active(SOCK_STREAM, suffix, OFP_OLD_PORT, NULL, &fd,
                              dscp);
     if (fd >= 0) {
         int state = error ? STATE_TCP_CONNECTING : STATE_SSL_CONNECTING;
@@ -634,14 +634,15 @@ ssl_do_tx(struct stream *stream)
 
     for (;;) {
         int old_state = SSL_get_state(sslv->ssl);
-        int ret = SSL_write(sslv->ssl, sslv->txbuf->data, sslv->txbuf->size);
+        int ret = SSL_write(sslv->ssl,
+                            ofpbuf_data(sslv->txbuf), ofpbuf_size(sslv->txbuf));
         if (old_state != SSL_get_state(sslv->ssl)) {
             sslv->rx_want = SSL_NOTHING;
         }
         sslv->tx_want = SSL_NOTHING;
         if (ret > 0) {
             ofpbuf_pull(sslv->txbuf, ret);
-            if (sslv->txbuf->size == 0) {
+            if (ofpbuf_size(sslv->txbuf) == 0) {
                 return 0;
             }
         } else {
@@ -800,7 +801,7 @@ pssl_open(const char *name OVS_UNUSED, char *suffix, struct pstream **pstreamp,
         return retval;
     }
 
-    fd = inet_open_passive(SOCK_STREAM, suffix, OFP_PORT, &ss, dscp, true);
+    fd = inet_open_passive(SOCK_STREAM, suffix, OFP_OLD_PORT, &ss, dscp, true);
     if (fd < 0) {
         return -fd;
     }
@@ -870,6 +871,13 @@ pssl_wait(struct pstream *pstream)
     poll_fd_wait(pssl->fd, POLLIN);
 }
 
+static int
+pssl_set_dscp(struct pstream *pstream, uint8_t dscp)
+{
+    struct pssl_pstream *pssl = pssl_pstream_cast(pstream);
+    return set_dscp(pssl->fd, dscp);
+}
+
 const struct pstream_class pssl_pstream_class = {
     "pssl",
     true,
@@ -877,6 +885,7 @@ const struct pstream_class pssl_pstream_class = {
     pssl_close,
     pssl_accept,
     pssl_wait,
+    pssl_set_dscp,
 };
 
 /*
@@ -971,7 +980,6 @@ do_ssl_init(void)
     SSL_CTX_set_mode(ctx, SSL_MODE_ACCEPT_MOVING_WRITE_BUFFER);
     SSL_CTX_set_verify(ctx, SSL_VERIFY_PEER | SSL_VERIFY_FAIL_IF_NO_PEER_CERT,
                        NULL);
-    SSL_CTX_set_session_cache_mode(ctx, SSL_SESS_CACHE_OFF);
 
     return 0;
 }

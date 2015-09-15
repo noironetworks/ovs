@@ -1,4 +1,4 @@
-# Copyright (C) 2009, 2010, 2011, 2012, 2013, 2014, 2015 Nicira, Inc.
+# Copyright (C) 2009, 2010, 2011, 2012, 2013, 2014 Nicira, Inc.
 #
 # Copying and distribution of this file, with or without modification,
 # are permitted in any medium without royalty provided the copyright
@@ -53,8 +53,6 @@ lib_libopenvswitch_la_SOURCES = \
 	lib/daemon.c \
 	lib/daemon.h \
 	lib/daemon-private.h \
-	lib/db-ctl-base.c \
-	lib/db-ctl-base.h \
 	lib/dhcp.h \
 	lib/dummy.c \
 	lib/dummy.h \
@@ -62,8 +60,6 @@ lib_libopenvswitch_la_SOURCES = \
 	lib/dirs.h \
 	lib/dpctl.c \
 	lib/dpctl.h \
-	lib/dp-packet.h \
-	lib/dp-packet.c \
 	lib/dpif-netdev.c \
 	lib/dpif-netdev.h \
 	lib/dpif-provider.h \
@@ -81,7 +77,6 @@ lib_libopenvswitch_la_SOURCES = \
 	lib/fatal-signal.h \
 	lib/flow.c \
 	lib/flow.h \
-	lib/geneve.h \
 	lib/guarded-list.c \
 	lib/guarded-list.h \
 	lib/hash.c \
@@ -165,8 +160,6 @@ lib_libopenvswitch_la_SOURCES = \
 	lib/ovs-atomic-pthreads.h \
 	lib/ovs-atomic-x86_64.h \
 	lib/ovs-atomic.h \
-	lib/ovs-lldp.c \
-	lib/ovs-lldp.h \
 	lib/ovs-rcu.c \
 	lib/ovs-rcu.h \
 	lib/ovs-router.h \
@@ -184,12 +177,12 @@ lib_libopenvswitch_la_SOURCES = \
 	lib/ovsdb-parser.h \
 	lib/ovsdb-types.c \
 	lib/ovsdb-types.h \
+	lib/packet-dpif.c \
+	lib/packet-dpif.h \
 	lib/packets.c \
 	lib/packets.h \
 	lib/pcap-file.c \
 	lib/pcap-file.h \
-	lib/perf-counter.h \
-	lib/perf-counter.c \
 	lib/poll-loop.c \
 	lib/poll-loop.h \
 	lib/process.c \
@@ -200,6 +193,7 @@ lib_libopenvswitch_la_SOURCES = \
 	lib/random.h \
 	lib/rconn.c \
 	lib/rconn.h \
+	lib/rculist.c \
 	lib/rculist.h \
 	lib/reconnect.c \
 	lib/reconnect.h \
@@ -238,13 +232,10 @@ lib_libopenvswitch_la_SOURCES = \
 	lib/string.c \
 	lib/svec.c \
 	lib/svec.h \
-	lib/syslog-direct.c \
-	lib/syslog-direct.h \
-	lib/syslog-libc.c \
-	lib/syslog-libc.h \
-	lib/syslog-provider.h \
 	lib/table.c \
 	lib/table.h \
+	lib/tag.c \
+	lib/tag.h \
 	lib/timer.c \
 	lib/timer.h \
 	lib/timeval.c \
@@ -254,8 +245,6 @@ lib_libopenvswitch_la_SOURCES = \
 	lib/tnl-ports.c \
 	lib/tnl-ports.h \
 	lib/token-bucket.c \
-	lib/tun-metadata.c \
-	lib/tun-metadata.h \
 	lib/type-props.h \
 	lib/unaligned.h \
 	lib/unicode.c \
@@ -275,14 +264,10 @@ lib_libopenvswitch_la_SOURCES = \
 	lib/vlandev.c \
 	lib/vlandev.h \
 	lib/vlog.c \
-	lib/lldp/aa-structs.h \
-	lib/lldp/lldp.c \
-	lib/lldp/lldp-const.h \
-	lib/lldp/lldp-tlv.h \
-	lib/lldp/lldpd.c \
-	lib/lldp/lldpd.h \
-	lib/lldp/lldpd-structs.c \
-	lib/lldp/lldpd-structs.h
+	lib/vswitch-idl.c \
+	lib/vswitch-idl.h \
+	lib/vtep-idl.c \
+	lib/vtep-idl.h
 
 if WIN32
 lib_libopenvswitch_la_SOURCES += \
@@ -291,7 +276,6 @@ lib_libopenvswitch_la_SOURCES += \
 	lib/getrusage-windows.c \
 	lib/latch-windows.c \
 	lib/route-table-stub.c \
-	lib/if-notifier-stub.c \
 	lib/strsep.c
 else
 lib_libopenvswitch_la_SOURCES += \
@@ -308,9 +292,7 @@ EXTRA_DIST += \
 	lib/string.h.in
 
 nodist_lib_libopenvswitch_la_SOURCES = \
-	lib/dirs.c \
-	lib/vswitch-idl.c \
-	lib/vswitch-idl.h
+	lib/dirs.c
 CLEANFILES += $(nodist_lib_libopenvswitch_la_SOURCES)
 
 lib_LTLIBRARIES += lib/libsflow.la
@@ -338,8 +320,6 @@ if LINUX
 lib_libopenvswitch_la_SOURCES += \
 	lib/dpif-netlink.c \
 	lib/dpif-netlink.h \
-	lib/if-notifier.c \
-	lib/if-notifier.h \
 	lib/netdev-linux.c \
 	lib/netdev-linux.h \
 	lib/netlink-notifier.c \
@@ -349,8 +329,8 @@ lib_libopenvswitch_la_SOURCES += \
 	lib/netlink-socket.h \
 	lib/ovs-numa.c \
 	lib/ovs-numa.h \
-	lib/rtnetlink.c \
-	lib/rtnetlink.h \
+	lib/rtnetlink-link.c \
+	lib/rtnetlink-link.h \
 	lib/route-table.c \
 	lib/route-table.h
 endif
@@ -381,13 +361,11 @@ endif
 
 if ESX
 lib_libopenvswitch_la_SOURCES += \
-	lib/route-table-stub.c \
-	lib/if-notifier-stub.c
+        lib/route-table-stub.c
 endif
 
 if HAVE_IF_DL
 lib_libopenvswitch_la_SOURCES += \
-	lib/if-notifier-bsd.c \
 	lib/netdev-bsd.c \
 	lib/rtbsd.c \
 	lib/rtbsd.h \
@@ -424,7 +402,6 @@ MAN_FRAGMENTS += \
 	lib/coverage-unixctl.man \
 	lib/daemon.man \
 	lib/daemon-syn.man \
-	lib/db-ctl-base.man \
 	lib/dpctl.man \
 	lib/memory-unixctl.man \
 	lib/ofp-version.man \
@@ -434,7 +411,6 @@ MAN_FRAGMENTS += \
 	lib/ssl-bootstrap.man \
 	lib/ssl-bootstrap-syn.man \
 	lib/ssl-peer-ca-cert.man \
-	lib/ssl-peer-ca-cert-syn.man \
 	lib/ssl.man \
 	lib/ssl-syn.man \
 	lib/table.man \
@@ -447,11 +423,29 @@ MAN_FRAGMENTS += \
 	lib/vlog.man
 
 # vswitch IDL
-OVSIDL_BUILT += lib/vswitch-idl.c lib/vswitch-idl.h lib/vswitch-idl.ovsidl
+OVSIDL_BUILT += \
+	$(srcdir)/lib/vswitch-idl.c \
+	$(srcdir)/lib/vswitch-idl.h \
+	$(srcdir)/lib/vswitch-idl.ovsidl \
+	$(srcdir)/lib/vtep-idl.c \
+	$(srcdir)/lib/vtep-idl.h \
+	$(srcdir)/lib/vtep-idl.ovsidl
 
-EXTRA_DIST += lib/vswitch-idl.ann
-lib/vswitch-idl.ovsidl: vswitchd/vswitch.ovsschema lib/vswitch-idl.ann
-	$(AM_V_GEN)$(OVSDB_IDLC) annotate $(srcdir)/vswitchd/vswitch.ovsschema $(srcdir)/lib/vswitch-idl.ann > $@.tmp && mv $@.tmp $@
+EXTRA_DIST += $(srcdir)/lib/vswitch-idl.ann
+VSWITCH_IDL_FILES = \
+	$(srcdir)/vswitchd/vswitch.ovsschema \
+	$(srcdir)/lib/vswitch-idl.ann
+$(srcdir)/lib/vswitch-idl.ovsidl: $(VSWITCH_IDL_FILES)
+	$(AM_V_GEN)$(OVSDB_IDLC) annotate $(VSWITCH_IDL_FILES) > $@.tmp && \
+	mv $@.tmp $@
+
+EXTRA_DIST += $(srcdir)/lib/vtep-idl.ann
+VTEP_IDL_FILES = \
+	$(srcdir)/vtep/vtep.ovsschema \
+	$(srcdir)/lib/vtep-idl.ann
+$(srcdir)/lib/vtep-idl.ovsidl: $(VTEP_IDL_FILES)
+	$(AM_V_GEN)$(OVSDB_IDLC) annotate $(VTEP_IDL_FILES) > $@.tmp && \
+	mv $@.tmp $@
 
 lib/dirs.c: lib/dirs.c.in Makefile
 	$(AM_V_GEN)($(ro_c) && sed < $(srcdir)/lib/dirs.c.in \
@@ -482,22 +476,22 @@ lib/ofp-actions.lo: lib/ofp-actions.inc1 lib/ofp-actions.inc2
 CLEANFILES += lib/ofp-actions.inc1 lib/ofp-actions.inc2
 EXTRA_DIST += build-aux/extract-ofp-actions
 
-lib/ofp-errors.inc: lib/ofp-errors.h include/openflow/openflow-common.h \
+$(srcdir)/lib/ofp-errors.inc: \
+	lib/ofp-errors.h include/openflow/openflow-common.h \
 	$(srcdir)/build-aux/extract-ofp-errors
 	$(AM_V_GEN)$(run_python) $(srcdir)/build-aux/extract-ofp-errors \
 		$(srcdir)/lib/ofp-errors.h \
 		$(srcdir)/include/openflow/openflow-common.h > $@.tmp && \
 	mv $@.tmp $@
-lib/ofp-errors.lo: lib/ofp-errors.inc
-CLEANFILES += lib/ofp-errors.inc
-EXTRA_DIST += build-aux/extract-ofp-errors
+$(srcdir)/lib/ofp-errors.c: $(srcdir)/lib/ofp-errors.inc
+EXTRA_DIST += build-aux/extract-ofp-errors lib/ofp-errors.inc
 
-lib/ofp-msgs.inc: lib/ofp-msgs.h $(srcdir)/build-aux/extract-ofp-msgs
+$(srcdir)/lib/ofp-msgs.inc: \
+	lib/ofp-msgs.h $(srcdir)/build-aux/extract-ofp-msgs
 	$(AM_V_GEN)$(run_python) $(srcdir)/build-aux/extract-ofp-msgs \
 		$(srcdir)/lib/ofp-msgs.h $@ > $@.tmp && mv $@.tmp $@
-lib/ofp-msgs.lo: lib/ofp-msgs.inc
-CLEANFILES += lib/ofp-msgs.inc
-EXTRA_DIST += build-aux/extract-ofp-msgs
+$(srcdir)/lib/ofp-msgs.c: $(srcdir)/lib/ofp-msgs.inc
+EXTRA_DIST += build-aux/extract-ofp-msgs lib/ofp-msgs.inc
 
 INSTALL_DATA_LOCAL += lib-install-data-local
 lib-install-data-local:

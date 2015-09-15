@@ -25,10 +25,10 @@
 #include <net/route.h>
 #include <net/xfrm.h>
 
-#ifdef HAVE_GENL_MULTICAST_GROUP_WITH_ID
-#define GROUP_ID(grp)	((grp)->id)
-#else
+#if LINUX_VERSION_CODE >= KERNEL_VERSION(3,13,0)
 #define GROUP_ID(grp)	0
+#else
+#define GROUP_ID(grp)	((grp)->id)
 #endif
 
 #if LINUX_VERSION_CODE >= KERNEL_VERSION(2,6,36)

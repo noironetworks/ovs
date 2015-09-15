@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2009, 2010, 2011, 2012, 2013, 2014, 2015 Nicira, Inc.
+ * Copyright (c) 2009, 2010, 2011, 2012, 2013, 2014 Nicira, Inc.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -36,7 +36,6 @@
 #include <sys/types.h>
 #include <sys/ioctl.h>
 #include <sys/socket.h>
-#include <sys/utsname.h>
 #include <netpacket/packet.h>
 #include <net/if.h>
 #include <net/if_arp.h>
@@ -49,7 +48,6 @@
 #include <unistd.h>
 
 #include "coverage.h"
-#include "dp-packet.h"
 #include "dpif-netlink.h"
 #include "dpif-netdev.h"
 #include "dynamic-string.h"
@@ -64,9 +62,10 @@
 #include "ofpbuf.h"
 #include "openflow/openflow.h"
 #include "ovs-atomic.h"
+#include "packet-dpif.h"
 #include "packets.h"
 #include "poll-loop.h"
-#include "rtnetlink.h"
+#include "rtnetlink-link.h"
 #include "shash.h"
 #include "socket-util.h"
 #include "sset.h"
@@ -377,18 +376,12 @@ tc_destroy(struct tc *tc)
 
 static const struct tc_ops tc_ops_htb;
 static const struct tc_ops tc_ops_hfsc;
-static const struct tc_ops tc_ops_codel;
-static const struct tc_ops tc_ops_fqcodel;
-static const struct tc_ops tc_ops_sfq;
 static const struct tc_ops tc_ops_default;
 static const struct tc_ops tc_ops_other;
 
 static const struct tc_ops *const tcs[] = {
     &tc_ops_htb,                /* Hierarchy token bucket (see tc-htb(8)). */
     &tc_ops_hfsc,               /* Hierarchical fair service curve. */
-    &tc_ops_codel,              /* Controlled delay */
-    &tc_ops_fqcodel,            /* Fair queue controlled delay */
-    &tc_ops_sfq,                /* Stochastic fair queueing */
     &tc_ops_default,            /* Default qdisc (see tc-pfifo_fast(8)). */
     &tc_ops_other,              /* Some other qdisc. */
     NULL
@@ -406,8 +399,8 @@ static struct tcmsg *tc_make_request(const struct netdev *, int type,
                                      unsigned int flags, struct ofpbuf *);
 static int tc_transact(struct ofpbuf *request, struct ofpbuf **replyp);
 static int tc_add_del_ingress_qdisc(struct netdev *netdev, bool add);
-static int tc_add_policer(struct netdev *,
-                          uint32_t kbits_rate, uint32_t kbits_burst);
+static int tc_add_policer(struct netdev *netdev, int kbits_rate,
+                          int kbits_burst);
 
 static int tc_parse_qdisc(const struct ofpbuf *, const char **kind,
                           struct nlattr **options);
@@ -443,7 +436,7 @@ struct netdev_linux {
     /* The following are figured out "on demand" only.  They are only valid
      * when the corresponding VALID_* bit in 'cache_valid' is set. */
     int ifindex;
-    struct eth_addr etheraddr;
+    uint8_t etheraddr[ETH_ADDR_LEN];
     struct in_addr address, netmask;
     struct in6_addr in6;
     int mtu;
@@ -458,8 +451,6 @@ struct netdev_linux {
     int netdev_policing_error;  /* Cached error code from set policing. */
     int get_features_error;     /* Cached error code from ETHTOOL_GSET. */
     int get_ifindex_error;      /* Cached error code from SIOCGIFINDEX. */
-    int in4_error;              /* Cached error code from reading in4 addr. */
-    int in6_error;              /* Cached error code from reading in6 addr. */
 
     enum netdev_features current;    /* Cached from ETHTOOL_GSET. */
     enum netdev_features advertised; /* Cached from ETHTOOL_GSET. */
@@ -506,8 +497,8 @@ static int get_ifindex(const struct netdev *, int *ifindexp);
 static int do_set_addr(struct netdev *netdev,
                        int ioctl_nr, const char *ioctl_name,
                        struct in_addr addr);
-static int get_etheraddr(const char *netdev_name, struct eth_addr *ea);
-static int set_etheraddr(const char *netdev_name, const struct eth_addr);
+static int get_etheraddr(const char *netdev_name, uint8_t ea[ETH_ADDR_LEN]);
+static int set_etheraddr(const char *netdev_name, const uint8_t[ETH_ADDR_LEN]);
 static int get_stats_via_netlink(const struct netdev *, struct netdev_stats *);
 static int af_packet_sock(void);
 static bool netdev_linux_miimon_enabled(void);
@@ -543,37 +534,29 @@ netdev_rxq_linux_cast(const struct netdev_rxq *rx)
 }
 
 static void netdev_linux_update(struct netdev_linux *netdev,
-                                const struct rtnetlink_change *)
+                                const struct rtnetlink_link_change *)
     OVS_REQUIRES(netdev->mutex);
 static void netdev_linux_changed(struct netdev_linux *netdev,
                                  unsigned int ifi_flags, unsigned int mask)
     OVS_REQUIRES(netdev->mutex);
 
-/* Returns a NETLINK_ROUTE socket listening for RTNLGRP_LINK,
- * RTNLGRP_IPV4_IFADDR and RTNLGRP_IPV6_IFADDR changes, or NULL
+/* Returns a NETLINK_ROUTE socket listening for RTNLGRP_LINK changes, or NULL
  * if no such socket could be created. */
 static struct nl_sock *
 netdev_linux_notify_sock(void)
 {
     static struct ovsthread_once once = OVSTHREAD_ONCE_INITIALIZER;
     static struct nl_sock *sock;
-    unsigned int mcgroups[3] = {RTNLGRP_LINK, RTNLGRP_IPV4_IFADDR,
-                                RTNLGRP_IPV6_IFADDR};
 
     if (ovsthread_once_start(&once)) {
         int error;
 
         error = nl_sock_create(NETLINK_ROUTE, &sock);
         if (!error) {
-            size_t i;
-
-            for (i = 0; i < ARRAY_SIZE(mcgroups); i++) {
-                error = nl_sock_join_mcgroup(sock, mcgroups[i]);
-                if (error) {
-                    nl_sock_destroy(sock);
-                    sock = NULL;
-                    break;
-                }
+            error = nl_sock_join_mcgroup(sock, RTNLGRP_LINK);
+            if (error) {
+                nl_sock_destroy(sock);
+                sock = NULL;
             }
         }
         ovsthread_once_done(&once);
@@ -611,9 +594,9 @@ netdev_linux_run(void)
         ofpbuf_use_stub(&buf, buf_stub, sizeof buf_stub);
         error = nl_sock_recv(sock, &buf, false);
         if (!error) {
-            struct rtnetlink_change change;
+            struct rtnetlink_link_change change;
 
-            if (rtnetlink_parse(&buf, &change)) {
+            if (rtnetlink_link_parse(&buf, &change)) {
                 struct netdev *netdev_ = netdev_from_name(change.ifname);
                 if (netdev_ && is_netdev_linux_class(netdev_->netdev_class)) {
                     struct netdev_linux *netdev = netdev_linux_cast(netdev_);
@@ -684,40 +667,32 @@ netdev_linux_changed(struct netdev_linux *dev,
 
 static void
 netdev_linux_update(struct netdev_linux *dev,
-                    const struct rtnetlink_change *change)
+                    const struct rtnetlink_link_change *change)
     OVS_REQUIRES(dev->mutex)
 {
-    if (rtnetlink_type_is_rtnlgrp_link(change->nlmsg_type)){
-        if (change->nlmsg_type == RTM_NEWLINK) {
-            /* Keep drv-info, in4, in6. */
-            netdev_linux_changed(dev, change->ifi_flags,
-                                 VALID_DRVINFO | VALID_IN4 | VALID_IN6);
+    if (change->nlmsg_type == RTM_NEWLINK) {
+        /* Keep drv-info */
+        netdev_linux_changed(dev, change->ifi_flags, VALID_DRVINFO);
 
-            /* Update netdev from rtnl-change msg. */
-            if (change->mtu) {
-                dev->mtu = change->mtu;
-                dev->cache_valid |= VALID_MTU;
-                dev->netdev_mtu_error = 0;
-            }
-
-            if (!eth_addr_is_zero(change->mac)) {
-                dev->etheraddr = change->mac;
-                dev->cache_valid |= VALID_ETHERADDR;
-                dev->ether_addr_error = 0;
-            }
-
-            dev->ifindex = change->if_index;
-            dev->cache_valid |= VALID_IFINDEX;
-            dev->get_ifindex_error = 0;
-        } else {
-            netdev_linux_changed(dev, change->ifi_flags, 0);
+        /* Update netdev from rtnl-change msg. */
+        if (change->mtu) {
+            dev->mtu = change->mtu;
+            dev->cache_valid |= VALID_MTU;
+            dev->netdev_mtu_error = 0;
         }
-    } else if (rtnetlink_type_is_rtnlgrp_addr(change->nlmsg_type)) {
-        /* Invalidates in4, in6. */
-        netdev_linux_changed(dev, dev->ifi_flags,
-                             ~(VALID_IN4 | VALID_IN6));
+
+        if (!eth_addr_is_zero(change->addr)) {
+            memcpy(dev->etheraddr, change->addr, ETH_ADDR_LEN);
+            dev->cache_valid |= VALID_ETHERADDR;
+            dev->ether_addr_error = 0;
+        }
+
+        dev->ifindex = change->ifi_index;
+        dev->cache_valid |= VALID_IFINDEX;
+        dev->get_ifindex_error = 0;
+
     } else {
-        OVS_NOT_REACHED();
+        netdev_linux_changed(dev, change->ifi_flags, 0);
     }
 }
 
@@ -966,7 +941,7 @@ auxdata_has_vlan_tci(const struct tpacket_auxdata *aux)
 }
 
 static int
-netdev_linux_rxq_recv_sock(int fd, struct dp_packet *buffer)
+netdev_linux_rxq_recv_sock(int fd, struct ofpbuf *buffer)
 {
     size_t size;
     ssize_t retval;
@@ -979,10 +954,10 @@ netdev_linux_rxq_recv_sock(int fd, struct dp_packet *buffer)
     struct msghdr msgh;
 
     /* Reserve headroom for a single VLAN tag */
-    dp_packet_reserve(buffer, VLAN_HEADER_LEN);
-    size = dp_packet_tailroom(buffer);
+    ofpbuf_reserve(buffer, VLAN_HEADER_LEN);
+    size = ofpbuf_tailroom(buffer);
 
-    iov.iov_base = dp_packet_data(buffer);
+    iov.iov_base = ofpbuf_data(buffer);
     iov.iov_len = size;
     msgh.msg_name = NULL;
     msgh.msg_namelen = 0;
@@ -1002,7 +977,7 @@ netdev_linux_rxq_recv_sock(int fd, struct dp_packet *buffer)
         return EMSGSIZE;
     }
 
-    dp_packet_set_size(buffer, dp_packet_size(buffer) + retval);
+    ofpbuf_set_size(buffer, ofpbuf_size(buffer) + retval);
 
     for (cmsg = CMSG_FIRSTHDR(&msgh); cmsg; cmsg = CMSG_NXTHDR(&msgh, cmsg)) {
         const struct tpacket_auxdata *aux;
@@ -1029,13 +1004,13 @@ netdev_linux_rxq_recv_sock(int fd, struct dp_packet *buffer)
 }
 
 static int
-netdev_linux_rxq_recv_tap(int fd, struct dp_packet *buffer)
+netdev_linux_rxq_recv_tap(int fd, struct ofpbuf *buffer)
 {
     ssize_t retval;
-    size_t size = dp_packet_tailroom(buffer);
+    size_t size = ofpbuf_tailroom(buffer);
 
     do {
-        retval = read(fd, dp_packet_data(buffer), size);
+        retval = read(fd, ofpbuf_data(buffer), size);
     } while (retval < 0 && errno == EINTR);
 
     if (retval < 0) {
@@ -1044,17 +1019,18 @@ netdev_linux_rxq_recv_tap(int fd, struct dp_packet *buffer)
         return EMSGSIZE;
     }
 
-    dp_packet_set_size(buffer, dp_packet_size(buffer) + retval);
+    ofpbuf_set_size(buffer, ofpbuf_size(buffer) + retval);
     return 0;
 }
 
 static int
-netdev_linux_rxq_recv(struct netdev_rxq *rxq_, struct dp_packet **packets,
+netdev_linux_rxq_recv(struct netdev_rxq *rxq_, struct dpif_packet **packets,
                       int *c)
 {
     struct netdev_rxq_linux *rx = netdev_rxq_linux_cast(rxq_);
     struct netdev *netdev = rx->up.netdev;
-    struct dp_packet *buffer;
+    struct dpif_packet *packet;
+    struct ofpbuf *buffer;
     ssize_t retval;
     int mtu;
 
@@ -1062,8 +1038,10 @@ netdev_linux_rxq_recv(struct netdev_rxq *rxq_, struct dp_packet **packets,
         mtu = ETH_PAYLOAD_MAX;
     }
 
-    buffer = dp_packet_new_with_headroom(VLAN_ETH_HEADER_LEN + mtu,
+    packet = dpif_packet_new_with_headroom(VLAN_ETH_HEADER_LEN + mtu,
                                            DP_NETDEV_HEADROOM);
+    buffer = &packet->ofpbuf;
+
     retval = (rx->is_tap
               ? netdev_linux_rxq_recv_tap(rx->fd, buffer)
               : netdev_linux_rxq_recv_sock(rx->fd, buffer));
@@ -1073,11 +1051,11 @@ netdev_linux_rxq_recv(struct netdev_rxq *rxq_, struct dp_packet **packets,
             VLOG_WARN_RL(&rl, "error receiving Ethernet packet on %s: %s",
                          ovs_strerror(errno), netdev_rxq_get_name(rxq_));
         }
-        dp_packet_delete(buffer);
+        dpif_packet_delete(packet);
     } else {
         dp_packet_pad(buffer);
-        dp_packet_rss_invalidate(buffer);
-        packets[0] = buffer;
+        dpif_packet_set_dp_hash(packet, 0);
+        packets[0] = packet;
         *c = 1;
     }
 
@@ -1120,15 +1098,15 @@ netdev_linux_rxq_drain(struct netdev_rxq *rxq_)
  * expected to do additional queuing of packets. */
 static int
 netdev_linux_send(struct netdev *netdev_, int qid OVS_UNUSED,
-                  struct dp_packet **pkts, int cnt, bool may_steal)
+                  struct dpif_packet **pkts, int cnt, bool may_steal)
 {
     int i;
     int error = 0;
 
     /* 'i' is incremented only if there's no error */
     for (i = 0; i < cnt;) {
-        const void *data = dp_packet_data(pkts[i]);
-        size_t size = dp_packet_size(pkts[i]);
+        const void *data = ofpbuf_data(&pkts[i]->ofpbuf);
+        size_t size = ofpbuf_size(&pkts[i]->ofpbuf);
         ssize_t retval;
 
         if (!is_tap_netdev(netdev_)) {
@@ -1202,7 +1180,7 @@ netdev_linux_send(struct netdev *netdev_, int qid OVS_UNUSED,
 
     if (may_steal) {
         for (i = 0; i < cnt; i++) {
-            dp_packet_delete(pkts[i]);
+            dpif_packet_delete(pkts[i]);
         }
     }
 
@@ -1234,7 +1212,8 @@ netdev_linux_send_wait(struct netdev *netdev, int qid OVS_UNUSED)
 /* Attempts to set 'netdev''s MAC address to 'mac'.  Returns 0 if successful,
  * otherwise a positive errno value. */
 static int
-netdev_linux_set_etheraddr(struct netdev *netdev_, const struct eth_addr mac)
+netdev_linux_set_etheraddr(struct netdev *netdev_,
+                           const uint8_t mac[ETH_ADDR_LEN])
 {
     struct netdev_linux *netdev = netdev_linux_cast(netdev_);
     enum netdev_flags old_flags = 0;
@@ -1259,7 +1238,7 @@ netdev_linux_set_etheraddr(struct netdev *netdev_, const struct eth_addr mac)
         netdev->ether_addr_error = error;
         netdev->cache_valid |= VALID_ETHERADDR;
         if (!error) {
-            netdev->etheraddr = mac;
+            memcpy(netdev->etheraddr, mac, ETH_ADDR_LEN);
         }
     }
 
@@ -1274,7 +1253,8 @@ exit:
 
 /* Copies 'netdev''s MAC address to 'mac' which is passed as param. */
 static int
-netdev_linux_get_etheraddr(const struct netdev *netdev_, struct eth_addr *mac)
+netdev_linux_get_etheraddr(const struct netdev *netdev_,
+                           uint8_t mac[ETH_ADDR_LEN])
 {
     struct netdev_linux *netdev = netdev_linux_cast(netdev_);
     int error;
@@ -1282,13 +1262,13 @@ netdev_linux_get_etheraddr(const struct netdev *netdev_, struct eth_addr *mac)
     ovs_mutex_lock(&netdev->mutex);
     if (!(netdev->cache_valid & VALID_ETHERADDR)) {
         netdev->ether_addr_error = get_etheraddr(netdev_get_name(netdev_),
-                                                 &netdev->etheraddr);
+                                                 netdev->etheraddr);
         netdev->cache_valid |= VALID_ETHERADDR;
     }
 
     error = netdev->ether_addr_error;
     if (!error) {
-        *mac = netdev->etheraddr;
+        memcpy(mac, netdev->etheraddr, ETH_ADDR_LEN);
     }
     ovs_mutex_unlock(&netdev->mutex);
 
@@ -1613,7 +1593,7 @@ get_stats_via_vport(const struct netdev *netdev_,
         int error;
 
         error = get_stats_via_vport__(netdev_, stats);
-        if (error && error != ENOENT && error != ENODEV) {
+        if (error && error != ENOENT) {
             VLOG_WARN_RL(&rl, "%s: obtaining netdev stats via vport failed "
                          "(%s)",
                          netdev_get_name(netdev_), ovs_strerror(error));
@@ -2421,11 +2401,12 @@ netdev_linux_get_in4(const struct netdev *netdev_,
         if (!error) {
             error = netdev_linux_get_ipv4(netdev_, &netdev->netmask,
                                           SIOCGIFNETMASK, "SIOCGIFNETMASK");
+            if (!error) {
+                netdev->cache_valid |= VALID_IN4;
+            }
         }
-        netdev->in4_error = error;
-        netdev->cache_valid |= VALID_IN4;
     } else {
-        error = netdev->in4_error;
+        error = 0;
     }
 
     if (!error) {
@@ -2451,19 +2432,13 @@ netdev_linux_set_in4(struct netdev *netdev_, struct in_addr address,
     ovs_mutex_lock(&netdev->mutex);
     error = do_set_addr(netdev_, SIOCSIFADDR, "SIOCSIFADDR", address);
     if (!error) {
+        netdev->cache_valid |= VALID_IN4;
         netdev->address = address;
         netdev->netmask = netmask;
         if (address.s_addr != INADDR_ANY) {
             error = do_set_addr(netdev_, SIOCSIFNETMASK,
                                 "SIOCSIFNETMASK", netmask);
         }
-    }
-
-    if (!error) {
-        netdev->cache_valid |= VALID_IN4;
-        netdev->in4_error = 0;
-    } else {
-        netdev->cache_valid &= ~VALID_IN4;
     }
     ovs_mutex_unlock(&netdev->mutex);
 
@@ -2486,14 +2461,12 @@ parse_if_inet6_line(const char *line,
                     ifname);
 }
 
-/* If 'netdev' has an assigned IPv6 address, sets '*in6' to that address.
- * Otherwise, sets '*in6' to 'in6addr_any' and returns the corresponding
- * error. */
+/* If 'netdev' has an assigned IPv6 address, sets '*in6' to that address (if
+ * 'in6' is non-null) and returns true.  Otherwise, returns false. */
 static int
 netdev_linux_get_in6(const struct netdev *netdev_, struct in6_addr *in6)
 {
     struct netdev_linux *netdev = netdev_linux_cast(netdev_);
-    int error;
 
     ovs_mutex_lock(&netdev->mutex);
     if (!(netdev->cache_valid & VALID_IN6)) {
@@ -2501,7 +2474,6 @@ netdev_linux_get_in6(const struct netdev *netdev_, struct in6_addr *in6)
         char line[128];
 
         netdev->in6 = in6addr_any;
-        netdev->in6_error = EADDRNOTAVAIL;
 
         file = fopen("/proc/net/if_inet6", "r");
         if (file != NULL) {
@@ -2513,21 +2485,17 @@ netdev_linux_get_in6(const struct netdev *netdev_, struct in6_addr *in6)
                     && !strcmp(name, ifname))
                 {
                     netdev->in6 = in6_tmp;
-                    netdev->in6_error = 0;
                     break;
                 }
             }
             fclose(file);
-        } else {
-            netdev->in6_error = EOPNOTSUPP;
         }
         netdev->cache_valid |= VALID_IN6;
     }
     *in6 = netdev->in6;
-    error = netdev->in6_error;
     ovs_mutex_unlock(&netdev->mutex);
 
-    return error;
+    return 0;
 }
 
 static void
@@ -2679,7 +2647,7 @@ netdev_internal_get_status(const struct netdev *netdev OVS_UNUSED,
  * ENXIO indicates that there is not ARP table entry for 'ip' on 'netdev'. */
 static int
 netdev_linux_arp_lookup(const struct netdev *netdev,
-                        ovs_be32 ip, struct eth_addr *mac)
+                        ovs_be32 ip, uint8_t mac[ETH_ADDR_LEN])
 {
     struct arpreq r;
     struct sockaddr_in sin;
@@ -2866,666 +2834,9 @@ const struct netdev_class netdev_internal_class =
         NULL,                  /* get_features */
         netdev_internal_get_status);
 
-
-#define CODEL_N_QUEUES 0x0000
-
-/* In sufficiently new kernel headers these are defined as enums in
- * <linux/pkt_sched.h>.  Define them here as macros to help out with older
- * kernels.  (This overrides any enum definition in the header file but that's
- * harmless.) */
-#define TCA_CODEL_TARGET   1
-#define TCA_CODEL_LIMIT    2
-#define TCA_CODEL_INTERVAL 3
-
-struct codel {
-    struct tc tc;
-    uint32_t target;
-    uint32_t limit;
-    uint32_t interval;
-};
-
-static struct codel *
-codel_get__(const struct netdev *netdev_)
-{
-    struct netdev_linux *netdev = netdev_linux_cast(netdev_);
-    return CONTAINER_OF(netdev->tc, struct codel, tc);
-}
-
-static void
-codel_install__(struct netdev *netdev_, uint32_t target, uint32_t limit,
-                uint32_t interval)
-{
-    struct netdev_linux *netdev = netdev_linux_cast(netdev_);
-    struct codel *codel;
-
-    codel = xmalloc(sizeof *codel);
-    tc_init(&codel->tc, &tc_ops_codel);
-    codel->target = target;
-    codel->limit = limit;
-    codel->interval = interval;
-
-    netdev->tc = &codel->tc;
-}
-
-static int
-codel_setup_qdisc__(struct netdev *netdev, uint32_t target, uint32_t limit,
-                    uint32_t interval)
-{
-    size_t opt_offset;
-    struct ofpbuf request;
-    struct tcmsg *tcmsg;
-    uint32_t otarget, olimit, ointerval;
-    int error;
-
-    tc_del_qdisc(netdev);
-
-    tcmsg = tc_make_request(netdev, RTM_NEWQDISC,
-                            NLM_F_EXCL | NLM_F_CREATE, &request);
-    if (!tcmsg) {
-        return ENODEV;
-    }
-    tcmsg->tcm_handle = tc_make_handle(1, 0);
-    tcmsg->tcm_parent = TC_H_ROOT;
-
-    otarget = target ? target : 5000;
-    olimit = limit ? limit : 10240;
-    ointerval = interval ? interval : 100000;
-
-    nl_msg_put_string(&request, TCA_KIND, "codel");
-    opt_offset = nl_msg_start_nested(&request, TCA_OPTIONS);
-    nl_msg_put_u32(&request, TCA_CODEL_TARGET, otarget);
-    nl_msg_put_u32(&request, TCA_CODEL_LIMIT, olimit);
-    nl_msg_put_u32(&request, TCA_CODEL_INTERVAL, ointerval);
-    nl_msg_end_nested(&request, opt_offset);
-
-    error = tc_transact(&request, NULL);
-    if (error) {
-        VLOG_WARN_RL(&rl, "failed to replace %s qdisc, "
-        "target %u, limit %u, interval %u error %d(%s)",
-        netdev_get_name(netdev),
-        otarget, olimit, ointerval,
-        error, ovs_strerror(error));
-    }
-    return error;
-}
-
-static void
-codel_parse_qdisc_details__(struct netdev *netdev OVS_UNUSED,
-                            const struct smap *details, struct codel *codel)
-{
-    const char *target_s;
-    const char *limit_s;
-    const char *interval_s;
-
-    target_s = smap_get(details, "target");
-    limit_s = smap_get(details, "limit");
-    interval_s = smap_get(details, "interval");
-
-    codel->target = target_s ? strtoull(target_s, NULL, 10) : 0;
-    codel->limit = limit_s ? strtoull(limit_s, NULL, 10) : 0;
-    codel->interval = interval_s ? strtoull(interval_s, NULL, 10) : 0;
-
-    if (!codel->target) {
-        codel->target = 5000;
-    }
-    if (!codel->limit) {
-        codel->limit = 10240;
-    }
-    if (!codel->interval) {
-        codel->interval = 100000;
-    }
-}
-
-static int
-codel_tc_install(struct netdev *netdev, const struct smap *details)
-{
-    int error;
-    struct codel codel;
-
-    codel_parse_qdisc_details__(netdev, details, &codel);
-    error = codel_setup_qdisc__(netdev, codel.target, codel.limit,
-                                codel.interval);
-    if (!error) {
-        codel_install__(netdev, codel.target, codel.limit, codel.interval);
-    }
-    return error;
-}
-
-static int
-codel_parse_tca_options__(struct nlattr *nl_options, struct codel *codel)
-{
-    static const struct nl_policy tca_codel_policy[] = {
-        [TCA_CODEL_TARGET] = { .type = NL_A_U32 },
-        [TCA_CODEL_LIMIT] = { .type = NL_A_U32 },
-        [TCA_CODEL_INTERVAL] = { .type = NL_A_U32 }
-    };
-
-    struct nlattr *attrs[ARRAY_SIZE(tca_codel_policy)];
-
-    if (!nl_parse_nested(nl_options, tca_codel_policy,
-                         attrs, ARRAY_SIZE(tca_codel_policy))) {
-        VLOG_WARN_RL(&rl, "failed to parse CoDel class options");
-        return EPROTO;
-    }
-
-    codel->target = nl_attr_get_u32(attrs[TCA_CODEL_TARGET]);
-    codel->limit = nl_attr_get_u32(attrs[TCA_CODEL_LIMIT]);
-    codel->interval = nl_attr_get_u32(attrs[TCA_CODEL_INTERVAL]);
-    return 0;
-}
-
-static int
-codel_tc_load(struct netdev *netdev, struct ofpbuf *nlmsg)
-{
-    struct nlattr *nlattr;
-    const char * kind;
-    int error;
-    struct codel codel;
-
-    error = tc_parse_qdisc(nlmsg, &kind, &nlattr);
-    if (error != 0) {
-        return error;
-    }
-
-    error = codel_parse_tca_options__(nlattr, &codel);
-    if (error != 0) {
-        return error;
-    }
-
-    codel_install__(netdev, codel.target, codel.limit, codel.interval);
-    return 0;
-}
-
-
-static void
-codel_tc_destroy(struct tc *tc)
-{
-    struct codel *codel = CONTAINER_OF(tc, struct codel, tc);
-    tc_destroy(tc);
-    free(codel);
-}
-
-static int
-codel_qdisc_get(const struct netdev *netdev, struct smap *details)
-{
-    const struct codel *codel = codel_get__(netdev);
-    smap_add_format(details, "target", "%u", codel->target);
-    smap_add_format(details, "limit", "%u", codel->limit);
-    smap_add_format(details, "interval", "%u", codel->interval);
-    return 0;
-}
-
-static int
-codel_qdisc_set(struct netdev *netdev, const struct smap *details)
-{
-    struct codel codel;
-
-    codel_parse_qdisc_details__(netdev, details, &codel);
-    codel_install__(netdev, codel.target, codel.limit, codel.interval);
-    codel_get__(netdev)->target = codel.target;
-    codel_get__(netdev)->limit = codel.limit;
-    codel_get__(netdev)->interval = codel.interval;
-    return 0;
-}
-
-static const struct tc_ops tc_ops_codel = {
-    "codel",                      /* linux_name */
-    "linux-codel",                /* ovs_name */
-    CODEL_N_QUEUES,               /* n_queues */
-    codel_tc_install,
-    codel_tc_load,
-    codel_tc_destroy,
-    codel_qdisc_get,
-    codel_qdisc_set,
-    NULL,
-    NULL,
-    NULL,
-    NULL,
-    NULL
-};
-
-/* FQ-CoDel traffic control class. */
-
-#define FQCODEL_N_QUEUES 0x0000
-
-/* In sufficiently new kernel headers these are defined as enums in
- * <linux/pkt_sched.h>.  Define them here as macros to help out with older
- * kernels.  (This overrides any enum definition in the header file but that's
- * harmless.) */
-#define TCA_FQ_CODEL_TARGET     1
-#define TCA_FQ_CODEL_LIMIT      2
-#define TCA_FQ_CODEL_INTERVAL   3
-#define TCA_FQ_CODEL_ECN        4
-#define TCA_FQ_CODEL_FLOWS      5
-#define TCA_FQ_CODEL_QUANTUM    6
-
-struct fqcodel {
-    struct tc tc;
-    uint32_t target;
-    uint32_t limit;
-    uint32_t interval;
-    uint32_t flows;
-    uint32_t quantum;
-};
-
-static struct fqcodel *
-fqcodel_get__(const struct netdev *netdev_)
-{
-    struct netdev_linux *netdev = netdev_linux_cast(netdev_);
-    return CONTAINER_OF(netdev->tc, struct fqcodel, tc);
-}
-
-static void
-fqcodel_install__(struct netdev *netdev_, uint32_t target, uint32_t limit,
-                  uint32_t interval, uint32_t flows, uint32_t quantum)
-{
-    struct netdev_linux *netdev = netdev_linux_cast(netdev_);
-    struct fqcodel *fqcodel;
-
-    fqcodel = xmalloc(sizeof *fqcodel);
-    tc_init(&fqcodel->tc, &tc_ops_fqcodel);
-    fqcodel->target = target;
-    fqcodel->limit = limit;
-    fqcodel->interval = interval;
-    fqcodel->flows = flows;
-    fqcodel->quantum = quantum;
-
-    netdev->tc = &fqcodel->tc;
-}
-
-static int
-fqcodel_setup_qdisc__(struct netdev *netdev, uint32_t target, uint32_t limit,
-                      uint32_t interval, uint32_t flows, uint32_t quantum)
-{
-    size_t opt_offset;
-    struct ofpbuf request;
-    struct tcmsg *tcmsg;
-    uint32_t otarget, olimit, ointerval, oflows,  oquantum;
-    int error;
-
-    tc_del_qdisc(netdev);
-
-    tcmsg = tc_make_request(netdev, RTM_NEWQDISC,
-                            NLM_F_EXCL | NLM_F_CREATE, &request);
-    if (!tcmsg) {
-        return ENODEV;
-    }
-    tcmsg->tcm_handle = tc_make_handle(1, 0);
-    tcmsg->tcm_parent = TC_H_ROOT;
-
-    otarget = target ? target : 5000;
-    olimit = limit ? limit : 10240;
-    ointerval = interval ? interval : 100000;
-    oflows = flows ? flows : 1024;
-    oquantum = quantum ? quantum : 1514; /* fq_codel default quantum is 1514
-                                            not mtu */
-
-    nl_msg_put_string(&request, TCA_KIND, "fq_codel");
-    opt_offset = nl_msg_start_nested(&request, TCA_OPTIONS);
-    nl_msg_put_u32(&request, TCA_FQ_CODEL_TARGET, otarget);
-    nl_msg_put_u32(&request, TCA_FQ_CODEL_LIMIT, olimit);
-    nl_msg_put_u32(&request, TCA_FQ_CODEL_INTERVAL, ointerval);
-    nl_msg_put_u32(&request, TCA_FQ_CODEL_FLOWS, oflows);
-    nl_msg_put_u32(&request, TCA_FQ_CODEL_QUANTUM, oquantum);
-    nl_msg_end_nested(&request, opt_offset);
-
-    error = tc_transact(&request, NULL);
-    if (error) {
-        VLOG_WARN_RL(&rl, "failed to replace %s qdisc, "
-        "target %u, limit %u, interval %u, flows %u, quantum %u error %d(%s)",
-        netdev_get_name(netdev),
-        otarget, olimit, ointerval, oflows, oquantum,
-        error, ovs_strerror(error));
-    }
-    return error;
-}
-
-static void
-fqcodel_parse_qdisc_details__(struct netdev *netdev OVS_UNUSED,
-                          const struct smap *details, struct fqcodel *fqcodel)
-{
-    const char *target_s;
-    const char *limit_s;
-    const char *interval_s;
-    const char *flows_s;
-    const char *quantum_s;
-
-    target_s = smap_get(details, "target");
-    limit_s = smap_get(details, "limit");
-    interval_s = smap_get(details, "interval");
-    flows_s = smap_get(details, "flows");
-    quantum_s = smap_get(details, "quantum");
-    fqcodel->target = target_s ? strtoull(target_s, NULL, 10) : 0;
-    fqcodel->limit = limit_s ? strtoull(limit_s, NULL, 10) : 0;
-    fqcodel->interval = interval_s ? strtoull(interval_s, NULL, 10) : 0;
-    fqcodel->flows = flows_s ? strtoull(flows_s, NULL, 10) : 0;
-    fqcodel->quantum = quantum_s ? strtoull(quantum_s, NULL, 10) : 0;
-    if (!fqcodel->target) {
-        fqcodel->target = 5000;
-    }
-    if (!fqcodel->limit) {
-        fqcodel->limit = 10240;
-    }
-    if (!fqcodel->interval) {
-        fqcodel->interval = 1000000;
-    }
-    if (!fqcodel->flows) {
-        fqcodel->flows = 1024;
-    }
-    if (!fqcodel->quantum) {
-        fqcodel->quantum = 1514;
-    }
-}
-
-static int
-fqcodel_tc_install(struct netdev *netdev, const struct smap *details)
-{
-    int error;
-    struct fqcodel fqcodel;
-
-    fqcodel_parse_qdisc_details__(netdev, details, &fqcodel);
-    error = fqcodel_setup_qdisc__(netdev, fqcodel.target, fqcodel.limit,
-                                  fqcodel.interval, fqcodel.flows,
-                                  fqcodel.quantum);
-    if (!error) {
-        fqcodel_install__(netdev, fqcodel.target, fqcodel.limit,
-                          fqcodel.interval, fqcodel.flows, fqcodel.quantum);
-    }
-    return error;
-}
-
-static int
-fqcodel_parse_tca_options__(struct nlattr *nl_options, struct fqcodel *fqcodel)
-{
-    static const struct nl_policy tca_fqcodel_policy[] = {
-        [TCA_FQ_CODEL_TARGET] = { .type = NL_A_U32 },
-        [TCA_FQ_CODEL_LIMIT] = { .type = NL_A_U32 },
-        [TCA_FQ_CODEL_INTERVAL] = { .type = NL_A_U32 },
-        [TCA_FQ_CODEL_FLOWS] = { .type = NL_A_U32 },
-        [TCA_FQ_CODEL_QUANTUM] = { .type = NL_A_U32 }
-    };
-
-    struct nlattr *attrs[ARRAY_SIZE(tca_fqcodel_policy)];
-
-    if (!nl_parse_nested(nl_options, tca_fqcodel_policy,
-                         attrs, ARRAY_SIZE(tca_fqcodel_policy))) {
-        VLOG_WARN_RL(&rl, "failed to parse FQ_CoDel class options");
-        return EPROTO;
-    }
-
-    fqcodel->target = nl_attr_get_u32(attrs[TCA_FQ_CODEL_TARGET]);
-    fqcodel->limit = nl_attr_get_u32(attrs[TCA_FQ_CODEL_LIMIT]);
-    fqcodel->interval =nl_attr_get_u32(attrs[TCA_FQ_CODEL_INTERVAL]);
-    fqcodel->flows = nl_attr_get_u32(attrs[TCA_FQ_CODEL_FLOWS]);
-    fqcodel->quantum = nl_attr_get_u32(attrs[TCA_FQ_CODEL_QUANTUM]);
-    return 0;
-}
-
-static int
-fqcodel_tc_load(struct netdev *netdev, struct ofpbuf *nlmsg)
-{
-    struct nlattr *nlattr;
-    const char * kind;
-    int error;
-    struct fqcodel fqcodel;
-
-    error = tc_parse_qdisc(nlmsg, &kind, &nlattr);
-    if (error != 0) {
-        return error;
-    }
-
-    error = fqcodel_parse_tca_options__(nlattr, &fqcodel);
-    if (error != 0) {
-        return error;
-    }
-
-    fqcodel_install__(netdev, fqcodel.target, fqcodel.limit, fqcodel.interval,
-                      fqcodel.flows, fqcodel.quantum);
-    return 0;
-}
-
-static void
-fqcodel_tc_destroy(struct tc *tc)
-{
-    struct fqcodel *fqcodel = CONTAINER_OF(tc, struct fqcodel, tc);
-    tc_destroy(tc);
-    free(fqcodel);
-}
-
-static int
-fqcodel_qdisc_get(const struct netdev *netdev, struct smap *details)
-{
-    const struct fqcodel *fqcodel = fqcodel_get__(netdev);
-    smap_add_format(details, "target", "%u", fqcodel->target);
-    smap_add_format(details, "limit", "%u", fqcodel->limit);
-    smap_add_format(details, "interval", "%u", fqcodel->interval);
-    smap_add_format(details, "flows", "%u", fqcodel->flows);
-    smap_add_format(details, "quantum", "%u", fqcodel->quantum);
-    return 0;
-}
-
-static int
-fqcodel_qdisc_set(struct netdev *netdev, const struct smap *details)
-{
-    struct fqcodel fqcodel;
-
-    fqcodel_parse_qdisc_details__(netdev, details, &fqcodel);
-    fqcodel_install__(netdev, fqcodel.target, fqcodel.limit, fqcodel.interval,
-                      fqcodel.flows, fqcodel.quantum);
-    fqcodel_get__(netdev)->target = fqcodel.target;
-    fqcodel_get__(netdev)->limit = fqcodel.limit;
-    fqcodel_get__(netdev)->interval = fqcodel.interval;
-    fqcodel_get__(netdev)->flows = fqcodel.flows;
-    fqcodel_get__(netdev)->quantum = fqcodel.quantum;
-    return 0;
-}
-
-static const struct tc_ops tc_ops_fqcodel = {
-    "fq_codel",                      /* linux_name */
-    "linux-fq_codel",                /* ovs_name */
-    FQCODEL_N_QUEUES,                /* n_queues */
-    fqcodel_tc_install,
-    fqcodel_tc_load,
-    fqcodel_tc_destroy,
-    fqcodel_qdisc_get,
-    fqcodel_qdisc_set,
-    NULL,
-    NULL,
-    NULL,
-    NULL,
-    NULL
-};
-
-/* SFQ traffic control class. */
-
-#define SFQ_N_QUEUES 0x0000
-
-struct sfq {
-    struct tc tc;
-    uint32_t quantum;
-    uint32_t perturb;
-};
-
-static struct sfq *
-sfq_get__(const struct netdev *netdev_)
-{
-    struct netdev_linux *netdev = netdev_linux_cast(netdev_);
-    return CONTAINER_OF(netdev->tc, struct sfq, tc);
-}
-
-static void
-sfq_install__(struct netdev *netdev_, uint32_t quantum, uint32_t perturb)
-{
-    struct netdev_linux *netdev = netdev_linux_cast(netdev_);
-    struct sfq *sfq;
-
-    sfq = xmalloc(sizeof *sfq);
-    tc_init(&sfq->tc, &tc_ops_sfq);
-    sfq->perturb = perturb;
-    sfq->quantum = quantum;
-
-    netdev->tc = &sfq->tc;
-}
-
-static int
-sfq_setup_qdisc__(struct netdev *netdev, uint32_t quantum, uint32_t perturb)
-{
-    struct tc_sfq_qopt opt;
-    struct ofpbuf request;
-    struct tcmsg *tcmsg;
-    int mtu;
-    int mtu_error, error;
-    mtu_error = netdev_linux_get_mtu__(netdev_linux_cast(netdev), &mtu);
-
-    tc_del_qdisc(netdev);
-
-    tcmsg = tc_make_request(netdev, RTM_NEWQDISC,
-                            NLM_F_EXCL | NLM_F_CREATE, &request);
-    if (!tcmsg) {
-        return ENODEV;
-    }
-    tcmsg->tcm_handle = tc_make_handle(1, 0);
-    tcmsg->tcm_parent = TC_H_ROOT;
-
-    memset(&opt, 0, sizeof opt);
-    if (!quantum) {
-        if (!mtu_error) {
-            opt.quantum = mtu; /* if we cannot find mtu, use default */
-        }
-    } else {
-        opt.quantum = quantum;
-    }
-
-    if (!perturb) {
-        opt.perturb_period = 10;
-    } else {
-        opt.perturb_period = perturb;
-    }
-
-    nl_msg_put_string(&request, TCA_KIND, "sfq");
-    nl_msg_put_unspec(&request, TCA_OPTIONS, &opt, sizeof opt);
-
-    error = tc_transact(&request, NULL);
-    if (error) {
-        VLOG_WARN_RL(&rl, "failed to replace %s qdisc, "
-                     "quantum %u, perturb %u error %d(%s)",
-                     netdev_get_name(netdev),
-                     opt.quantum, opt.perturb_period,
-                     error, ovs_strerror(error));
-    }
-    return error;
-}
-
-static void
-sfq_parse_qdisc_details__(struct netdev *netdev,
-                          const struct smap *details, struct sfq *sfq)
-{
-    const char *perturb_s;
-    const char *quantum_s;
-    int mtu;
-    int mtu_error;
-
-    perturb_s = smap_get(details, "perturb");
-    quantum_s = smap_get(details, "quantum");
-    sfq->perturb = perturb_s ? strtoull(perturb_s, NULL, 10) : 0;
-    sfq->quantum = quantum_s ? strtoull(quantum_s, NULL, 10) : 0;
-    if (!sfq->perturb) {
-        sfq->perturb = 10;
-    }
-
-    if (!sfq->quantum) {
-        mtu_error = netdev_linux_get_mtu__(netdev_linux_cast(netdev), &mtu);
-        if (!mtu_error) {
-            sfq->quantum = mtu;
-        } else {
-            VLOG_WARN_RL(&rl, "when using SFQ, you must specify quantum on a "
-                         "device without mtu");
-            return;
-        }
-    }
-}
-
-static int
-sfq_tc_install(struct netdev *netdev, const struct smap *details)
-{
-    int error;
-    struct sfq sfq;
-
-    sfq_parse_qdisc_details__(netdev, details, &sfq);
-    error = sfq_setup_qdisc__(netdev, sfq.quantum, sfq.perturb);
-    if (!error) {
-        sfq_install__(netdev, sfq.quantum, sfq.perturb);
-    }
-    return error;
-}
-
-static int
-sfq_tc_load(struct netdev *netdev, struct ofpbuf *nlmsg)
-{
-    const struct tc_sfq_qopt *sfq;
-    struct nlattr *nlattr;
-    const char * kind;
-    int error;
-
-    error = tc_parse_qdisc(nlmsg, &kind, &nlattr);
-    if (error == 0) {
-        sfq = nl_attr_get(nlattr);
-        sfq_install__(netdev, sfq->perturb_period, sfq->quantum);
-        return 0;
-    }
-
-    return error;
-}
-
-static void
-sfq_tc_destroy(struct tc *tc)
-{
-    struct sfq *sfq = CONTAINER_OF(tc, struct sfq, tc);
-    tc_destroy(tc);
-    free(sfq);
-}
-
-static int
-sfq_qdisc_get(const struct netdev *netdev, struct smap *details)
-{
-    const struct sfq *sfq = sfq_get__(netdev);
-    smap_add_format(details, "quantum", "%u", sfq->quantum);
-    smap_add_format(details, "perturb", "%u", sfq->perturb);
-    return 0;
-}
-
-static int
-sfq_qdisc_set(struct netdev *netdev, const struct smap *details)
-{
-    struct sfq sfq;
-
-    sfq_parse_qdisc_details__(netdev, details, &sfq);
-    sfq_install__(netdev, sfq.quantum, sfq.perturb);
-    sfq_get__(netdev)->quantum = sfq.quantum;
-    sfq_get__(netdev)->perturb = sfq.perturb;
-    return 0;
-}
-
-static const struct tc_ops tc_ops_sfq = {
-    "sfq",                      /* linux_name */
-    "linux-sfq",                /* ovs_name */
-    SFQ_N_QUEUES,               /* n_queues */
-    sfq_tc_install,
-    sfq_tc_load,
-    sfq_tc_destroy,
-    sfq_qdisc_get,
-    sfq_qdisc_set,
-    NULL,
-    NULL,
-    NULL,
-    NULL,
-    NULL
-};
-
 /* HTB traffic control class. */
 
 #define HTB_N_QUEUES 0xf000
-#define HTB_RATE2QUANTUM 10
 
 struct htb {
     struct tc tc;
@@ -3584,7 +2895,7 @@ htb_setup_qdisc__(struct netdev *netdev)
     nl_msg_put_string(&request, TCA_KIND, "htb");
 
     memset(&opt, 0, sizeof opt);
-    opt.rate2quantum = HTB_RATE2QUANTUM;
+    opt.rate2quantum = 10;
     opt.version = 3;
     opt.defcls = 1;
 
@@ -3618,11 +2929,6 @@ htb_setup_class__(struct netdev *netdev, unsigned int handle,
     memset(&opt, 0, sizeof opt);
     tc_fill_rate(&opt.rate, class->min_rate, mtu);
     tc_fill_rate(&opt.ceil, class->max_rate, mtu);
-    /* Makes sure the quantum is at least MTU.  Setting quantum will
-     * make htb ignore the r2q for this class. */
-    if ((class->min_rate / HTB_RATE2QUANTUM) < mtu) {
-        opt.quantum = mtu;
-    }
     opt.buffer = tc_calc_buffer(opt.rate.rate, mtu, class->burst);
     opt.cbuffer = tc_calc_buffer(opt.ceil.rate, mtu, class->burst);
     opt.prio = class->priority;
@@ -4725,13 +4031,12 @@ tc_add_del_ingress_qdisc(struct netdev *netdev, bool add)
  *              mtu 65535 drop
  *
  * The configuration and stats may be seen with the following command:
- *     /sbin/tc -s filter show dev <devname> parent ffff:
+ *     /sbin/tc -s filter show <devname> eth0 parent ffff:
  *
  * Returns 0 if successful, otherwise a positive errno value.
  */
 static int
-tc_add_policer(struct netdev *netdev,
-               uint32_t kbits_rate, uint32_t kbits_burst)
+tc_add_policer(struct netdev *netdev, int kbits_rate, int kbits_burst)
 {
     struct tc_police tc_police;
     struct ofpbuf request;
@@ -4745,22 +4050,8 @@ tc_add_policer(struct netdev *netdev,
     tc_police.action = TC_POLICE_SHOT;
     tc_police.mtu = mtu;
     tc_fill_rate(&tc_police.rate, ((uint64_t) kbits_rate * 1000)/8, mtu);
-
-    /* The following appears wrong in two ways:
-     *
-     * - tc_bytes_to_ticks() should take "bytes" as quantity for both of its
-     *   arguments (or at least consistently "bytes" as both or "bits" as
-     *   both), but this supplies bytes for the first argument and bits for the
-     *   second.
-     *
-     * - In networking a kilobit is usually 1000 bits but this uses 1024 bits.
-     *
-     * However if you "fix" those problems then "tc filter show ..." shows
-     * "125000b", meaning 125,000 bits, when OVS configures it for 1000 kbit ==
-     * 1,000,000 bits, whereas this actually ends up doing the right thing from
-     * tc's point of view.  Whatever. */
-    tc_police.burst = tc_bytes_to_ticks(
-        tc_police.rate.rate, MIN(UINT32_MAX / 1024, kbits_burst) * 1024);
+    tc_police.burst = tc_bytes_to_ticks(tc_police.rate.rate,
+                                        kbits_burst * 1024);
 
     tcmsg = tc_make_request(netdev, RTM_NEWTFILTER,
                             NLM_F_EXCL | NLM_F_CREATE, &request);
@@ -5102,31 +4393,6 @@ tc_del_qdisc(struct netdev *netdev_)
     return error;
 }
 
-static bool
-getqdisc_is_safe(void)
-{
-    static struct ovsthread_once once = OVSTHREAD_ONCE_INITIALIZER;
-    static bool safe = false;
-
-    if (ovsthread_once_start(&once)) {
-        struct utsname utsname;
-        int major, minor;
-
-        if (uname(&utsname) == -1) {
-            VLOG_WARN("uname failed (%s)", ovs_strerror(errno));
-        } else if (!ovs_scan(utsname.release, "%d.%d", &major, &minor)) {
-            VLOG_WARN("uname reported bad OS release (%s)", utsname.release);
-        } else if (major < 2 || (major == 2 && minor < 35)) {
-            VLOG_INFO("disabling unsafe RTM_GETQDISC in Linux kernel %s",
-                      utsname.release);
-        } else {
-            safe = true;
-        }
-        ovsthread_once_done(&once);
-    }
-    return safe;
-}
-
 /* If 'netdev''s qdisc type and parameters are not yet known, queries the
  * kernel to determine what they are.  Returns 0 if successful, otherwise a
  * positive errno value. */
@@ -5156,21 +4422,18 @@ tc_query_qdisc(const struct netdev *netdev_)
      * create will have a class with handle 1:0.  The built-in qdiscs only have
      * a class with handle 0:0.
      *
-     * On Linux 2.6.35+ we use the straightforward method because it allows us
-     * to handle non-builtin qdiscs without handle 1:0 (e.g. codel).  However,
-     * in such a case we get no response at all from the kernel (!) if a
-     * builtin qdisc is in use (which is later caught by "!error &&
-     * !qdisc->size"). */
+     * We could check for Linux 2.6.35+ and use a more straightforward method
+     * there. */
     tcmsg = tc_make_request(netdev_, RTM_GETQDISC, NLM_F_ECHO, &request);
     if (!tcmsg) {
         return ENODEV;
     }
-    tcmsg->tcm_handle = tc_make_handle(getqdisc_is_safe() ? 0 : 1, 0);
-    tcmsg->tcm_parent = getqdisc_is_safe() ? TC_H_ROOT : 0;
+    tcmsg->tcm_handle = tc_make_handle(1, 0);
+    tcmsg->tcm_parent = 0;
 
     /* Figure out what tc class to instantiate. */
     error = tc_transact(&request, &qdisc);
-    if (!error && qdisc->size) {
+    if (!error) {
         const char *kind;
 
         error = tc_parse_qdisc(qdisc, &kind, NULL);
@@ -5180,15 +4443,15 @@ tc_query_qdisc(const struct netdev *netdev_)
             ops = tc_lookup_linux_name(kind);
             if (!ops) {
                 static struct vlog_rate_limit rl2 = VLOG_RATE_LIMIT_INIT(1, 1);
-                VLOG_DBG_RL(&rl2, "unknown qdisc \"%s\"", kind);
+                VLOG_INFO_RL(&rl2, "unknown qdisc \"%s\"", kind);
 
                 ops = &tc_ops_other;
             }
         }
-    } else if ((!error && !qdisc->size) || error == ENOENT) {
-        /* Either it's a built-in qdisc, or (on Linux pre-2.6.35) it's a qdisc
-         * set up by some other entity that doesn't have a handle 1:0.  We will
-         * assume that it's the system default qdisc. */
+    } else if (error == ENOENT) {
+        /* Either it's a built-in qdisc, or it's a qdisc set up by some
+         * other entity that doesn't have a handle 1:0.  We will assume
+         * that it's the system default qdisc. */
         ops = &tc_ops_default;
         error = 0;
     } else {
@@ -5298,11 +4561,7 @@ netdev_linux_ethtool_set_flag(struct netdev *netdev, uint32_t flag,
     }
 
     COVERAGE_INC(netdev_set_ethtool);
-    new_flags = (evalue.data & ~flag) | (enable ? flag : 0);
-    if (new_flags == evalue.data) {
-        return 0;
-    }
-    evalue.data = new_flags;
+    evalue.data = new_flags = (evalue.data & ~flag) | (enable ? flag : 0);
     error = netdev_linux_do_ethtool(netdev_name,
                                     (struct ethtool_cmd *)&evalue,
                                     ETHTOOL_SFLAGS, "ETHTOOL_SFLAGS");
@@ -5495,7 +4754,7 @@ get_ifindex(const struct netdev *netdev_, int *ifindexp)
 }
 
 static int
-get_etheraddr(const char *netdev_name, struct eth_addr *ea)
+get_etheraddr(const char *netdev_name, uint8_t ea[ETH_ADDR_LEN])
 {
     struct ifreq ifr;
     int hwaddr_family;
@@ -5524,7 +4783,8 @@ get_etheraddr(const char *netdev_name, struct eth_addr *ea)
 }
 
 static int
-set_etheraddr(const char *netdev_name, const struct eth_addr mac)
+set_etheraddr(const char *netdev_name,
+              const uint8_t mac[ETH_ADDR_LEN])
 {
     struct ifreq ifr;
     int error;
@@ -5532,7 +4792,7 @@ set_etheraddr(const char *netdev_name, const struct eth_addr mac)
     memset(&ifr, 0, sizeof ifr);
     ovs_strzcpy(ifr.ifr_name, netdev_name, sizeof ifr.ifr_name);
     ifr.ifr_hwaddr.sa_family = ARPHRD_ETHER;
-    memcpy(ifr.ifr_hwaddr.sa_data, &mac, ETH_ADDR_LEN);
+    memcpy(ifr.ifr_hwaddr.sa_data, mac, ETH_ADDR_LEN);
     COVERAGE_INC(netdev_set_hwaddr);
     error = af_inet_ioctl(SIOCSIFHWADDR, &ifr);
     if (error) {

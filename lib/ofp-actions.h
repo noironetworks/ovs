@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2012, 2013, 2014, 2015 Nicira, Inc.
+ * Copyright (c) 2012, 2013, 2014 Nicira, Inc.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -96,7 +96,6 @@
     /* Flow table interaction. */                                       \
     OFPACT(RESUBMIT,        ofpact_resubmit,    ofpact, "resubmit")     \
     OFPACT(LEARN,           ofpact_learn,       specs, "learn")         \
-    OFPACT(CONJUNCTION,     ofpact_conjunction, ofpact, "conjunction")  \
                                                                         \
     /* Arithmetic. */                                                   \
     OFPACT(MULTIPATH,       ofpact_multipath,   ofpact, "multipath")    \
@@ -105,13 +104,6 @@
     OFPACT(NOTE,            ofpact_note,        data, "note")           \
     OFPACT(EXIT,            ofpact_null,        ofpact, "exit")         \
     OFPACT(SAMPLE,          ofpact_sample,      ofpact, "sample")       \
-    OFPACT(UNROLL_XLATE,    ofpact_unroll_xlate, ofpact, "unroll_xlate") \
-                                                                        \
-    /* Debugging actions.                                               \
-     *                                                                  \
-     * These are intentionally undocumented, subject to change, and     \
-     * only accepted if ovs-vswitchd is started with --enable-dummy. */ \
-    OFPACT(DEBUG_RECIRC, ofpact_null,           ofpact, "debug_recirc") \
                                                                         \
     /* Instructions. */                                                 \
     OFPACT(METER,           ofpact_meter,       ofpact, "meter")        \
@@ -329,7 +321,7 @@ struct ofpact_vlan_pcp {
  * Used for OFPAT10_SET_DL_SRC, OFPAT10_SET_DL_DST. */
 struct ofpact_mac {
     struct ofpact ofpact;
-    struct eth_addr mac;
+    uint8_t mac[ETH_ADDR_LEN];
 };
 
 /* OFPACT_SET_IPV4_SRC, OFPACT_SET_IPV4_DST.
@@ -619,16 +611,6 @@ enum nx_mp_algorithm {
     NX_MP_ALG_ITER_HASH = 3,
 };
 
-/* OFPACT_CONJUNCTION.
- *
- * Used for NXAST_CONJUNCTION. */
-struct ofpact_conjunction {
-    struct ofpact ofpact;
-    uint8_t clause;
-    uint8_t n_clauses;
-    uint32_t id;
-};
-
 /* OFPACT_MULTIPATH.
  *
  * Used for NXAST_MULTIPATH. */
@@ -720,17 +702,6 @@ struct ofpact_goto_table {
 struct ofpact_group {
     struct ofpact ofpact;
     uint32_t group_id;
-};
-
-/* OFPACT_UNROLL_XLATE.
- *
- * Used only internally. */
-struct ofpact_unroll_xlate {
-    struct ofpact ofpact;
-
-    /* Metadata in xlate context, visible to controller via PACKET_INs. */
-    uint8_t  rule_table_id;       /* 0xFF if none. */
-    ovs_be64 rule_cookie;         /* OVS_BE64_MAX if none. */
 };
 
 /* Converting OpenFlow to ofpacts. */

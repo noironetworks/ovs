@@ -16,8 +16,6 @@
 
 #include <config.h>
 
-#include "rtbsd.h"
-
 #include <unistd.h>
 #include <errno.h>
 #include <sys/socket.h>
@@ -29,6 +27,7 @@
 #include "socket-util.h"
 #include "poll-loop.h"
 #include "openvswitch/vlog.h"
+#include "rtbsd.h"
 
 VLOG_DEFINE_THIS_MODULE(rtbsd);
 COVERAGE_DEFINE(rtbsd_changed);
@@ -124,15 +123,8 @@ rtbsd_notifier_run(void)
         if (retval >= 0) {
             /* received packet from PF_ROUTE socket
              * XXX check for bad packets */
-            switch (msg.ifm_type) {
-            case RTM_IFINFO:
-            /* Since RTM_IFANNOUNCE messages are smaller than RTM_IFINFO
-             * messages, the same buffer may be used. */
-            case RTM_IFANNOUNCE:
+            if (msg.ifm_type == RTM_IFINFO) {
                 rtbsd_report_change(&msg);
-                break;
-            default:
-                break;
             }
         } else if (errno == EAGAIN) {
             ovs_mutex_unlock(&rtbsd_mutex);
@@ -168,24 +160,13 @@ rtbsd_report_change(const struct if_msghdr *msg)
 {
     struct rtbsd_notifier *notifier;
     struct rtbsd_change change;
-    const struct if_announcemsghdr *ahdr;
 
     COVERAGE_INC(rtbsd_changed);
 
     change.msg_type = msg->ifm_type; //XXX
+    change.if_index = msg->ifm_index;
+    if_indextoname(msg->ifm_index, change.if_name);
     change.master_ifindex = 0; //XXX
-
-    switch (msg->ifm_type) {
-    case RTM_IFINFO:
-        change.if_index = msg->ifm_index;
-        if_indextoname(msg->ifm_index, change.if_name);
-        break;
-    case RTM_IFANNOUNCE:
-        ahdr = (const struct if_announcemsghdr *) msg;
-        change.if_index = ahdr->ifan_index;
-        strncpy(change.if_name, ahdr->ifan_name, IF_NAMESIZE);
-        break;
-    }
 
     LIST_FOR_EACH (notifier, node, &all_notifiers) {
         notifier->cb(&change, notifier->aux);

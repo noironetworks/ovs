@@ -38,7 +38,6 @@
 #include "byte-order.h"
 #include "connectivity.h"
 #include "ofpbuf.h"
-#include "dp-packet.h"
 #include "packets.h"
 #include "seq.h"
 #include "unixctl.h"
@@ -690,19 +689,19 @@ rstp_send_bpdu(struct rstp_port *p, const void *bpdu, size_t bpdu_size)
 {
     struct eth_header *eth;
     struct llc_header *llc;
-    struct dp_packet *pkt;
+    struct ofpbuf *pkt;
 
     /* Skeleton. */
-    pkt = dp_packet_new(ETH_HEADER_LEN + LLC_HEADER_LEN + bpdu_size);
-    eth = dp_packet_put_zeros(pkt, sizeof *eth);
-    llc = dp_packet_put_zeros(pkt, sizeof *llc);
-    dp_packet_reset_offsets(pkt);
-    dp_packet_set_l3(pkt, dp_packet_put(pkt, bpdu, bpdu_size));
+    pkt = ofpbuf_new(ETH_HEADER_LEN + LLC_HEADER_LEN + bpdu_size);
+    eth = ofpbuf_put_zeros(pkt, sizeof *eth);
+    llc = ofpbuf_put_zeros(pkt, sizeof *llc);
+    ofpbuf_set_frame(pkt, eth);
+    ofpbuf_set_l3(pkt, ofpbuf_put(pkt, bpdu, bpdu_size));
 
     /* 802.2 header. */
-    eth->eth_dst = eth_addr_stp;
+    memcpy(eth->eth_dst, eth_addr_stp, ETH_ADDR_LEN);
     /* p->rstp->send_bpdu() must fill in source address. */
-    eth->eth_type = htons(dp_packet_size(pkt) - ETH_HEADER_LEN);
+    eth->eth_type = htons(ofpbuf_size(pkt) - ETH_HEADER_LEN);
 
     /* LLC header. */
     llc->llc_dsap = STP_LLC_DSAP;
@@ -1858,6 +1857,7 @@ port_role_transition_sm(struct rstp_port *p)
                  p->port_role_transition_sm_state);
     }
     if (last_role != p->role) {
+        last_role = p->role;
         VLOG_DBG("%s, port %u, port role ["RSTP_PORT_ID_FMT"] = %s",
                  p->rstp->name, p->port_number, p->port_id,
                  rstp_port_role_name(p->role));

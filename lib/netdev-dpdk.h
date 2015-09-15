@@ -3,7 +3,7 @@
 
 #include <config.h>
 
-struct dp_packet;
+struct dpif_packet;
 
 #ifdef DPDK_NETDEV
 
@@ -20,16 +20,13 @@ struct dp_packet;
 #include <rte_launch.h>
 #include <rte_malloc.h>
 
-#define NON_PMD_CORE_ID LCORE_ID_ANY
-
 int dpdk_init(int argc, char **argv);
 void netdev_dpdk_register(void);
-void free_dpdk_buf(struct dp_packet *);
-int pmd_thread_setaffinity_cpu(unsigned cpu);
+void free_dpdk_buf(struct dpif_packet *);
+int pmd_thread_setaffinity_cpu(int cpu);
+void thread_set_nonpmd(void);
 
 #else
-
-#define NON_PMD_CORE_ID UINT32_MAX
 
 #include "util.h"
 
@@ -49,15 +46,21 @@ netdev_dpdk_register(void)
 }
 
 static inline void
-free_dpdk_buf(struct dp_packet *buf OVS_UNUSED)
+free_dpdk_buf(struct dpif_packet *buf OVS_UNUSED)
 {
     /* Nothing */
 }
 
 static inline int
-pmd_thread_setaffinity_cpu(unsigned cpu OVS_UNUSED)
+pmd_thread_setaffinity_cpu(int cpu OVS_UNUSED)
 {
     return 0;
+}
+
+static inline void
+thread_set_nonpmd(void)
+{
+    /* Nothing */
 }
 
 #endif /* DPDK_NETDEV */

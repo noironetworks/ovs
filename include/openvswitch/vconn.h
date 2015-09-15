@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2008, 2009, 2010, 2011, 2012, 2013, 2014, 2015 Nicira, Inc.
+ * Copyright (c) 2008, 2009, 2010, 2011, 2012, 2013, 2014 Nicira, Inc.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -27,10 +27,23 @@ extern "C" {
 #endif
 
 struct ofpbuf;
-struct pvconn;
-struct pvconn_class;
-struct vconn;
 struct vconn_class;
+struct pvconn_class;
+
+/* This structure should be treated as opaque by vconn implementations. */
+struct vconn {
+    const struct vconn_class *class;
+    int state;
+    int error;
+
+    /* OpenFlow versions. */
+    uint32_t allowed_versions;  /* Bitmap of versions we will accept. */
+    uint32_t peer_versions;     /* Peer's bitmap of versions it will accept. */
+    enum ofp_version version;   /* Negotiated version (or 0). */
+    bool recv_any_version;      /* True to receive a message of any version. */
+
+    char *name;
+};
 
 void vconn_usage(bool active, bool passive, bool bootstrap);
 
@@ -55,9 +68,6 @@ int vconn_transact(struct vconn *, struct ofpbuf *, struct ofpbuf **);
 int vconn_transact_noreply(struct vconn *, struct ofpbuf *, struct ofpbuf **);
 int vconn_transact_multiple_noreply(struct vconn *, struct ovs_list *requests,
                                     struct ofpbuf **replyp);
-int vconn_bundle_transact(struct vconn *, struct ovs_list *requests,
-                          uint16_t bundle_flags,
-                          void (*error_reporter)(const struct ofp_header *));
 
 void vconn_run(struct vconn *);
 void vconn_run_wait(struct vconn *);
@@ -80,7 +90,14 @@ void vconn_connect_wait(struct vconn *);
 void vconn_recv_wait(struct vconn *);
 void vconn_send_wait(struct vconn *);
 
-/* Passive vconns: virtual listeners for incoming OpenFlow connections. */
+/* Passive vconns: virtual listeners for incoming OpenFlow connections.
+ *
+ * This structure should be treated as opaque by vconn implementations. */
+struct pvconn {
+    const struct pvconn_class *class;
+    char *name;
+    uint32_t allowed_versions;
+};
 int pvconn_verify_name(const char *name);
 int pvconn_open(const char *name, uint32_t allowed_versions, uint8_t dscp,
                 struct pvconn **pvconnp);

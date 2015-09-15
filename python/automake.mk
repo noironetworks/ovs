@@ -35,17 +35,6 @@ ovs_pyfiles = \
 	python/ovs/version.py \
 	python/ovs/vlog.py
 
-# These python files are used at build time but not runtime,
-# so they are not installed.
-EXTRA_DIST += \
-	python/build/__init__.py \
-	python/build/nroff.py
-
-# PyPI support.
-EXTRA_DIST += \
-	python/README.rst \
-	python/setup.py
-
 PYFILES = $(ovs_pyfiles) python/ovs/dirs.py $(ovstest_pyfiles)
 EXTRA_DIST += $(PYFILES)
 PYCOV_CLEAN_FILES += $(PYFILES:.py=.py,cover)
@@ -67,12 +56,6 @@ ovs-install-data-local:
 	$(MKDIR_P) $(DESTDIR)$(pkgdatadir)/python/ovs
 	$(INSTALL_DATA) python/ovs/dirs.py.tmp $(DESTDIR)$(pkgdatadir)/python/ovs/dirs.py
 	rm python/ovs/dirs.py.tmp
-
-python-sdist: $(srcdir)/python/ovs/version.py $(ovs_pyfiles) python/ovs/dirs.py
-	(cd python/ && $(PYTHON) setup.py sdist)
-
-pypi-upload: $(srcdir)/python/ovs/version.py $(ovs_pyfiles) python/ovs/dirs.py
-	(cd python/ && $(PYTHON) setup.py sdist upload)
 else
 ovs-install-data-local:
 	@:
@@ -101,4 +84,4 @@ $(srcdir)/python/ovs/dirs.py: python/ovs/dirs.py.template
                 -e 's,[@]DBDIR[@],/usr/local/etc/openvswitch,g' \
 		< $? > $@.tmp && \
 	mv $@.tmp $@
-EXTRA_DIST += python/ovs/dirs.py.template
+EXTRA_DIST += python/ovs/dirs.py python/ovs/dirs.py.template

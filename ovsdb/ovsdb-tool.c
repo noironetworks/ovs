@@ -44,7 +44,7 @@
 /* -m, --more: Verbosity level for "show-log" command output. */
 static int show_log_verbosity;
 
-static const struct ovs_cmdl_command *get_all_commands(void);
+static const struct command *get_all_commands(void);
 
 OVS_NO_RETURN static void usage(void);
 static void parse_options(int argc, char *argv[]);
@@ -55,13 +55,10 @@ static const char *default_schema(void);
 int
 main(int argc, char *argv[])
 {
-    struct ovs_cmdl_context ctx = { .argc = 0, };
     set_program_name(argv[0]);
     parse_options(argc, argv);
     fatal_ignore_sigpipe();
-    ctx.argc = argc - optind;
-    ctx.argv = argv + optind;
-    ovs_cmdl_run_command(&ctx, get_all_commands());
+    run_command(argc - optind, argv + optind, get_all_commands());
     return 0;
 }
 
@@ -76,7 +73,7 @@ parse_options(int argc, char *argv[])
         {"version", no_argument, NULL, 'V'},
         {NULL, 0, NULL, 0},
     };
-    char *short_options = ovs_cmdl_long_options_to_short_options(long_options);
+    char *short_options = long_options_to_short_options(long_options);
 
     for (;;) {
         int c;
@@ -95,7 +92,7 @@ parse_options(int argc, char *argv[])
             usage();
 
         case 'o':
-            ovs_cmdl_print_options(long_options);
+            print_options(long_options);
             exit(EXIT_SUCCESS);
 
         case 'V':
@@ -190,10 +187,10 @@ check_ovsdb_error(struct ovsdb_error *error)
 }
 
 static void
-do_create(struct ovs_cmdl_context *ctx)
+do_create(int argc, char *argv[])
 {
-    const char *db_file_name = ctx->argc >= 2 ? ctx->argv[1] : default_db();
-    const char *schema_file_name = ctx->argc >= 3 ? ctx->argv[2] : default_schema();
+    const char *db_file_name = argc >= 2 ? argv[1] : default_db();
+    const char *schema_file_name = argc >= 3 ? argv[2] : default_schema();
     struct ovsdb_schema *schema;
     struct ovsdb_log *log;
     struct json *json;
@@ -275,20 +272,20 @@ compact_or_convert(const char *src_name_, const char *dst_name_,
 }
 
 static void
-do_compact(struct ovs_cmdl_context *ctx)
+do_compact(int argc, char *argv[])
 {
-    const char *db = ctx->argc >= 2 ? ctx->argv[1] : default_db();
-    const char *target = ctx->argc >= 3 ? ctx->argv[2] : NULL;
+    const char *db = argc >= 2 ? argv[1] : default_db();
+    const char *target = argc >= 3 ? argv[2] : NULL;
 
     compact_or_convert(db, target, NULL, "compacted by ovsdb-tool "VERSION);
 }
 
 static void
-do_convert(struct ovs_cmdl_context *ctx)
+do_convert(int argc, char *argv[])
 {
-    const char *db = ctx->argc >= 2 ? ctx->argv[1] : default_db();
-    const char *schema = ctx->argc >= 3 ? ctx->argv[2] : default_schema();
-    const char *target = ctx->argc >= 4 ? ctx->argv[3] : NULL;
+    const char *db = argc >= 2 ? argv[1] : default_db();
+    const char *schema = argc >= 3 ? argv[2] : default_schema();
+    const char *target = argc >= 4 ? argv[3] : NULL;
     struct ovsdb_schema *new_schema;
 
     check_ovsdb_error(ovsdb_schema_from_file(schema, &new_schema));
@@ -298,10 +295,10 @@ do_convert(struct ovs_cmdl_context *ctx)
 }
 
 static void
-do_needs_conversion(struct ovs_cmdl_context *ctx)
+do_needs_conversion(int argc, char *argv[])
 {
-    const char *db_file_name = ctx->argc >= 2 ? ctx->argv[1] : default_db();
-    const char *schema_file_name = ctx->argc >= 3 ? ctx->argv[2] : default_schema();
+    const char *db_file_name = argc >= 2 ? argv[1] : default_db();
+    const char *schema_file_name = argc >= 3 ? argv[2] : default_schema();
     struct ovsdb_schema *schema1, *schema2;
 
     check_ovsdb_error(ovsdb_file_read_schema(db_file_name, &schema1));
@@ -312,9 +309,9 @@ do_needs_conversion(struct ovs_cmdl_context *ctx)
 }
 
 static void
-do_db_version(struct ovs_cmdl_context *ctx)
+do_db_version(int argc, char *argv[])
 {
-    const char *db_file_name = ctx->argc >= 2 ? ctx->argv[1] : default_db();
+    const char *db_file_name = argc >= 2 ? argv[1] : default_db();
     struct ovsdb_schema *schema;
 
     check_ovsdb_error(ovsdb_file_read_schema(db_file_name, &schema));
@@ -323,9 +320,9 @@ do_db_version(struct ovs_cmdl_context *ctx)
 }
 
 static void
-do_db_cksum(struct ovs_cmdl_context *ctx)
+do_db_cksum(int argc OVS_UNUSED, char *argv[])
 {
-    const char *db_file_name = ctx->argc >= 2 ? ctx->argv[1] : default_db();
+    const char *db_file_name = argc >= 2 ? argv[1] : default_db();
     struct ovsdb_schema *schema;
 
     check_ovsdb_error(ovsdb_file_read_schema(db_file_name, &schema));
@@ -334,9 +331,9 @@ do_db_cksum(struct ovs_cmdl_context *ctx)
 }
 
 static void
-do_schema_version(struct ovs_cmdl_context *ctx)
+do_schema_version(int argc, char *argv[])
 {
-    const char *schema_file_name = ctx->argc >= 2 ? ctx->argv[1] : default_schema();
+    const char *schema_file_name = argc >= 2 ? argv[1] : default_schema();
     struct ovsdb_schema *schema;
 
     check_ovsdb_error(ovsdb_schema_from_file(schema_file_name, &schema));
@@ -345,9 +342,9 @@ do_schema_version(struct ovs_cmdl_context *ctx)
 }
 
 static void
-do_schema_cksum(struct ovs_cmdl_context *ctx)
+do_schema_cksum(int argc, char *argv[])
 {
-    const char *schema_file_name = ctx->argc >= 2 ? ctx->argv[1] : default_schema();
+    const char *schema_file_name = argc >= 2 ? argv[1] : default_schema();
     struct ovsdb_schema *schema;
 
     check_ovsdb_error(ovsdb_schema_from_file(schema_file_name, &schema));
@@ -374,15 +371,15 @@ transact(bool read_only, int argc, char *argv[])
 }
 
 static void
-do_query(struct ovs_cmdl_context *ctx)
+do_query(int argc, char *argv[])
 {
-    transact(true, ctx->argc, ctx->argv);
+    transact(true, argc, argv);
 }
 
 static void
-do_transact(struct ovs_cmdl_context *ctx)
+do_transact(int argc, char *argv[])
 {
-    transact(false, ctx->argc, ctx->argv);
+    transact(false, argc, argv);
 }
 
 static void
@@ -498,9 +495,9 @@ print_db_changes(struct shash *tables, struct shash *names,
 }
 
 static void
-do_show_log(struct ovs_cmdl_context *ctx)
+do_show_log(int argc, char *argv[])
 {
-    const char *db_file_name = ctx->argc >= 2 ? ctx->argv[1] : default_db();
+    const char *db_file_name = argc >= 2 ? argv[1] : default_db();
     struct shash names;
     struct ovsdb_log *log;
     struct ovsdb_schema *schema;
@@ -561,18 +558,18 @@ do_show_log(struct ovs_cmdl_context *ctx)
 }
 
 static void
-do_help(struct ovs_cmdl_context *ctx OVS_UNUSED)
+do_help(int argc OVS_UNUSED, char *argv[] OVS_UNUSED)
 {
     usage();
 }
 
 static void
-do_list_commands(struct ovs_cmdl_context *ctx OVS_UNUSED)
+do_list_commands(int argc OVS_UNUSED, char *argv[] OVS_UNUSED)
 {
-     ovs_cmdl_print_commands(get_all_commands());
+     print_commands(get_all_commands());
 }
 
-static const struct ovs_cmdl_command all_commands[] = {
+static const struct command all_commands[] = {
     { "create", "[db [schema]]", 0, 2, do_create },
     { "compact", "[db [dst]]", 0, 2, do_compact },
     { "convert", "[db [schema [dst]]]", 0, 3, do_convert },
@@ -589,7 +586,7 @@ static const struct ovs_cmdl_command all_commands[] = {
     { NULL, NULL, 0, 0, NULL },
 };
 
-static const struct ovs_cmdl_command *get_all_commands(void)
+static const struct command *get_all_commands(void)
 {
     return all_commands;
 }

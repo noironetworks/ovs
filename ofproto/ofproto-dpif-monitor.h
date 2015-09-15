@@ -22,13 +22,12 @@
 
 struct bfd;
 struct cfm;
-struct lldp;
 struct ofport_dpif;
 
 void ofproto_dpif_monitor_port_send_soon(const struct ofport_dpif *);
 
 void ofproto_dpif_monitor_port_update(const struct ofport_dpif *,
                                       struct bfd *, struct cfm *,
-                                      struct lldp *, const struct eth_addr *);
+                                      uint8_t[OFP_ETH_ALEN]);
 
 #endif /* ofproto-dpif-monitor.h */

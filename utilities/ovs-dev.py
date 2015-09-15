@@ -1,5 +1,5 @@
 #!/usr/bin/python
-# Copyright (c) 2013, 2014, 2015 Nicira, Inc.
+# Copyright (c) 2013, 2014 Nicira, Inc.
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
@@ -269,8 +269,7 @@ def modinst():
         pass  # Module isn't loaded
 
     try:
-        _sh("rm -f /lib/modules/%s/extra/openvswitch.ko" % uname())
-        _sh("rm -f /lib/modules/%s/extra/vport-*.ko" % uname())
+        _sh("rm /lib/modules/%s/extra/openvswitch.ko" % uname())
     except subprocess.CalledProcessError, e:
         pass  # Module isn't installed
 
@@ -280,7 +279,6 @@ def modinst():
 
     _sh("modprobe", "openvswitch")
     _sh("dmesg | grep openvswitch | tail -1")
-    _sh("find /lib/modules/%s/ -iname vport-*.ko -exec insmod '{}' \;" % uname())
 commands.append(modinst)
 
 
@@ -316,11 +314,6 @@ Basic Configuration:
 
     # Install the kernel module
     sudo insmod %(ovs)s/datapath/linux/openvswitch.ko
-
-    # If needed, manually load all required vport modules:
-    sudo insmod %(ovs)s/datapath/linux/vport-vxlan.ko
-    sudo insmod %(ovs)s/datapath/linux/vport-geneve.ko
-    [...]
 
     # Run the switch.
     %(v)s run

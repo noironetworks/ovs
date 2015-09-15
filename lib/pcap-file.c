@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2009, 2010, 2012, 2013, 2014, 2015 Nicira, Inc.
+ * Copyright (c) 2009, 2010, 2012, 2013, 2014 Nicira, Inc.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -23,9 +23,9 @@
 #include <sys/stat.h>
 #include "byte-order.h"
 #include "compiler.h"
-#include "dp-packet.h"
 #include "flow.h"
 #include "hmap.h"
+#include "ofpbuf.h"
 #include "packets.h"
 #include "timeval.h"
 #include "unaligned.h"
@@ -130,14 +130,13 @@ ovs_pcap_write_header(FILE *file)
     ph.snaplen = 1518;
     ph.network = 1;             /* Ethernet */
     ignore(fwrite(&ph, sizeof ph, 1, file));
-    fflush(file);
 }
 
 int
-ovs_pcap_read(FILE *file, struct dp_packet **bufp, long long int *when)
+ovs_pcap_read(FILE *file, struct ofpbuf **bufp, long long int *when)
 {
     struct pcaprec_hdr prh;
-    struct dp_packet *buf;
+    struct ofpbuf *buf;
     void *data;
     size_t len;
     bool swap;
@@ -177,13 +176,13 @@ ovs_pcap_read(FILE *file, struct dp_packet **bufp, long long int *when)
     }
 
     /* Read packet. */
-    buf = dp_packet_new(len);
-    data = dp_packet_put_uninit(buf, len);
+    buf = ofpbuf_new(len);
+    data = ofpbuf_put_uninit(buf, len);
     if (fread(data, len, 1, file) != 1) {
         int error = ferror(file) ? errno : EOF;
         VLOG_WARN("failed to read pcap packet: %s",
                   ovs_retval_to_string(error));
-        dp_packet_delete(buf);
+        ofpbuf_delete(buf);
         return error;
     }
     *bufp = buf;
@@ -191,7 +190,7 @@ ovs_pcap_read(FILE *file, struct dp_packet **bufp, long long int *when)
 }
 
 void
-ovs_pcap_write(FILE *file, struct dp_packet *buf)
+ovs_pcap_write(FILE *file, struct ofpbuf *buf)
 {
     struct pcaprec_hdr prh;
     struct timeval tv;
@@ -199,11 +198,10 @@ ovs_pcap_write(FILE *file, struct dp_packet *buf)
     xgettimeofday(&tv);
     prh.ts_sec = tv.tv_sec;
     prh.ts_usec = tv.tv_usec;
-    prh.incl_len = dp_packet_size(buf);
-    prh.orig_len = dp_packet_size(buf);
+    prh.incl_len = ofpbuf_size(buf);
+    prh.orig_len = ofpbuf_size(buf);
     ignore(fwrite(&prh, sizeof prh, 1, file));
-    ignore(fwrite(dp_packet_data(buf), dp_packet_size(buf), 1, file));
-    fflush(file);
+    ignore(fwrite(ofpbuf_data(buf), ofpbuf_size(buf), 1, file));
 }
 
 struct tcp_key {
@@ -215,7 +213,7 @@ struct tcp_stream {
     struct hmap_node hmap_node;
     struct tcp_key key;
     uint32_t seq_no;
-    struct dp_packet payload;
+    struct ofpbuf payload;
 };
 
 struct tcp_reader {
@@ -226,7 +224,7 @@ static void
 tcp_stream_destroy(struct tcp_reader *r, struct tcp_stream *stream)
 {
     hmap_remove(&r->streams, &stream->hmap_node);
-    dp_packet_uninit(&stream->payload);
+    ofpbuf_uninit(&stream->payload);
     free(stream);
 }
 
@@ -278,7 +276,7 @@ tcp_stream_new(struct tcp_reader *r, const struct tcp_key *key, uint32_t hash)
     hmap_insert(&r->streams, &stream->hmap_node, hash);
     memcpy(&stream->key, key, sizeof *key);
     stream->seq_no = 0;
-    dp_packet_init(&stream->payload, 2048);
+    ofpbuf_init(&stream->payload, 2048);
     return stream;
 }
 
@@ -286,35 +284,35 @@ tcp_stream_new(struct tcp_reader *r, const struct tcp_key *key, uint32_t hash)
  * extracted the packet's headers into 'flow', using flow_extract().
  *
  * If 'packet' is a TCP packet, then the reader attempts to reconstruct the
- * data stream.  If successful, it returns an dp_packet that represents the data
- * stream so far.  The caller may examine the data in the dp_packet and pull off
+ * data stream.  If successful, it returns an ofpbuf that represents the data
+ * stream so far.  The caller may examine the data in the ofpbuf and pull off
  * any data that it has fully processed.  The remaining data that the caller
  * does not pull off will be presented again in future calls if more data
  * arrives in the stream.
  *
  * Returns null if 'packet' doesn't add new data to a TCP stream. */
-struct dp_packet *
+struct ofpbuf *
 tcp_reader_run(struct tcp_reader *r, const struct flow *flow,
-               const struct dp_packet *packet)
+               const struct ofpbuf *packet)
 {
     struct tcp_stream *stream;
     struct tcp_header *tcp;
-    struct dp_packet *payload;
+    struct ofpbuf *payload;
     unsigned int l7_length;
     struct tcp_key key;
     uint32_t hash;
     uint32_t seq;
     uint8_t flags;
-    const char *l7 = dp_packet_get_tcp_payload(packet);
+    const char *l7 = ofpbuf_get_tcp_payload(packet);
 
     if (flow->dl_type != htons(ETH_TYPE_IP)
         || flow->nw_proto != IPPROTO_TCP
         || !l7) {
         return NULL;
     }
-    tcp = dp_packet_l4(packet);
+    tcp = ofpbuf_l4(packet);
     flags = TCP_FLAGS(tcp->tcp_ctl);
-    l7_length = (char *) dp_packet_tail(packet) - l7;
+    l7_length = (char *) ofpbuf_tail(packet) - l7;
     seq = ntohl(get_16aligned_be32(&tcp->tcp_seq));
 
     /* Construct key. */
@@ -338,7 +336,7 @@ tcp_reader_run(struct tcp_reader *r, const struct flow *flow,
 
     payload = &stream->payload;
     if (flags & TCP_SYN || !stream->seq_no) {
-        dp_packet_clear(payload);
+        ofpbuf_clear(payload);
         stream->seq_no = seq + 1;
         return NULL;
     } else if (flags & (TCP_FIN | TCP_RST)) {
@@ -348,9 +346,9 @@ tcp_reader_run(struct tcp_reader *r, const struct flow *flow,
         /* Shift all of the existing payload to the very beginning of the
          * allocated space, so that we reuse allocated space instead of
          * continually expanding it. */
-        dp_packet_shift(payload, (char *) dp_packet_base(payload) - (char *) dp_packet_data(payload));
+        ofpbuf_shift(payload, (char *) ofpbuf_base(payload) - (char *) ofpbuf_data(payload));
 
-        dp_packet_put(payload, l7, l7_length);
+        ofpbuf_put(payload, l7, l7_length);
         stream->seq_no += l7_length;
         return payload;
     } else {

@@ -332,8 +332,8 @@ monitor_daemon(pid_t daemon_pid)
         int retval;
         int status;
 
-        ovs_cmdl_proctitle_set("monitoring pid %lu (%s)",
-                               (unsigned long int) daemon_pid, status_msg);
+        proctitle_set("monitoring pid %lu (%s)",
+                      (unsigned long int) daemon_pid, status_msg);
 
         if (child_ready) {
             do {
@@ -399,7 +399,7 @@ monitor_daemon(pid_t daemon_pid)
     free(status_msg);
 
     /* Running in new daemon process. */
-    ovs_cmdl_proctitle_restore();
+    proctitle_restore();
     set_subprogram_name("");
 }
 

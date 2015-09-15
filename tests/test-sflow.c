@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2011, 2012, 2013, 2014, 2015 Nicira, Inc.
+ * Copyright (c) 2011, 2012, 2013, 2014 Nicira, Inc.
  * Copyright (c) 2013 InMon Corp.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
@@ -63,7 +63,6 @@ static unixctl_cb_func test_sflow_exit;
 #define SFLOW_TAG_PKT_TUNNEL4_IN 1024
 #define SFLOW_TAG_PKT_TUNNEL_VNI_OUT 1029
 #define SFLOW_TAG_PKT_TUNNEL_VNI_IN 1030
-#define SFLOW_TAG_PKT_MPLS 1006
 
 /* string sizes */
 #define SFL_MAX_PORTNAME_LEN 255
@@ -114,7 +113,6 @@ struct sflow_xdr {
 	uint32_t TUNNEL4_IN;
 	uint32_t TUNNEL_VNI_OUT;
 	uint32_t TUNNEL_VNI_IN;
-	uint32_t MPLS;
         uint32_t IFCOUNTERS;
 	uint32_t LACPCOUNTERS;
 	uint32_t OPENFLOWPORT;
@@ -241,7 +239,7 @@ process_counter_sample(struct sflow_xdr *x)
         printf("\n");
     }
     if (x->offset.LACPCOUNTERS) {
-	struct eth_addr *mac;
+	uint8_t *mac;
 	union {
 	    ovs_be32 all;
 	    struct {
@@ -254,11 +252,11 @@ process_counter_sample(struct sflow_xdr *x)
 
         sflowxdr_setc(x, x->offset.LACPCOUNTERS);
         printf("LACPCOUNTERS");
-	mac = (void *)sflowxdr_str(x);
-	printf(" sysID="ETH_ADDR_FMT, ETH_ADDR_ARGS(*mac));
+	mac = (uint8_t *)sflowxdr_str(x);
+	printf(" sysID="ETH_ADDR_FMT, ETH_ADDR_ARGS(mac));
 	sflowxdr_skip(x, 2);
-	mac = (void *)sflowxdr_str(x);
-	printf(" partnerID="ETH_ADDR_FMT, ETH_ADDR_ARGS(*mac));
+	mac = (uint8_t *)sflowxdr_str(x);
+	printf(" partnerID="ETH_ADDR_FMT, ETH_ADDR_ARGS(mac));
 	sflowxdr_skip(x, 2);
 	printf(" aggID=%"PRIu32, sflowxdr_next(x));
 	state.all = sflowxdr_next_n(x);
@@ -379,32 +377,6 @@ process_flow_sample(struct sflow_xdr *x)
         if (x->offset.TUNNEL_VNI_OUT) {
             sflowxdr_setc(x, x->offset.TUNNEL_VNI_OUT);
 	    printf( " tunnel_out_vni=%"PRIu32, sflowxdr_next(x));
-        }
-
-        if (x->offset.MPLS) {
-            uint32_t addr_type, stack_depth, ii;
-            ovs_be32 mpls_lse;
-            sflowxdr_setc(x, x->offset.MPLS);
-            /* OVS only sets the out_stack. The rest will be blank. */
-            /* skip next hop address */
-            addr_type = sflowxdr_next(x);
-            sflowxdr_skip(x, addr_type == SFLOW_ADDRTYPE_IP6 ? 4 : 1);
-            /* skip in_stack */
-            stack_depth = sflowxdr_next(x);
-            sflowxdr_skip(x, stack_depth);
-            /* print out_stack */
-            stack_depth = sflowxdr_next(x);
-            for(ii = 0; ii < stack_depth; ii++) {
-                mpls_lse=sflowxdr_next_n(x);
-                printf(" mpls_label_%"PRIu32"=%"PRIu32,
-                       ii, mpls_lse_to_label(mpls_lse));
-                printf(" mpls_tc_%"PRIu32"=%"PRIu32,
-                       ii, mpls_lse_to_tc(mpls_lse));
-                printf(" mpls_ttl_%"PRIu32"=%"PRIu32,
-                       ii, mpls_lse_to_ttl(mpls_lse));
-                printf(" mpls_bos_%"PRIu32"=%"PRIu32,
-                       ii, mpls_lse_to_bos(mpls_lse));
-            }
         }
 
         if (x->offset.SWITCH) {
@@ -606,10 +578,6 @@ process_datagram(struct sflow_xdr *x)
                     sflowxdr_mark_unique(x, &x->offset.TUNNEL_VNI_IN);
                     break;
 
-		case SFLOW_TAG_PKT_MPLS:
-                    sflowxdr_mark_unique(x, &x->offset.MPLS);
-                    break;
-
                     /* Add others here... */
                 }
 
@@ -639,13 +607,13 @@ static void
 print_sflow(struct ofpbuf *buf)
 {
     char *dgram_buf;
-    int dgram_len = buf->size;
+    int dgram_len = ofpbuf_size(buf);
     struct sflow_xdr xdrDatagram;
     struct sflow_xdr *x = &xdrDatagram;
 
     memset(x, 0, sizeof *x);
     if (SFLOWXDR_try(x)) {
-        SFLOWXDR_assert(x, (dgram_buf = ofpbuf_try_pull(buf, buf->size)));
+        SFLOWXDR_assert(x, (dgram_buf = ofpbuf_try_pull(buf, ofpbuf_size(buf))));
         sflowxdr_init(x, dgram_buf, dgram_len);
         SFLOWXDR_assert(x, dgram_len >= SFLOW_MIN_LEN);
         process_datagram(x);
@@ -666,7 +634,7 @@ test_sflow_main(int argc, char *argv[])
     int error;
     int sock;
 
-    ovs_cmdl_proctitle_init(argc, argv);
+    proctitle_init(argc, argv);
     set_program_name(argv[0]);
     service_start(&argc, &argv);
     parse_options(argc, argv);
@@ -679,7 +647,7 @@ test_sflow_main(int argc, char *argv[])
 
     sock = inet_open_passive(SOCK_DGRAM, target, 0, NULL, 0, true);
     if (sock < 0) {
-        ovs_fatal(0, "%s: failed to open (%s)", target, ovs_strerror(-sock));
+        ovs_fatal(0, "%s: failed to open (%s)", argv[1], ovs_strerror(-sock));
     }
 
     daemon_save_fd(STDOUT_FILENO);
@@ -701,7 +669,7 @@ test_sflow_main(int argc, char *argv[])
 
         ofpbuf_clear(&buf);
         do {
-            retval = recv(sock, buf.data, buf.allocated, 0);
+            retval = recv(sock, ofpbuf_data(&buf), buf.allocated, 0);
         } while (retval < 0 && errno == EINTR);
         if (retval > 0) {
             ofpbuf_put_uninit(&buf, retval);
@@ -733,7 +701,7 @@ parse_options(int argc, char *argv[])
         VLOG_LONG_OPTIONS,
         {NULL, 0, NULL, 0},
     };
-    char *short_options = ovs_cmdl_long_options_to_short_options(long_options);
+    char *short_options = long_options_to_short_options(long_options);
 
     for (;;) {
         int c = getopt_long(argc, argv, short_options, long_options, NULL);

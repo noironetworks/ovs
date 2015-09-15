@@ -33,15 +33,15 @@ void dev_disable_lro(struct net_device *dev) { }
 
 #endif /* HAVE_DEV_DISABLE_LRO */
 
-#if !defined HAVE_NETDEV_RX_HANDLER_REGISTER || \
+#if LINUX_VERSION_CODE < KERNEL_VERSION(2,6,36) || \
     defined HAVE_RHEL_OVS_HOOK
 
 static int nr_bridges;
 
 #ifdef HAVE_RHEL_OVS_HOOK
-int rpl_netdev_rx_handler_register(struct net_device *dev,
-				   openvswitch_handle_frame_hook_t *hook,
-				   void *rx_handler_data)
+int netdev_rx_handler_register(struct net_device *dev,
+			       openvswitch_handle_frame_hook_t *hook,
+			       void *rx_handler_data)
 {
 	nr_bridges++;
 	rcu_assign_pointer(dev->ax25_ptr, rx_handler_data);
@@ -50,13 +50,12 @@ int rpl_netdev_rx_handler_register(struct net_device *dev,
 		rcu_assign_pointer(openvswitch_handle_frame_hook, hook);
 	return 0;
 }
-EXPORT_SYMBOL_GPL(rpl_netdev_rx_handler_register);
 #else
 
-int rpl_netdev_rx_handler_register(struct net_device *dev,
-				   struct sk_buff *(*hook)(struct net_bridge_port *p,
-							   struct sk_buff *skb),
-				   void *rx_handler_data)
+int netdev_rx_handler_register(struct net_device *dev,
+			       struct sk_buff *(*hook)(struct net_bridge_port *p,
+						       struct sk_buff *skb),
+			       void *rx_handler_data)
 {
 	nr_bridges++;
 	if (dev->br_port)
@@ -68,10 +67,9 @@ int rpl_netdev_rx_handler_register(struct net_device *dev,
 		br_handle_frame_hook = hook;
 	return 0;
 }
-EXPORT_SYMBOL_GPL(rpl_netdev_rx_handler_register);
 #endif
 
-void rpl_netdev_rx_handler_unregister(struct net_device *dev)
+void netdev_rx_handler_unregister(struct net_device *dev)
 {
 	nr_bridges--;
 #ifdef HAVE_RHEL_OVS_HOOK
@@ -90,6 +88,4 @@ void rpl_netdev_rx_handler_unregister(struct net_device *dev)
 	br_handle_frame_hook = NULL;
 #endif
 }
-EXPORT_SYMBOL_GPL(rpl_netdev_rx_handler_unregister);
-
 #endif

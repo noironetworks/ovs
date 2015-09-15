@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2010, 2011, 2012, 2013, 2015 Nicira, Inc.
+ * Copyright (c) 2010, 2011, 2012, 2013 Nicira, Inc.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -20,7 +20,6 @@
 
 #include <errno.h>
 
-#include "dp-packet.h"
 #include "dpif-netdev.h"
 #include "dynamic-string.h"
 #include "flow.h"
@@ -30,7 +29,7 @@
 #include "odp-util.h"
 #include "ofp-print.h"
 #include "ofpbuf.h"
-#include "ovs-atomic.h"
+#include "packet-dpif.h"
 #include "packets.h"
 #include "pcap-file.h"
 #include "poll-loop.h"
@@ -49,7 +48,7 @@ struct reconnect;
 
 struct dummy_packet_stream {
     struct stream *stream;
-    struct dp_packet rxbuf;
+    struct ofpbuf rxbuf;
     struct ovs_list txq;
 };
 
@@ -84,11 +83,6 @@ struct dummy_packet_conn {
     } u;
 };
 
-struct pkt_list_node {
-    struct dp_packet *pkt;
-    struct ovs_list list_node;
-};
-
 /* Protects 'dummy_list'. */
 static struct ovs_mutex dummy_list_mutex = OVS_MUTEX_INITIALIZER;
 
@@ -105,7 +99,7 @@ struct netdev_dummy {
     /* Protects all members below. */
     struct ovs_mutex mutex OVS_ACQ_AFTER(dummy_list_mutex);
 
-    struct eth_addr hwaddr OVS_GUARDED;
+    uint8_t hwaddr[ETH_ADDR_LEN] OVS_GUARDED;
     int mtu OVS_GUARDED;
     struct netdev_stats stats OVS_GUARDED;
     enum netdev_flags flags OVS_GUARDED;
@@ -132,11 +126,9 @@ struct netdev_rxq_dummy {
 
 static unixctl_cb_func netdev_dummy_set_admin_state;
 static int netdev_dummy_construct(struct netdev *);
-static void netdev_dummy_queue_packet(struct netdev_dummy *, struct dp_packet *);
+static void netdev_dummy_queue_packet(struct netdev_dummy *, struct ofpbuf *);
 
 static void dummy_packet_stream_close(struct dummy_packet_stream *);
-
-static void pkt_list_delete(struct ovs_list *);
 
 static bool
 is_dummy_class(const struct netdev_class *class)
@@ -163,7 +155,7 @@ dummy_packet_stream_init(struct dummy_packet_stream *s, struct stream *stream)
 {
     int rxbuf_size = stream ? 2048 : 0;
     s->stream = stream;
-    dp_packet_init(&s->rxbuf, rxbuf_size);
+    ofpbuf_init(&s->rxbuf, rxbuf_size);
     list_init(&s->txq);
 }
 
@@ -192,15 +184,11 @@ static void
 dummy_packet_stream_send(struct dummy_packet_stream *s, const void *buffer, size_t size)
 {
     if (list_size(&s->txq) < NETDEV_DUMMY_MAX_QUEUE) {
-        struct dp_packet *b;
-        struct pkt_list_node *node;
+        struct ofpbuf *b;
 
-        b = dp_packet_clone_data_with_headroom(buffer, size, 2);
-        put_unaligned_be16(dp_packet_push_uninit(b, 2), htons(size));
-
-        node = xmalloc(sizeof *node);
-        node->pkt = b;
-        list_push_back(&s->txq, &node->list_node);
+        b = ofpbuf_clone_data_with_headroom(buffer, size, 2);
+        put_unaligned_be16(ofpbuf_push_uninit(b, 2), htons(size));
+        list_push_back(&s->txq, &b->list_node);
     }
 }
 
@@ -213,20 +201,17 @@ dummy_packet_stream_run(struct netdev_dummy *dev, struct dummy_packet_stream *s)
     stream_run(s->stream);
 
     if (!list_is_empty(&s->txq)) {
-        struct pkt_list_node *txbuf_node;
-        struct dp_packet *txbuf;
+        struct ofpbuf *txbuf;
         int retval;
 
-        ASSIGN_CONTAINER(txbuf_node, list_front(&s->txq), list_node);
-        txbuf = txbuf_node->pkt;
-        retval = stream_send(s->stream, dp_packet_data(txbuf), dp_packet_size(txbuf));
+        txbuf = ofpbuf_from_list(list_front(&s->txq));
+        retval = stream_send(s->stream, ofpbuf_data(txbuf), ofpbuf_size(txbuf));
 
         if (retval > 0) {
-            dp_packet_pull(txbuf, retval);
-            if (!dp_packet_size(txbuf)) {
-                list_remove(&txbuf_node->list_node);
-                free(txbuf_node);
-                dp_packet_delete(txbuf);
+            ofpbuf_pull(txbuf, retval);
+            if (!ofpbuf_size(txbuf)) {
+                list_remove(&txbuf->list_node);
+                ofpbuf_delete(txbuf);
             }
         } else if (retval != -EAGAIN) {
             error = -retval;
@@ -234,37 +219,37 @@ dummy_packet_stream_run(struct netdev_dummy *dev, struct dummy_packet_stream *s)
     }
 
     if (!error) {
-        if (dp_packet_size(&s->rxbuf) < 2) {
-            n = 2 - dp_packet_size(&s->rxbuf);
+        if (ofpbuf_size(&s->rxbuf) < 2) {
+            n = 2 - ofpbuf_size(&s->rxbuf);
         } else {
             uint16_t frame_len;
 
-            frame_len = ntohs(get_unaligned_be16(dp_packet_data(&s->rxbuf)));
+            frame_len = ntohs(get_unaligned_be16(ofpbuf_data(&s->rxbuf)));
             if (frame_len < ETH_HEADER_LEN) {
                 error = EPROTO;
                 n = 0;
             } else {
-                n = (2 + frame_len) - dp_packet_size(&s->rxbuf);
+                n = (2 + frame_len) - ofpbuf_size(&s->rxbuf);
             }
         }
     }
     if (!error) {
         int retval;
 
-        dp_packet_prealloc_tailroom(&s->rxbuf, n);
-        retval = stream_recv(s->stream, dp_packet_tail(&s->rxbuf), n);
+        ofpbuf_prealloc_tailroom(&s->rxbuf, n);
+        retval = stream_recv(s->stream, ofpbuf_tail(&s->rxbuf), n);
 
         if (retval > 0) {
-            dp_packet_set_size(&s->rxbuf, dp_packet_size(&s->rxbuf) + retval);
-            if (retval == n && dp_packet_size(&s->rxbuf) > 2) {
-                dp_packet_pull(&s->rxbuf, 2);
+            ofpbuf_set_size(&s->rxbuf, ofpbuf_size(&s->rxbuf) + retval);
+            if (retval == n && ofpbuf_size(&s->rxbuf) > 2) {
+                ofpbuf_pull(&s->rxbuf, 2);
                 netdev_dummy_queue_packet(dev,
-                                          dp_packet_clone(&s->rxbuf));
-                dp_packet_clear(&s->rxbuf);
+                                          ofpbuf_clone(&s->rxbuf));
+                ofpbuf_clear(&s->rxbuf);
             }
         } else if (retval != -EAGAIN) {
             error = (retval < 0 ? -retval
-                     : dp_packet_size(&s->rxbuf) ? EPROTO
+                     : ofpbuf_size(&s->rxbuf) ? EPROTO
                      : EOF);
         }
     }
@@ -276,8 +261,8 @@ static void
 dummy_packet_stream_close(struct dummy_packet_stream *s)
 {
     stream_close(s->stream);
-    dp_packet_uninit(&s->rxbuf);
-    pkt_list_delete(&s->txq);
+    ofpbuf_uninit(&s->rxbuf);
+    ofpbuf_list_delete(&s->txq);
 }
 
 static void
@@ -356,15 +341,13 @@ dummy_packet_conn_set_config(struct dummy_packet_conn *conn,
 
     switch (conn->type) {
     case PASSIVE:
-        if (pstream &&
-            !strcmp(pstream_get_name(conn->u.pconn.pstream), pstream)) {
+        if (!strcmp(pstream_get_name(conn->u.pconn.pstream), pstream)) {
             return;
         }
         dummy_packet_conn_close(conn);
         break;
     case ACTIVE:
-        if (stream &&
-            !strcmp(stream_get_name(conn->u.rconn.rstream->stream), stream)) {
+        if (!strcmp(stream_get_name(conn->u.rconn.rstream->stream), stream)) {
             return;
         }
         dummy_packet_conn_close(conn);
@@ -388,7 +371,7 @@ dummy_packet_conn_set_config(struct dummy_packet_conn *conn,
     if (stream) {
         int error;
         struct stream *active_stream;
-        struct reconnect *reconnect;
+        struct reconnect *reconnect;;
 
         reconnect = reconnect_create(time_msec());
         reconnect_set_name(reconnect, stream);
@@ -651,12 +634,12 @@ netdev_dummy_construct(struct netdev *netdev_)
 
     ovs_mutex_init(&netdev->mutex);
     ovs_mutex_lock(&netdev->mutex);
-    netdev->hwaddr.ea[0] = 0xaa;
-    netdev->hwaddr.ea[1] = 0x55;
-    netdev->hwaddr.ea[2] = n >> 24;
-    netdev->hwaddr.ea[3] = n >> 16;
-    netdev->hwaddr.ea[4] = n >> 8;
-    netdev->hwaddr.ea[5] = n;
+    netdev->hwaddr[0] = 0xaa;
+    netdev->hwaddr[1] = 0x55;
+    netdev->hwaddr[2] = n >> 24;
+    netdev->hwaddr[3] = n >> 16;
+    netdev->hwaddr[4] = n >> 8;
+    netdev->hwaddr[5] = n;
     netdev->mtu = 1500;
     netdev->flags = 0;
     netdev->ifindex = -EOPNOTSUPP;
@@ -725,8 +708,7 @@ netdev_dummy_get_in4(const struct netdev *netdev_,
     *address = netdev->address;
     *netmask = netdev->netmask;
     ovs_mutex_unlock(&netdev->mutex);
-
-    return address->s_addr ? 0 : EADDRNOTAVAIL;
+    return 0;
 }
 
 static int
@@ -812,7 +794,7 @@ netdev_dummy_rxq_destruct(struct netdev_rxq *rxq_)
 
     ovs_mutex_lock(&netdev->mutex);
     list_remove(&rx->node);
-    pkt_list_delete(&rx->recv_queue);
+    ofpbuf_list_delete(&rx->recv_queue);
     ovs_mutex_unlock(&netdev->mutex);
     seq_destroy(rx->seq);
 }
@@ -826,20 +808,16 @@ netdev_dummy_rxq_dealloc(struct netdev_rxq *rxq_)
 }
 
 static int
-netdev_dummy_rxq_recv(struct netdev_rxq *rxq_, struct dp_packet **arr,
+netdev_dummy_rxq_recv(struct netdev_rxq *rxq_, struct dpif_packet **arr,
                       int *c)
 {
     struct netdev_rxq_dummy *rx = netdev_rxq_dummy_cast(rxq_);
     struct netdev_dummy *netdev = netdev_dummy_cast(rx->up.netdev);
-    struct dp_packet *packet;
+    struct ofpbuf *packet;
 
     ovs_mutex_lock(&netdev->mutex);
     if (!list_is_empty(&rx->recv_queue)) {
-        struct pkt_list_node *pkt_node;
-
-        ASSIGN_CONTAINER(pkt_node, list_pop_front(&rx->recv_queue), list_node);
-        packet = pkt_node->pkt;
-        free(pkt_node);
+        packet = ofpbuf_from_list(list_pop_front(&rx->recv_queue));
         rx->recv_queue_len--;
     } else {
         packet = NULL;
@@ -851,13 +829,15 @@ netdev_dummy_rxq_recv(struct netdev_rxq *rxq_, struct dp_packet **arr,
     }
     ovs_mutex_lock(&netdev->mutex);
     netdev->stats.rx_packets++;
-    netdev->stats.rx_bytes += dp_packet_size(packet);
+    netdev->stats.rx_bytes += ofpbuf_size(packet);
     ovs_mutex_unlock(&netdev->mutex);
 
     dp_packet_pad(packet);
-    dp_packet_rss_invalidate(packet);
 
-    arr[0] = packet;
+    /* This performs a (sometimes unnecessary) copy */
+    arr[0] = dpif_packet_clone_from_ofpbuf(packet);
+    dpif_packet_set_dp_hash(arr[0], 0);
+    ofpbuf_delete(packet);
     *c = 1;
     return 0;
 }
@@ -885,7 +865,7 @@ netdev_dummy_rxq_drain(struct netdev_rxq *rxq_)
     struct netdev_dummy *netdev = netdev_dummy_cast(rx->up.netdev);
 
     ovs_mutex_lock(&netdev->mutex);
-    pkt_list_delete(&rx->recv_queue);
+    ofpbuf_list_delete(&rx->recv_queue);
     rx->recv_queue_len = 0;
     ovs_mutex_unlock(&netdev->mutex);
 
@@ -896,15 +876,15 @@ netdev_dummy_rxq_drain(struct netdev_rxq *rxq_)
 
 static int
 netdev_dummy_send(struct netdev *netdev, int qid OVS_UNUSED,
-                  struct dp_packet **pkts, int cnt, bool may_steal)
+                  struct dpif_packet **pkts, int cnt, bool may_steal)
 {
     struct netdev_dummy *dev = netdev_dummy_cast(netdev);
     int error = 0;
     int i;
 
     for (i = 0; i < cnt; i++) {
-        const void *buffer = dp_packet_data(pkts[i]);
-        size_t size = dp_packet_size(pkts[i]);
+        const void *buffer = ofpbuf_data(&pkts[i]->ofpbuf);
+        size_t size = ofpbuf_size(&pkts[i]->ofpbuf);
 
         if (size < ETH_HEADER_LEN) {
             error = EMSGSIZE;
@@ -932,27 +912,10 @@ netdev_dummy_send(struct netdev *netdev, int qid OVS_UNUSED,
 
         dummy_packet_conn_send(&dev->conn, buffer, size);
 
-        /* Reply to ARP requests for 'dev''s assigned IP address. */
-        if (dev->address.s_addr) {
-            struct dp_packet packet;
-            struct flow flow;
-
-            dp_packet_use_const(&packet, buffer, size);
-            flow_extract(&packet, &flow);
-            if (flow.dl_type == htons(ETH_TYPE_ARP)
-                && flow.nw_proto == ARP_OP_REQUEST
-                && flow.nw_dst == dev->address.s_addr) {
-                struct dp_packet *reply = dp_packet_new(0);
-                compose_arp(reply, ARP_OP_REPLY, dev->hwaddr, flow.dl_src,
-                            false, flow.nw_dst, flow.nw_src);
-                netdev_dummy_queue_packet(dev, reply);
-            }
-        }
-
         if (dev->tx_pcap) {
-            struct dp_packet packet;
+            struct ofpbuf packet;
 
-            dp_packet_use_const(&packet, buffer, size);
+            ofpbuf_use_const(&packet, buffer, size);
             ovs_pcap_write(dev->tx_pcap, &packet);
             fflush(dev->tx_pcap);
         }
@@ -962,7 +925,7 @@ netdev_dummy_send(struct netdev *netdev, int qid OVS_UNUSED,
 
     if (may_steal) {
         for (i = 0; i < cnt; i++) {
-            dp_packet_delete(pkts[i]);
+            dpif_packet_delete(pkts[i]);
         }
     }
 
@@ -970,13 +933,14 @@ netdev_dummy_send(struct netdev *netdev, int qid OVS_UNUSED,
 }
 
 static int
-netdev_dummy_set_etheraddr(struct netdev *netdev, const struct eth_addr mac)
+netdev_dummy_set_etheraddr(struct netdev *netdev,
+                           const uint8_t mac[ETH_ADDR_LEN])
 {
     struct netdev_dummy *dev = netdev_dummy_cast(netdev);
 
     ovs_mutex_lock(&dev->mutex);
     if (!eth_addr_equals(dev->hwaddr, mac)) {
-        dev->hwaddr = mac;
+        memcpy(dev->hwaddr, mac, ETH_ADDR_LEN);
         netdev_change_seq_changed(netdev);
     }
     ovs_mutex_unlock(&dev->mutex);
@@ -985,12 +949,13 @@ netdev_dummy_set_etheraddr(struct netdev *netdev, const struct eth_addr mac)
 }
 
 static int
-netdev_dummy_get_etheraddr(const struct netdev *netdev, struct eth_addr *mac)
+netdev_dummy_get_etheraddr(const struct netdev *netdev,
+                           uint8_t mac[ETH_ADDR_LEN])
 {
     struct netdev_dummy *dev = netdev_dummy_cast(netdev);
 
     ovs_mutex_lock(&dev->mutex);
-    *mac = dev->hwaddr;
+    memcpy(mac, dev->hwaddr, ETH_ADDR_LEN);
     ovs_mutex_unlock(&dev->mutex);
 
     return 0;
@@ -1150,22 +1115,11 @@ static const struct netdev_class dummy_class = {
     netdev_dummy_rxq_drain,
 };
 
-static void
-pkt_list_delete(struct ovs_list *l)
-{
-    struct pkt_list_node *pkt;
-
-    LIST_FOR_EACH_POP(pkt, list_node, l) {
-        dp_packet_delete(pkt->pkt);
-        free(pkt);
-    }
-}
-
-static struct dp_packet *
+static struct ofpbuf *
 eth_from_packet_or_flow(const char *s)
 {
     enum odp_key_fitness fitness;
-    struct dp_packet *packet;
+    struct ofpbuf *packet;
     struct ofpbuf odp_key;
     struct flow flow;
     int error;
@@ -1188,13 +1142,13 @@ eth_from_packet_or_flow(const char *s)
     }
 
     /* Convert odp_key to flow. */
-    fitness = odp_flow_key_to_flow(odp_key.data, odp_key.size, &flow);
+    fitness = odp_flow_key_to_flow(ofpbuf_data(&odp_key), ofpbuf_size(&odp_key), &flow);
     if (fitness == ODP_FIT_ERROR) {
         ofpbuf_uninit(&odp_key);
         return NULL;
     }
 
-    packet = dp_packet_new(0);
+    packet = ofpbuf_new(0);
     flow_compose(packet, &flow);
 
     ofpbuf_uninit(&odp_key);
@@ -1202,18 +1156,15 @@ eth_from_packet_or_flow(const char *s)
 }
 
 static void
-netdev_dummy_queue_packet__(struct netdev_rxq_dummy *rx, struct dp_packet *packet)
+netdev_dummy_queue_packet__(struct netdev_rxq_dummy *rx, struct ofpbuf *packet)
 {
-    struct pkt_list_node *pkt_node = xmalloc(sizeof *pkt_node);
-
-    pkt_node->pkt = packet;
-    list_push_back(&rx->recv_queue, &pkt_node->list_node);
+    list_push_back(&rx->recv_queue, &packet->list_node);
     rx->recv_queue_len++;
     seq_change(rx->seq);
 }
 
 static void
-netdev_dummy_queue_packet(struct netdev_dummy *dummy, struct dp_packet *packet)
+netdev_dummy_queue_packet(struct netdev_dummy *dummy, struct ofpbuf *packet)
     OVS_REQUIRES(dummy->mutex)
 {
     struct netdev_rxq_dummy *rx, *prev;
@@ -1226,7 +1177,7 @@ netdev_dummy_queue_packet(struct netdev_dummy *dummy, struct dp_packet *packet)
     LIST_FOR_EACH (rx, node, &dummy->rxes) {
         if (rx->recv_queue_len < NETDEV_DUMMY_MAX_QUEUE) {
             if (prev) {
-                netdev_dummy_queue_packet__(prev, dp_packet_clone(packet));
+                netdev_dummy_queue_packet__(prev, ofpbuf_clone(packet));
             }
             prev = rx;
         }
@@ -1234,7 +1185,7 @@ netdev_dummy_queue_packet(struct netdev_dummy *dummy, struct dp_packet *packet)
     if (prev) {
         netdev_dummy_queue_packet__(prev, packet);
     } else {
-        dp_packet_delete(packet);
+        ofpbuf_delete(packet);
     }
 }
 
@@ -1254,7 +1205,7 @@ netdev_dummy_receive(struct unixctl_conn *conn,
     dummy_dev = netdev_dummy_cast(netdev);
 
     for (i = 2; i < argc; i++) {
-        struct dp_packet *packet;
+        struct ofpbuf *packet;
 
         packet = eth_from_packet_or_flow(argv[i]);
         if (!packet) {
@@ -1424,27 +1375,8 @@ netdev_dummy_ip4addr(struct unixctl_conn *conn, int argc OVS_UNUSED,
 
 }
 
-static void
-netdev_dummy_override(const char *type)
-{
-    if (!netdev_unregister_provider(type)) {
-        struct netdev_class *class;
-        int error;
-
-        class = xmemdup(&dummy_class, sizeof dummy_class);
-        class->type = xstrdup(type);
-        error = netdev_register_provider(class);
-        if (error) {
-            VLOG_ERR("%s: failed to register netdev provider (%s)",
-                     type, ovs_strerror(error));
-            free(CONST_CAST(char *, class->type));
-            free(class);
-        }
-    }
-}
-
 void
-netdev_dummy_register(enum dummy_level level)
+netdev_dummy_register(bool override)
 {
     unixctl_command_register("netdev-dummy/receive", "name packet|flow...",
                              2, INT_MAX, netdev_dummy_receive, NULL);
@@ -1458,20 +1390,33 @@ netdev_dummy_register(enum dummy_level level)
                              "[netdev] ipaddr/mask-prefix-len", 2, 2,
                              netdev_dummy_ip4addr, NULL);
 
-    if (level == DUMMY_OVERRIDE_ALL) {
+
+    if (override) {
         struct sset types;
         const char *type;
 
         sset_init(&types);
         netdev_enumerate_types(&types);
         SSET_FOR_EACH (type, &types) {
-            if (strcmp(type, "patch")) {
-                netdev_dummy_override(type);
+            if (!strcmp(type, "patch")) {
+                continue;
+            }
+            if (!netdev_unregister_provider(type)) {
+                struct netdev_class *class;
+                int error;
+
+                class = xmemdup(&dummy_class, sizeof dummy_class);
+                class->type = xstrdup(type);
+                error = netdev_register_provider(class);
+                if (error) {
+                    VLOG_ERR("%s: failed to register netdev provider (%s)",
+                             type, ovs_strerror(error));
+                    free(CONST_CAST(char *, class->type));
+                    free(class);
+                }
             }
         }
         sset_destroy(&types);
-    } else if (level == DUMMY_OVERRIDE_SYSTEM) {
-        netdev_dummy_override("system");
     }
     netdev_register_provider(&dummy_class);
 

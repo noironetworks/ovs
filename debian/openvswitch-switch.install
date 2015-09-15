@@ -1,5 +1,3 @@
-debian/ifupdown.sh usr/share/openvswitch/scripts
-etc/bash_completion.d/ovs-vsctl-bashcomp.bash
 usr/bin/ovs-dpctl
 usr/bin/ovs-dpctl-top
 usr/bin/ovs-pcap
@@ -14,3 +12,4 @@ usr/share/openvswitch/scripts/ovs-ctl
 usr/share/openvswitch/scripts/ovs-lib
 usr/share/openvswitch/scripts/ovs-save
 usr/share/openvswitch/vswitch.ovsschema
+debian/ifupdown.sh usr/share/openvswitch/scripts

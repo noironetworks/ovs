@@ -113,22 +113,6 @@ recalc_csum32(ovs_be16 old_csum, ovs_be32 old_u32, ovs_be32 new_u32)
 }
 
 /* Returns the new checksum for a packet in which the checksum field previously
- * contained 'old_csum' and in which a field that contained the 6 bytes at
- * 'old_mac' was changed to contain the 6 bytes at 'new_mac'. */
-ovs_be16
-recalc_csum48(ovs_be16 old_csum, const struct eth_addr old_mac,
-              const struct eth_addr new_mac)
-{
-    ovs_be16 new_csum = old_csum;
-
-    for (int i = 0; i < 3; ++i) {
-        new_csum = recalc_csum16(new_csum, old_mac.be16[i], new_mac.be16[i]);
-    }
-
-    return new_csum;
-}
-
-/* Returns the new checksum for a packet in which the checksum field previously
  * contained 'old_csum' and in which a field that contained 'old_u32[4]' was
  * changed to contain 'new_u32[4]'. */
 ovs_be16

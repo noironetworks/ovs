@@ -55,14 +55,9 @@ enum ofperr nx_pull_match_loose(struct ofpbuf *, unsigned int match_len,
                                 ovs_be64 *cookie_mask);
 enum ofperr oxm_pull_match(struct ofpbuf *, struct match *);
 enum ofperr oxm_pull_match_loose(struct ofpbuf *, struct match *);
-enum ofperr oxm_pull_field_array(const void *, size_t fields_len,
-                                 struct field_array *);
 int nx_put_match(struct ofpbuf *, const struct match *,
                  ovs_be64 cookie, ovs_be64 cookie_mask);
 int oxm_put_match(struct ofpbuf *, const struct match *, enum ofp_version);
-void oxm_format_field_array(struct ds *, const struct field_array *);
-int oxm_put_field_array(struct ofpbuf *, const struct field_array *,
-                        enum ofp_version version);
 
 /* Decoding and encoding OXM/NXM headers (just a field ID) or entries (a field
  * ID followed by a value and possibly a mask). */
@@ -70,9 +65,6 @@ enum ofperr nx_pull_entry(struct ofpbuf *, const struct mf_field **,
                           union mf_value *value, union mf_value *mask);
 enum ofperr nx_pull_header(struct ofpbuf *, const struct mf_field **,
                            bool *masked);
-void nxm_put__(struct ofpbuf *b, enum mf_field_id field,
-               enum ofp_version version, const void *value,
-               const void *mask, size_t n_bytes);
 void nx_put_entry(struct ofpbuf *, enum mf_field_id, enum ofp_version,
                   const union mf_value *value, const union mf_value *mask);
 void nx_put_header(struct ofpbuf *, enum mf_field_id, enum ofp_version,

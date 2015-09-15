@@ -112,8 +112,6 @@ NlBuildErrorMsg(POVS_MESSAGE msgIn, POVS_MESSAGE_ERROR msgError, UINT errorCode)
 {
     NL_BUFFER nlBuffer;
 
-    ASSERT(errorCode != NL_ERROR_PENDING);
-
     NlBufInit(&nlBuffer, (PCHAR)msgError, sizeof *msgError);
     NlFillNlHdr(&nlBuffer, NLMSG_ERROR, 0,
                 msgIn->nlMsg.nlmsgSeq, msgIn->nlMsg.nlmsgPid);
@@ -1046,16 +1044,15 @@ NlAttrFindNested(const PNL_ATTR nla, UINT16 type)
 BOOLEAN
 NlAttrParse(const PNL_MSG_HDR nlMsg, UINT32 attrOffset,
             UINT32 totalAttrLen,
-            const NL_POLICY policy[], const UINT32 numPolicy,
-            PNL_ATTR attrs[], UINT32 numAttrs)
+            const NL_POLICY policy[],
+            PNL_ATTR attrs[], UINT32 n_attrs)
 {
     PNL_ATTR nla;
     UINT32 left;
     UINT32 iter;
     BOOLEAN ret = FALSE;
-    UINT32 numPolicyAttr = MIN(numPolicy, numAttrs);
 
-    RtlZeroMemory(attrs, numAttrs * sizeof *attrs);
+    RtlZeroMemory(attrs, n_attrs * sizeof *attrs);
 
 
     /* There is nothing to parse */
@@ -1074,7 +1071,7 @@ NlAttrParse(const PNL_MSG_HDR nlMsg, UINT32 attrOffset,
                       totalAttrLen)
     {
         UINT16 type = NlAttrType(nla);
-        if (type < numPolicyAttr && policy[type].type != NL_A_NO_ATTR) {
+        if (type < n_attrs && policy[type].type != NL_A_NO_ATTR) {
             /* Typecasting to keep the compiler happy */
             const PNL_POLICY e = (const PNL_POLICY)(&policy[type]);
             if (!NlAttrValidate(nla, e)) {
@@ -1095,7 +1092,7 @@ NlAttrParse(const PNL_MSG_HDR nlMsg, UINT32 attrOffset,
         goto done;
     }
 
-    for (iter = 0; iter < numPolicyAttr; iter++) {
+    for (iter = 0; iter < n_attrs; iter++) {
         const PNL_POLICY e = (const PNL_POLICY)(&policy[iter]);
         if (!e->optional && e->type != NL_A_NO_ATTR && !attrs[iter]) {
             OVS_LOG_ERROR("Required attr:%d missing", iter);
@@ -1121,10 +1118,9 @@ done:
 BOOLEAN
 NlAttrParseNested(const PNL_MSG_HDR nlMsg, UINT32 attrOffset,
                   UINT32 totalAttrLen,
-                  const NL_POLICY policy[], const UINT32 numPolicy,
-                  PNL_ATTR attrs[], UINT32 numAttrs)
+                  const NL_POLICY policy[],
+                  PNL_ATTR attrs[], UINT32 n_attrs)
 {
     return NlAttrParse(nlMsg, attrOffset + NLA_HDRLEN,
-                       totalAttrLen - NLA_HDRLEN, policy, numPolicy,
-                       attrs, numAttrs);
+                       totalAttrLen - NLA_HDRLEN, policy, attrs, n_attrs);
 }

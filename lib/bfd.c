@@ -24,7 +24,6 @@
 #include "byte-order.h"
 #include "connectivity.h"
 #include "csum.h"
-#include "dp-packet.h"
 #include "dpif.h"
 #include "dynamic-string.h"
 #include "flow.h"
@@ -170,10 +169,10 @@ struct bfd {
 
     uint32_t rmt_disc;            /* bfd.RemoteDiscr. */
 
-    struct eth_addr local_eth_src; /* Local eth src address. */
-    struct eth_addr local_eth_dst; /* Local eth dst address. */
+    uint8_t local_eth_src[ETH_ADDR_LEN]; /* Local eth src address. */
+    uint8_t local_eth_dst[ETH_ADDR_LEN]; /* Local eth dst address. */
 
-    struct eth_addr rmt_eth_dst;   /* Remote eth dst address. */
+    uint8_t rmt_eth_dst[ETH_ADDR_LEN];   /* Remote eth dst address. */
 
     ovs_be32 ip_src;              /* IPv4 source address. */
     ovs_be32 ip_dst;              /* IPv4 destination address. */
@@ -329,16 +328,6 @@ bfd_get_status(const struct bfd *bfd, struct smap *smap)
     ovs_mutex_unlock(&mutex);
 }
 
-void
-bfd_init(void)
-{
-    unixctl_command_register("bfd/show", "[interface]", 0, 1,
-                             bfd_unixctl_show, NULL);
-    unixctl_command_register("bfd/set-forwarding",
-                             "[interface] normal|false|true", 1, 2,
-                             bfd_unixctl_set_forwarding_override, NULL);
-}
-
 /* Initializes, destroys, or reconfigures the BFD session 'bfd' (named 'name'),
  * according to the database configuration contained in 'cfg'.  Takes ownership
  * of 'bfd', which may be NULL.  Returns a BFD object which may be used as a
@@ -348,6 +337,7 @@ struct bfd *
 bfd_configure(struct bfd *bfd, const char *name, const struct smap *cfg,
               struct netdev *netdev) OVS_EXCLUDED(mutex)
 {
+    static struct ovsthread_once once = OVSTHREAD_ONCE_INITIALIZER;
     static atomic_count udp_src = ATOMIC_COUNT_INIT(0);
 
     int decay_min_rx;
@@ -357,7 +347,16 @@ bfd_configure(struct bfd *bfd, const char *name, const struct smap *cfg,
     bool cpath_down, forwarding_if_rx;
     const char *hwaddr, *ip_src, *ip_dst;
     struct in_addr in_addr;
-    struct eth_addr ea;
+    uint8_t ea[ETH_ADDR_LEN];
+
+    if (ovsthread_once_start(&once)) {
+        unixctl_command_register("bfd/show", "[interface]", 0, 1,
+                                 bfd_unixctl_show, NULL);
+        unixctl_command_register("bfd/set-forwarding",
+                                 "[interface] normal|false|true", 1, 2,
+                                 bfd_unixctl_set_forwarding_override, NULL);
+        ovsthread_once_done(&once);
+    }
 
     if (!cfg || !smap_get_bool(cfg, "enable", false)) {
         bfd_unref(bfd);
@@ -441,24 +440,24 @@ bfd_configure(struct bfd *bfd, const char *name, const struct smap *cfg,
     }
 
     hwaddr = smap_get(cfg, "bfd_local_src_mac");
-    if (hwaddr && eth_addr_from_string(hwaddr, &ea)) {
-        bfd->local_eth_src = ea;
+    if (hwaddr && eth_addr_from_string(hwaddr, ea)) {
+        memcpy(bfd->local_eth_src, ea, ETH_ADDR_LEN);
     } else {
-        bfd->local_eth_src = eth_addr_zero;
+        memset(bfd->local_eth_src, 0, ETH_ADDR_LEN);
     }
 
     hwaddr = smap_get(cfg, "bfd_local_dst_mac");
-    if (hwaddr && eth_addr_from_string(hwaddr, &ea)) {
-        bfd->local_eth_dst = ea;
+    if (hwaddr && eth_addr_from_string(hwaddr, ea)) {
+        memcpy(bfd->local_eth_dst, ea, ETH_ADDR_LEN);
     } else {
-        bfd->local_eth_dst = eth_addr_zero;
+        memset(bfd->local_eth_dst, 0, ETH_ADDR_LEN);
     }
 
     hwaddr = smap_get(cfg, "bfd_remote_dst_mac");
-    if (hwaddr && eth_addr_from_string(hwaddr, &ea)) {
-        bfd->rmt_eth_dst = ea;
+    if (hwaddr && eth_addr_from_string(hwaddr, ea)) {
+        memcpy(bfd->rmt_eth_dst, ea, ETH_ADDR_LEN);
     } else {
-        bfd->rmt_eth_dst = eth_addr_zero;
+        memset(bfd->rmt_eth_dst, 0, ETH_ADDR_LEN);
     }
 
     ip_src = smap_get(cfg, "bfd_src_ip");
@@ -516,12 +515,10 @@ bfd_unref(struct bfd *bfd) OVS_EXCLUDED(mutex)
     }
 }
 
-long long int
+void
 bfd_wait(const struct bfd *bfd) OVS_EXCLUDED(mutex)
 {
-    long long int wake_time = bfd_wake_time(bfd);
-    poll_timer_wait_until(wake_time);
-    return wake_time;
+    poll_timer_wait_until(bfd_wake_time(bfd));
 }
 
 /* Returns the next wake up time. */
@@ -588,8 +585,8 @@ bfd_should_send_packet(const struct bfd *bfd) OVS_EXCLUDED(mutex)
 }
 
 void
-bfd_put_packet(struct bfd *bfd, struct dp_packet *p,
-               const struct eth_addr eth_src) OVS_EXCLUDED(mutex)
+bfd_put_packet(struct bfd *bfd, struct ofpbuf *p,
+               uint8_t eth_src[ETH_ADDR_LEN]) OVS_EXCLUDED(mutex)
 {
     long long int min_tx, min_rx;
     struct udp_header *udp;
@@ -612,15 +609,19 @@ bfd_put_packet(struct bfd *bfd, struct dp_packet *p,
      * set. */
     ovs_assert(!(bfd->flags & FLAG_POLL) || !(bfd->flags & FLAG_FINAL));
 
-    dp_packet_reserve(p, 2); /* Properly align after the ethernet header. */
-    eth = dp_packet_put_uninit(p, sizeof *eth);
-    eth->eth_src = eth_addr_is_zero(bfd->local_eth_src)
-        ? eth_src : bfd->local_eth_src;
-    eth->eth_dst = eth_addr_is_zero(bfd->local_eth_dst)
-        ? eth_addr_bfd : bfd->local_eth_dst;
+    ofpbuf_reserve(p, 2); /* Properly align after the ethernet header. */
+    eth = ofpbuf_put_uninit(p, sizeof *eth);
+    memcpy(eth->eth_src,
+           eth_addr_is_zero(bfd->local_eth_src) ? eth_src
+                                                : bfd->local_eth_src,
+           ETH_ADDR_LEN);
+    memcpy(eth->eth_dst,
+           eth_addr_is_zero(bfd->local_eth_dst) ? eth_addr_bfd
+                                                : bfd->local_eth_dst,
+           ETH_ADDR_LEN);
     eth->eth_type = htons(ETH_TYPE_IP);
 
-    ip = dp_packet_put_zeros(p, sizeof *ip);
+    ip = ofpbuf_put_zeros(p, sizeof *ip);
     ip->ip_ihl_ver = IP_IHL_VER(5, 4);
     ip->ip_tot_len = htons(sizeof *ip + sizeof *udp + sizeof *msg);
     ip->ip_ttl = MAXTTL;
@@ -630,12 +631,12 @@ bfd_put_packet(struct bfd *bfd, struct dp_packet *p,
     put_16aligned_be32(&ip->ip_dst, bfd->ip_dst);
     ip->ip_csum = csum(ip, sizeof *ip);
 
-    udp = dp_packet_put_zeros(p, sizeof *udp);
+    udp = ofpbuf_put_zeros(p, sizeof *udp);
     udp->udp_src = htons(bfd->udp_src);
     udp->udp_dst = htons(BFD_DEST_PORT);
     udp->udp_len = htons(sizeof *udp + sizeof *msg);
 
-    msg = dp_packet_put_uninit(p, sizeof *msg);
+    msg = ofpbuf_put_uninit(p, sizeof *msg);
     msg->vers_diag = (BFD_VERSION << 5) | bfd->diag;
     msg->flags = (bfd->state & STATE_MASK) | bfd->flags;
 
@@ -674,7 +675,7 @@ bfd_should_process_flow(const struct bfd *bfd_, const struct flow *flow,
     if (!eth_addr_is_zero(bfd->rmt_eth_dst)) {
         memset(&wc->masks.dl_dst, 0xff, sizeof wc->masks.dl_dst);
 
-        if (!eth_addr_equals(bfd->rmt_eth_dst, flow->dl_dst)) {
+        if (memcmp(bfd->rmt_eth_dst, flow->dl_dst, ETH_ADDR_LEN)) {
             return false;
         }
     }
@@ -701,14 +702,14 @@ bfd_should_process_flow(const struct bfd *bfd_, const struct flow *flow,
 
 void
 bfd_process_packet(struct bfd *bfd, const struct flow *flow,
-                   const struct dp_packet *p) OVS_EXCLUDED(mutex)
+                   const struct ofpbuf *p) OVS_EXCLUDED(mutex)
 {
     uint32_t rmt_min_rx, pkt_your_disc;
     enum state rmt_state;
     enum flags flags;
     uint8_t version;
     struct msg *msg;
-    const uint8_t *l7 = dp_packet_get_udp_payload(p);
+    const uint8_t *l7 = ofpbuf_get_udp_payload(p);
 
     if (!l7) {
         return; /* No UDP payload. */
@@ -727,11 +728,11 @@ bfd_process_packet(struct bfd *bfd, const struct flow *flow,
         goto out;
     }
 
-    msg = dp_packet_at(p, l7 - (uint8_t *)dp_packet_data(p), BFD_PACKET_LEN);
+    msg = ofpbuf_at(p, l7 - (uint8_t *)ofpbuf_data(p), BFD_PACKET_LEN);
     if (!msg) {
         VLOG_INFO_RL(&rl, "%s: Received too-short BFD control message (only "
                      "%"PRIdPTR" bytes long, at least %d required).",
-                     bfd->name, (uint8_t *) dp_packet_tail(p) - l7,
+                     bfd->name, (uint8_t *) ofpbuf_tail(p) - l7,
                      BFD_PACKET_LEN);
         goto out;
     }
@@ -740,7 +741,7 @@ bfd_process_packet(struct bfd *bfd, const struct flow *flow,
      * If the Length field is greater than the payload of the encapsulating
      * protocol, the packet MUST be discarded.
      *
-     * Note that we make this check implicitly.  Above we use dp_packet_at() to
+     * Note that we make this check implicity.  Above we use ofpbuf_at() to
      * ensure that there are at least BFD_PACKET_LEN bytes in the payload of
      * the encapsulating protocol.  Below we require msg->length to be exactly
      * BFD_PACKET_LEN bytes. */

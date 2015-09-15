@@ -27,7 +27,6 @@
 #include "ofp-util.h"
 #include "openflow/openflow.h"
 #include "ovstest.h"
-#include "dp-packet.h"
 #include "pcap-file.h"
 #include "timeval.h"
 #include "util.h"
@@ -58,7 +57,7 @@ test_flows_main(int argc OVS_UNUSED, char *argv[] OVS_UNUSED)
     }
 
     while (fread(&expected_match, sizeof expected_match, 1, flows)) {
-        struct dp_packet *packet;
+        struct ofpbuf *packet;
         struct ofp10_match extracted_match;
         struct match match;
         struct flow flow;
@@ -71,7 +70,7 @@ test_flows_main(int argc OVS_UNUSED, char *argv[] OVS_UNUSED)
             ovs_fatal(retval, "error reading pcap file");
         }
 
-        flow_extract(packet, &flow);
+        flow_extract(packet, NULL, &flow);
         flow.in_port.ofp_port = u16_to_ofp(1);
 
         match_wc_init(&match, &flow);
@@ -83,8 +82,8 @@ test_flows_main(int argc OVS_UNUSED, char *argv[] OVS_UNUSED)
             errors++;
             printf("mismatch on packet #%d (1-based).\n", n);
             printf("Packet:\n");
-            ofp_print_packet(stdout, dp_packet_data(packet), dp_packet_size(packet));
-            ovs_hex_dump(stdout, dp_packet_data(packet), dp_packet_size(packet), 0, true);
+            ofp_print_packet(stdout, ofpbuf_data(packet), ofpbuf_size(packet));
+            ovs_hex_dump(stdout, ofpbuf_data(packet), ofpbuf_size(packet), 0, true);
             match_print(&match);
             printf("Expected flow:\n%s\n", exp_s);
             printf("Actually extracted flow:\n%s\n", got_s);
@@ -95,7 +94,7 @@ test_flows_main(int argc OVS_UNUSED, char *argv[] OVS_UNUSED)
             free(got_s);
         }
 
-        dp_packet_delete(packet);
+        ofpbuf_delete(packet);
     }
     printf("checked %d packets, %d errors\n", n, errors);
     exit(errors != 0);

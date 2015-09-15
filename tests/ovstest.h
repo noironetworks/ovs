@@ -19,8 +19,6 @@
 
 #include "compiler.h"
 
-#include "command-line.h"
-
 /* Overview
  * ========
  *
@@ -34,7 +32,7 @@
  * ovstest.
  *
  * With ovstest, each test programs now becomes a sub program of ovstest.
- * For example, 'mytest' program, can now be invoked as 'ovstest mytest'.
+ * For example, 'mytest' program, can now be invoked as 'ovs mytest'.
  *
  * 'ovstest --help' will list all test programs can be invoked.
  *
@@ -43,8 +41,7 @@
  */
 
 typedef void (*ovstest_func)(int argc, char *argv[]);
-
-void ovstest_register(const char *test_name, ovs_cmdl_handler f);
+void ovstest_register(const char *test_name, ovstest_func f);
 
 /* Usage
  * =====
@@ -75,13 +72,8 @@ void ovstest_register(const char *test_name, ovs_cmdl_handler f);
  * OVSTEST_REGISTER("my-test", my_test_main);
  */
 #define OVSTEST_REGISTER(name, function) \
-    static void \
-    ovstest_wrapper_##function##__(struct ovs_cmdl_context *ctx) \
-    { \
-        function(ctx->argc, ctx->argv); \
-    } \
     OVS_CONSTRUCTOR(register_##function) { \
-        ovstest_register(name, ovstest_wrapper_##function##__); \
+        ovstest_register(name, function); \
     }
 
 #endif
