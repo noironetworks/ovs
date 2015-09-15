@@ -202,6 +202,7 @@ static int ovs_datapath_family;
 static int ovs_vport_family;
 static int ovs_flow_family;
 static int ovs_packet_family;
+static int ovs_config_family;
 
 /* Generic Netlink multicast groups for OVS.
  *
@@ -2291,6 +2292,162 @@ dpif_netlink_get_datapath_version(void)
     return version_str;
 }
 
+static void
+dpif_netlink_config_to_ofpbuf(const struct dpif_netlink_config *config,
+                              struct ofpbuf *buf)
+{
+    struct ovs_header *ovs_header;
+
+    nl_msg_put_genlmsghdr(buf, 0, ovs_config_family, NLM_F_REQUEST,
+                          config->cmd, OVS_CONFIG_VERSION);
+
+    ovs_header = ofpbuf_put_uninit(buf, sizeof *ovs_header);
+    ovs_header->dp_ifindex = config->dp_ifindex;
+
+    if (config->type == OVS_CONFIG_ATTR_VXLAN) {
+        int vxlan_ofs = nl_msg_start_nested(buf, OVS_CONFIG_ATTR_VXLAN);
+        nl_msg_put_u16(buf, OVS_CONFIG_ATTR_VXLAN_PORT,
+                       config->u.vxlan.vxlan_port);
+        nl_msg_put_u8(buf, OVS_CONFIG_ATTR_VXLAN_IGMP_CMD,
+                      config->u.vxlan.igmp_cmd);
+        nl_msg_put_u32(buf, OVS_CONFIG_ATTR_VXLAN_IGMP_GROUP,
+                       config->u.vxlan.igmp_group);
+        nl_msg_end_nested(buf, vxlan_ofs);
+    }
+}
+
+static int
+dpif_netlink_config_from_ofpbuf(struct dpif_netlink_config *config,
+                                const struct ofpbuf *buf)
+{
+    static const struct nl_policy ovs_config_policy[__OVS_CONFIG_ATTR_MAX] = {
+        [OVS_CONFIG_ATTR_VXLAN] = { .type = NL_A_NESTED },
+    };
+
+    static const struct nl_policy
+        ovs_vxlan_config_policy[__OVS_CONFIG_ATTR_VXLAN_MAX] = {
+            [OVS_CONFIG_ATTR_VXLAN_PORT] = { .type = NL_A_U16 },
+            [OVS_CONFIG_ATTR_VXLAN_IGMP_CMD] = { .type = NL_A_U8 },
+            [OVS_CONFIG_ATTR_VXLAN_IGMP_GROUP] = { .type = NL_A_UNSPEC },
+    };
+
+    struct nlattr *a[ARRAY_SIZE(ovs_config_policy)];
+    struct nlattr *v[ARRAY_SIZE(ovs_vxlan_config_policy)];
+    struct ovs_header *ovs_header;
+    struct nlmsghdr *nlmsg;
+    struct genlmsghdr *genl;
+    struct ofpbuf b;
+
+    ofpbuf_use_const(&b, buf->data, buf->size);
+
+    nlmsg = ofpbuf_try_pull(&b, sizeof *nlmsg);
+    genl = ofpbuf_try_pull(&b, sizeof *genl);
+    ovs_header = ofpbuf_try_pull(&b, sizeof *ovs_header);
+    if (!nlmsg || !genl || !ovs_header
+        || nlmsg->nlmsg_type != ovs_config_family 
+        || !nl_policy_parse(&b, 0, ovs_config_policy, a,
+                            ARRAY_SIZE(ovs_config_policy))) {
+        return EINVAL;
+    }
+
+    config->cmd = genl->cmd;
+    config->dp_ifindex = ovs_header->dp_ifindex;
+    if (a[OVS_CONFIG_ATTR_VXLAN]) {
+        config->type = OVS_CONFIG_ATTR_VXLAN;
+        if (!nl_parse_nested(a[OVS_CONFIG_ATTR_VXLAN],
+                             ovs_vxlan_config_policy, v, ARRAY_SIZE(v))) {
+            return EINVAL;
+        }
+        config->u.vxlan.vxlan_port =
+            nl_attr_get_u16(v[OVS_CONFIG_ATTR_VXLAN_PORT]);
+        config->u.vxlan.igmp_cmd =
+            nl_attr_get_u8(v[OVS_CONFIG_ATTR_VXLAN_IGMP_CMD]);
+        config->u.vxlan.igmp_group_count =
+            nl_attr_get_size(v[OVS_CONFIG_ATTR_VXLAN_IGMP_GROUP]) / 4;
+        if (config->u.vxlan.igmp_group_count > 200)
+            config->u.vxlan.igmp_group_count = 200;
+        memcpy(config->u.vxlan.igmp_group_table,
+               nl_attr_get(v[OVS_CONFIG_ATTR_VXLAN_IGMP_GROUP]),
+               config->u.vxlan.igmp_group_count * 4);
+    }
+    return 0;
+}
+
+static int
+dpif_netlink_config_transact(const struct dpif_netlink_config *request,
+                             struct dpif_netlink_config *reply,
+                             struct ofpbuf **bufp)
+{
+    struct ofpbuf *request_buf;
+    int error;
+
+    ovs_assert((reply != NULL) == (bufp != NULL));
+
+    error = dpif_netlink_init();
+    if (error) {
+        if (reply) {
+            *bufp = NULL;
+        }
+        return error;
+    }
+
+    request_buf = ofpbuf_new(1024);
+    dpif_netlink_config_to_ofpbuf(request, request_buf);
+    error = nl_transact(NETLINK_GENERIC, request_buf, bufp);
+    ofpbuf_delete(request_buf);
+
+    if (reply) {
+        if (!error) {
+            error = dpif_netlink_config_from_ofpbuf(reply, *bufp);
+        }
+        if (error) {
+            ofpbuf_delete(*bufp);
+            *bufp = NULL;
+        }
+    }
+    return error;
+}
+
+static int dpif_netlink_configure(const struct dpif *dpif_,
+                                  struct dpif_dp_config *config)
+{
+    struct dpif_netlink *dpif = dpif_netlink_cast(dpif_);
+    struct dpif_netlink_config request, reply;
+    struct ofpbuf *buf;
+    int err;
+
+    request.dp_ifindex = dpif->dp_ifindex;
+
+    /* set or get */
+    request.cmd = config->cmd;
+    /* currently supports only vxlan */
+    request.type = config->type;
+
+    if (config->type == OVS_CONFIG_ATTR_VXLAN) {
+        request.u.vxlan.vxlan_port = config->u.vxlan.vxlan_port;
+        request.u.vxlan.igmp_cmd = config->u.vxlan.igmp_cmd;
+        request.u.vxlan.igmp_group = config->u.vxlan.igmp_group;
+    } else {
+        return -1;
+    }
+
+    if (config->cmd == OVS_CONFIG_CMD_SET) {
+        err = dpif_netlink_config_transact(&request, NULL, NULL);
+    } else if (config->cmd == OVS_CONFIG_CMD_GET) {
+        err = dpif_netlink_config_transact(&request, &reply, &buf);
+        if (!err) {
+            if (config->type == OVS_CONFIG_ATTR_VXLAN) {
+                memcpy(&config->u.vxlan, &reply.u.vxlan, sizeof(reply.u.vxlan));
+            }
+            ofpbuf_delete(buf);
+        }
+    } else {
+        return -1;
+    }
+    return err;
+}
+
+
 const struct dpif_class dpif_netlink_class = {
     "system",
     NULL,                       /* init */
@@ -2330,6 +2487,7 @@ const struct dpif_class dpif_netlink_class = {
     NULL,                       /* enable_upcall */
     NULL,                       /* disable_upcall */
     dpif_netlink_get_datapath_version, /* get_datapath_version */
+    dpif_netlink_configure,
 };
 
 static int
@@ -2360,7 +2518,10 @@ dpif_netlink_init(void)
             error = nl_lookup_genl_mcgroup(OVS_VPORT_FAMILY, OVS_VPORT_MCGROUP,
                                            &ovs_vport_mcgroup);
         }
-
+ 	if (!error) {
+ 	    error = nl_lookup_genl_family(OVS_CONFIG_FAMILY,
+                                           &ovs_config_family);
+        }
         ovsthread_once_done(&once);
     }
 

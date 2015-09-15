@@ -62,6 +62,35 @@ static inline struct vxlan_port *vxlan_vport(const struct vport *vport)
 	return vport_priv(vport);
 }
 
+static inline bool
+vxlan_dst_port_eq(struct vxlan_port *vxlan_port, __be16 dst_port)
+{
+        if (vxlan_port->vs && inet_sport(vxlan_port->vs->sock->sk) == dst_port)
+                return true;
+        else
+                return false;
+}
+
+/* Called with rcu_read_lock */
+struct vxlan_sock *vxlan_find_sock(struct datapath *dp, __be16 dst_port)
+{
+        int i;
+        struct vport *vport;
+        struct vxlan_port *vxlan_port;
+
+        for (i = 0; i < DP_VPORT_HASH_BUCKETS; i++) {
+                hlist_for_each_entry_rcu(vport, &dp->ports[i], dp_hash_node) {
+                        if (vport->ops->type == OVS_VPORT_TYPE_VXLAN) {
+                                vxlan_port = vxlan_vport(vport);
+                                if (vxlan_dst_port_eq(vxlan_port, dst_port))
+                                        return vxlan_port->vs;
+                        }
+                }
+        }
+        return NULL;
+}
+EXPORT_SYMBOL_GPL(vxlan_find_sock);
+
 static void vxlan_rcv(struct vxlan_sock *vs, struct sk_buff *skb,
 		      struct vxlan_metadata *md)
 {
@@ -307,19 +336,14 @@ static struct vport_ops ovs_vxlan_vport_ops = {
 	.owner			= THIS_MODULE,
 };
 
-static int __init ovs_vxlan_tnl_init(void)
+int ovs_vxlan_tnl_init(void)
 {
 	return ovs_vport_ops_register(&ovs_vxlan_vport_ops);
 }
+EXPORT_SYMBOL_GPL(ovs_vxlan_tnl_init);
 
-static void __exit ovs_vxlan_tnl_exit(void)
+void ovs_vxlan_tnl_exit(void)
 {
 	ovs_vport_ops_unregister(&ovs_vxlan_vport_ops);
 }
-
-module_init(ovs_vxlan_tnl_init);
-module_exit(ovs_vxlan_tnl_exit);
-
-MODULE_DESCRIPTION("OVS: VXLAN switching port");
-MODULE_LICENSE("GPL");
-MODULE_ALIAS("vport-type-4");
+EXPORT_SYMBOL_GPL(ovs_vxlan_tnl_exit);
