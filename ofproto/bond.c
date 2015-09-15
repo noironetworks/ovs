@@ -28,6 +28,7 @@
 #include "ofpbuf.h"
 #include "ofproto/ofproto-provider.h"
 #include "ofproto/ofproto-dpif.h"
+#include "ofproto/ofproto-dpif-rid.h"
 #include "connectivity.h"
 #include "coverage.h"
 #include "dynamic-string.h"
@@ -39,6 +40,7 @@
 #include "odp-util.h"
 #include "ofpbuf.h"
 #include "packets.h"
+#include "dp-packet.h"
 #include "poll-loop.h"
 #include "seq.h"
 #include "match.h"
@@ -138,7 +140,7 @@ struct bond {
 
     /* Interface name may not be persistent across an OS reboot, use
      * MAC address for identifing the active slave */
-    uint8_t active_slave_mac[ETH_ADDR_LEN];
+    struct eth_addr active_slave_mac;
                                /* The MAC address of the active interface. */
     /* Legacy compatibility. */
     bool lacp_fallback_ab; /* Fallback to active-backup on LACP failure. */
@@ -170,7 +172,7 @@ static void bond_link_status_update(struct bond_slave *)
     OVS_REQ_WRLOCK(rwlock);
 static void bond_choose_active_slave(struct bond *)
     OVS_REQ_WRLOCK(rwlock);
-static unsigned int bond_hash_src(const uint8_t mac[ETH_ADDR_LEN],
+static unsigned int bond_hash_src(const struct eth_addr mac,
                                   uint16_t vlan, uint32_t basis);
 static unsigned int bond_hash_tcp(const struct flow *, uint16_t vlan,
                                   uint32_t basis);
@@ -288,7 +290,7 @@ bond_unref(struct bond *bond)
     hmap_destroy(&bond->pr_rule_ops);
 
     if (bond->recirc_id) {
-        ofproto_dpif_free_recirc_id(bond->ofproto, bond->recirc_id);
+        recirc_free_id(bond->recirc_id);
     }
 
     free(bond);
@@ -320,6 +322,7 @@ add_pr_rule(struct bond *bond, const struct match *match,
 
 static void
 update_recirc_rules(struct bond *bond)
+    OVS_REQ_WRLOCK(rwlock)
 {
     struct match match;
     struct bond_pr_rule_op *pr_op, *next_op;
@@ -444,10 +447,10 @@ bond_reconfigure(struct bond *bond, const struct bond_settings *s)
 
     if (bond->balance != BM_AB) {
         if (!bond->recirc_id) {
-            bond->recirc_id = ofproto_dpif_alloc_recirc_id(bond->ofproto);
+            bond->recirc_id = recirc_alloc_id(bond->ofproto);
         }
     } else if (bond->recirc_id) {
-        ofproto_dpif_free_recirc_id(bond->ofproto, bond->recirc_id);
+        recirc_free_id(bond->recirc_id);
         bond->recirc_id = 0;
     }
 
@@ -455,9 +458,7 @@ bond_reconfigure(struct bond *bond, const struct bond_settings *s)
         bond_entry_reset(bond);
     }
 
-    memcpy(bond->active_slave_mac, s->active_slave_mac,
-           sizeof s->active_slave_mac);
-
+    bond->active_slave_mac = s->active_slave_mac;
     bond->active_slave_changed = false;
 
     ovs_rwlock_unlock(&rwlock);
@@ -465,19 +466,19 @@ bond_reconfigure(struct bond *bond, const struct bond_settings *s)
 }
 
 static struct bond_slave *
-bond_find_slave_by_mac(const struct bond *bond, const uint8_t mac[ETH_ADDR_LEN])
+bond_find_slave_by_mac(const struct bond *bond, const struct eth_addr mac)
 {
     struct bond_slave *slave;
 
     /* Find the last active slave */
     HMAP_FOR_EACH(slave, hmap_node, &bond->slaves) {
-        uint8_t slave_mac[ETH_ADDR_LEN];
+        struct eth_addr slave_mac;
 
-        if (netdev_get_etheraddr(slave->netdev, slave_mac)) {
+        if (netdev_get_etheraddr(slave->netdev, &slave_mac)) {
             continue;
         }
 
-        if (!memcmp(slave_mac, mac, sizeof(slave_mac))) {
+        if (eth_addr_equals(slave_mac, mac)) {
             return slave;
         }
     }
@@ -488,10 +489,10 @@ bond_find_slave_by_mac(const struct bond *bond, const uint8_t mac[ETH_ADDR_LEN])
 static void
 bond_active_slave_changed(struct bond *bond)
 {
-    uint8_t mac[ETH_ADDR_LEN];
+    struct eth_addr mac;
 
-    netdev_get_etheraddr(bond->active_slave->netdev, mac);
-    memcpy(bond->active_slave_mac, mac, sizeof bond->active_slave_mac);
+    netdev_get_etheraddr(bond->active_slave->netdev, &mac);
+    bond->active_slave_mac = mac;
     bond->active_slave_changed = true;
     seq_change(connectivity_seq_get());
 }
@@ -717,22 +718,21 @@ bond_should_send_learning_packets(struct bond *bond)
  * See bond_should_send_learning_packets() for description of usage. The
  * caller should send the composed packet on the port associated with
  * port_aux and takes ownership of the returned ofpbuf. */
-struct ofpbuf *
-bond_compose_learning_packet(struct bond *bond,
-                             const uint8_t eth_src[ETH_ADDR_LEN],
+struct dp_packet *
+bond_compose_learning_packet(struct bond *bond, const struct eth_addr eth_src,
                              uint16_t vlan, void **port_aux)
 {
     struct bond_slave *slave;
-    struct ofpbuf *packet;
+    struct dp_packet *packet;
     struct flow flow;
 
     ovs_rwlock_rdlock(&rwlock);
     ovs_assert(may_send_learning_packets(bond));
     memset(&flow, 0, sizeof flow);
-    memcpy(flow.dl_src, eth_src, ETH_ADDR_LEN);
+    flow.dl_src = eth_src;
     slave = choose_output_slave(bond, &flow, NULL, vlan);
 
-    packet = ofpbuf_new(0);
+    packet = dp_packet_new(0);
     compose_rarp(packet, eth_src);
     if (vlan) {
         eth_push_vlan(packet, htons(ETH_TYPE_VLAN), htons(vlan));
@@ -760,7 +760,7 @@ bond_compose_learning_packet(struct bond *bond,
  */
 enum bond_verdict
 bond_check_admissibility(struct bond *bond, const void *slave_,
-                         const uint8_t eth_dst[ETH_ADDR_LEN])
+                         const struct eth_addr eth_dst)
 {
     enum bond_verdict verdict = BV_DROP;
     struct bond_slave *slave;
@@ -923,8 +923,9 @@ bond_may_recirc(const struct bond *bond, uint32_t *recirc_id,
     }
 }
 
-void
-bond_update_post_recirc_rules(struct bond* bond, const bool force)
+static void
+bond_update_post_recirc_rules__(struct bond* bond, const bool force)
+    OVS_REQ_WRLOCK(rwlock)
 {
    struct bond_entry *e;
    bool update_rules = force;  /* Always update rules if caller forces it. */
@@ -944,6 +945,14 @@ bond_update_post_recirc_rules(struct bond* bond, const bool force)
    if (update_rules) {
         update_recirc_rules(bond);
    }
+}
+
+void
+bond_update_post_recirc_rules(struct bond* bond, const bool force)
+{
+    ovs_rwlock_wrlock(&rwlock);
+    bond_update_post_recirc_rules__(bond, force);
+    ovs_rwlock_unlock(&rwlock);
 }
 
 /* Rebalancing. */
@@ -1125,7 +1134,7 @@ bond_rebalance(struct bond *bond)
     }
     bond->next_rebalance = time_msec() + bond->rebalance_interval;
 
-    use_recirc = ofproto_dpif_get_enable_recirc(bond->ofproto) &&
+    use_recirc = ofproto_dpif_get_support(bond->ofproto)->odp.recirc &&
                  bond_may_recirc(bond, NULL, NULL);
 
     if (use_recirc) {
@@ -1203,7 +1212,7 @@ bond_rebalance(struct bond *bond)
     }
 
     if (use_recirc && rebalanced) {
-        bond_update_post_recirc_rules(bond,true);
+        bond_update_post_recirc_rules__(bond,true);
     }
 
 done:
@@ -1550,7 +1559,7 @@ bond_unixctl_hash(struct unixctl_conn *conn, int argc, const char *argv[],
     const char *mac_s = argv[1];
     const char *vlan_s = argc > 2 ? argv[2] : NULL;
     const char *basis_s = argc > 3 ? argv[3] : NULL;
-    uint8_t mac[ETH_ADDR_LEN];
+    struct eth_addr mac;
     uint8_t hash;
     char *hash_cstr;
     unsigned int vlan;
@@ -1693,7 +1702,7 @@ bond_link_status_update(struct bond_slave *slave)
 }
 
 static unsigned int
-bond_hash_src(const uint8_t mac[ETH_ADDR_LEN], uint16_t vlan, uint32_t basis)
+bond_hash_src(const struct eth_addr mac, uint16_t vlan, uint32_t basis)
 {
     return hash_mac(mac, vlan, basis);
 }
@@ -1859,7 +1868,8 @@ bond_choose_active_slave(struct bond *bond)
  * If return true, 'mac' will store the bond's current active slave's
  * MAC address.  */
 bool
-bond_get_changed_active_slave(const char *name, uint8_t* mac, bool force)
+bond_get_changed_active_slave(const char *name, struct eth_addr *mac,
+                              bool force)
 {
     struct bond *bond;
 
@@ -1867,7 +1877,7 @@ bond_get_changed_active_slave(const char *name, uint8_t* mac, bool force)
     bond = bond_find(name);
     if (bond) {
         if (bond->active_slave_changed || force) {
-            memcpy(mac, bond->active_slave_mac, ETH_ADDR_LEN);
+            *mac = bond->active_slave_mac;
             bond->active_slave_changed = false;
             ovs_rwlock_unlock(&rwlock);
             return true;

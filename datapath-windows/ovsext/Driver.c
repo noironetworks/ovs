@@ -95,6 +95,9 @@ DriverEntry(PDRIVER_OBJECT driverObject,
 
     UNREFERENCED_PARAMETER(registryPath);
 
+    /* Initialize driver associated data structures. */
+    OvsInit();
+
     gOvsExtDriverObject = driverObject;
 
     RtlZeroMemory(&driverChars, sizeof driverChars);
@@ -136,17 +139,26 @@ DriverEntry(PDRIVER_OBJECT driverObject,
     driverObject->DriverUnload = OvsExtUnload;
 
     status = NdisFRegisterFilterDriver(driverObject,
-                                       (NDIS_HANDLE) gOvsExtDriverObject,
-                                       &driverChars, &gOvsExtDriverHandle);
+                                       (NDIS_HANDLE)gOvsExtDriverObject,
+                                       &driverChars,
+                                       &gOvsExtDriverHandle);
     if (status != NDIS_STATUS_SUCCESS) {
-        return status;
+        goto cleanup;
     }
 
-    /* Create the communication channel for usersapce. */
+    /* Create the communication channel for userspace. */
     status = OvsCreateDeviceObject(gOvsExtDriverHandle);
     if (status != NDIS_STATUS_SUCCESS) {
-        NdisFDeregisterFilterDriver(gOvsExtDriverHandle);
-        gOvsExtDriverHandle = NULL;
+        goto cleanup;
+    }
+
+cleanup:
+    if (status != NDIS_STATUS_SUCCESS){
+        OvsCleanup();
+        if (gOvsExtDriverHandle) {
+            NdisFDeregisterFilterDriver(gOvsExtDriverHandle);
+            gOvsExtDriverHandle = NULL;
+        }
     }
 
     return status;
@@ -163,7 +175,11 @@ OvsExtUnload(struct _DRIVER_OBJECT *driverObject)
 {
     UNREFERENCED_PARAMETER(driverObject);
 
+    /* Release driver associated data structures. */
+    OvsCleanup();
+
     OvsDeleteDeviceObject();
+
     NdisFDeregisterFilterDriver(gOvsExtDriverHandle);
 }
 

@@ -99,10 +99,11 @@ passed over the Netlink socket. A flow key, exactly as described above, and an
 optional corresponding flow mask.
 
 A wildcarded flow can represent a group of exact match flows. Each '1' bit
-in the mask specifies a exact match with the corresponding bit in the flow key.
+in the mask specifies an exact match with the corresponding bit in the flow key.
 A '0' bit specifies a don't care bit, which will match either a '1' or '0' bit
-of a incoming packet. Using wildcarded flow can improve the flow set up rate
-by reduce the number of new flows need to be processed by the user space program.
+of an incoming packet. Using a wildcarded flow can improve the flow set up rate
+by reducing the number of new flows that need to be processed by the user space
+program.
 
 Support for the mask Netlink attribute is optional for both the kernel and user
 space program. The kernel can ignore the mask attribute, installing an exact
@@ -246,3 +247,19 @@ The other rules for flow keys are much less subtle:
     composes it the same way.  This allows userspace to hash and
     compare entire flow keys that it may not be able to fully
     interpret.
+
+
+Coding rules
+============
+
+Compatibility
+-------------
+
+Please implement the headers and codes for compatibility with older kernel
+in linux/compat/ directory.  All public functions should be exported using
+EXPORT_SYMBOL macro.  Public function replacing the same-named kernel
+function should be prefixed with 'rpl_'.  Otherwise, the function should be
+prefixed with 'ovs_'.  For special case when it is not possible to follow
+this rule (e.g., the pskb_expand_head() function), the function name must
+be added to linux/compat/build-aux/export-check-whitelist, otherwise, the
+compilation check 'check-export-symbol' will fail.

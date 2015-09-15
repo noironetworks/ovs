@@ -53,6 +53,7 @@
 #include "trigger.h"
 #include "util.h"
 #include "unixctl.h"
+#include "perf-counter.h"
 #include "openvswitch/vlog.h"
 
 VLOG_DEFINE_THIS_MODULE(ovsdb_server);
@@ -76,6 +77,8 @@ static bool bootstrap_ca_cert;
 static unixctl_cb_func ovsdb_server_exit;
 static unixctl_cb_func ovsdb_server_compact;
 static unixctl_cb_func ovsdb_server_reconnect;
+static unixctl_cb_func ovsdb_server_perf_counters_clear;
+static unixctl_cb_func ovsdb_server_perf_counters_show;
 
 struct server_config {
     struct sset *remotes;
@@ -211,7 +214,7 @@ main(int argc, char *argv[])
     char *error;
     int i;
 
-    proctitle_init(argc, argv);
+    ovs_cmdl_proctitle_init(argc, argv);
     set_program_name(argv[0]);
     service_start(&argc, &argv);
     fatal_ignore_sigpipe();
@@ -292,6 +295,8 @@ main(int argc, char *argv[])
 
     daemonize_complete();
 
+    perf_counters_init();
+
     if (!run_command) {
         /* ovsdb-server is usually a long-running process, in which case it
          * makes plenty of sense to log the version, but --run makes
@@ -318,6 +323,10 @@ main(int argc, char *argv[])
                              ovsdb_server_remove_database, &server_config);
     unixctl_command_register("ovsdb-server/list-dbs", "", 0, 0,
                              ovsdb_server_list_databases, &all_dbs);
+    unixctl_command_register("ovsdb-server/perf-counters-show", "", 0, 0,
+                             ovsdb_server_perf_counters_show, NULL);
+    unixctl_command_register("ovsdb-server/perf-counters-clear", "", 0, 0,
+                             ovsdb_server_perf_counters_clear, NULL);
 
     main_loop(jsonrpc, &all_dbs, unixctl, &remotes, run_process, &exiting);
 
@@ -338,7 +347,7 @@ main(int argc, char *argv[])
                       run_command, process_status_msg(status));
         }
     }
-
+    perf_counters_destroy();
     service_stop();
     return 0;
 }
@@ -1022,6 +1031,26 @@ ovsdb_server_exit(struct unixctl_conn *conn, int argc OVS_UNUSED,
 }
 
 static void
+ovsdb_server_perf_counters_show(struct unixctl_conn *conn, int argc OVS_UNUSED,
+                                const char *argv[] OVS_UNUSED,
+                                void *arg_ OVS_UNUSED)
+{
+    char *s = perf_counters_to_string();
+
+    unixctl_command_reply(conn, s);
+    free(s);
+}
+
+static void
+ovsdb_server_perf_counters_clear(struct unixctl_conn *conn, int argc OVS_UNUSED,
+                                 const char *argv[] OVS_UNUSED,
+                                 void *arg_ OVS_UNUSED)
+{
+    perf_counters_clear();
+    unixctl_command_reply(conn, NULL);
+}
+
+static void
 ovsdb_server_compact(struct unixctl_conn *conn, int argc,
                      const char *argv[], void *dbs_)
 {
@@ -1223,6 +1252,7 @@ parse_options(int *argcp, char **argvp[],
         OPT_UNIXCTL,
         OPT_RUN,
         OPT_BOOTSTRAP_CA_CERT,
+        OPT_PEER_CA_CERT,
         VLOG_OPTION_ENUMS,
         DAEMON_OPTION_ENUMS
     };
@@ -1237,12 +1267,13 @@ parse_options(int *argcp, char **argvp[],
         DAEMON_LONG_OPTIONS,
         VLOG_LONG_OPTIONS,
         {"bootstrap-ca-cert", required_argument, NULL, OPT_BOOTSTRAP_CA_CERT},
+        {"peer-ca-cert", required_argument, NULL, OPT_PEER_CA_CERT},
         {"private-key", required_argument, NULL, 'p'},
         {"certificate", required_argument, NULL, 'c'},
         {"ca-cert",     required_argument, NULL, 'C'},
         {NULL, 0, NULL, 0},
     };
-    char *short_options = long_options_to_short_options(long_options);
+    char *short_options = ovs_cmdl_long_options_to_short_options(long_options);
     int argc = *argcp;
     char **argv = *argvp;
 
@@ -1294,6 +1325,10 @@ parse_options(int *argcp, char **argvp[],
         case OPT_BOOTSTRAP_CA_CERT:
             ca_cert_file = optarg;
             bootstrap_ca_cert = true;
+            break;
+
+        case OPT_PEER_CA_CERT:
+            stream_ssl_set_peer_ca_cert_file(optarg);
             break;
 
         case '?':

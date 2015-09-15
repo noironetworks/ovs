@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2010, 2011, 2012, 2013, 2014 Nicira, Inc.
+ * Copyright (c) 2010, 2011, 2012, 2013, 2014, 2015 Nicira, Inc.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -34,6 +34,7 @@ struct ofputil_flow_stats_request;
 struct ofputil_group_mod;
 struct ofputil_meter_mod;
 struct ofputil_table_mod;
+struct ofputil_geneve_table_mod;
 struct simap;
 enum ofputil_protocol;
 
@@ -42,16 +43,16 @@ char *parse_ofp_str(struct ofputil_flow_mod *, int command, const char *str_,
     OVS_WARN_UNUSED_RESULT;
 
 char *parse_ofp_flow_mod_str(struct ofputil_flow_mod *, const char *string,
-                             uint16_t command,
+                             int command,
                              enum ofputil_protocol *usable_protocols)
     OVS_WARN_UNUSED_RESULT;
 
 char *parse_ofp_table_mod(struct ofputil_table_mod *,
                           const char *table_id, const char *flow_miss_handling,
-                          enum ofputil_protocol *usable_protocols)
+                          uint32_t *usable_versions)
     OVS_WARN_UNUSED_RESULT;
 
-char *parse_ofp_flow_mod_file(const char *file_name, uint16_t command,
+char *parse_ofp_flow_mod_file(const char *file_name, int command,
                               struct ofputil_flow_mod **fms, size_t *n_fms,
                               enum ofputil_protocol *usable_protocols)
     OVS_WARN_UNUSED_RESULT;
@@ -84,6 +85,11 @@ char *parse_ofp_group_mod_str(struct ofputil_group_mod *, uint16_t command,
                               enum ofputil_protocol *usable_protocols)
     OVS_WARN_UNUSED_RESULT;
 
+char *parse_ofp_geneve_table_mod_str(struct ofputil_geneve_table_mod *,
+                                     uint16_t command, const char *string,
+                                     enum ofputil_protocol *usable_protocols)
+    OVS_WARN_UNUSED_RESULT;
+
 char *str_to_u8(const char *str, const char *name, uint8_t *valuep)
     OVS_WARN_UNUSED_RESULT;
 char *str_to_u16(const char *str, const char *name, uint16_t *valuep)
@@ -91,7 +97,7 @@ char *str_to_u16(const char *str, const char *name, uint16_t *valuep)
 char *str_to_u32(const char *str, uint32_t *valuep) OVS_WARN_UNUSED_RESULT;
 char *str_to_u64(const char *str, uint64_t *valuep) OVS_WARN_UNUSED_RESULT;
 char *str_to_be64(const char *str, ovs_be64 *valuep) OVS_WARN_UNUSED_RESULT;
-char *str_to_mac(const char *str, uint8_t mac[ETH_ADDR_LEN]) OVS_WARN_UNUSED_RESULT;
+char *str_to_mac(const char *str, struct eth_addr *mac) OVS_WARN_UNUSED_RESULT;
 char *str_to_ip(const char *str, ovs_be32 *ip) OVS_WARN_UNUSED_RESULT;
 
 #endif /* ofp-parse.h */

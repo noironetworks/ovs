@@ -21,6 +21,7 @@
 #include "Event.h"
 #include "User.h"
 #include "Vxlan.h"
+#include "Stt.h"
 #include "IpHelper.h"
 #include "Oid.h"
 #include "Datapath.h"
@@ -47,8 +48,21 @@
 
 #define OVS_VPORT_DEFAULT_WAIT_TIME_MICROSEC    100
 
+/* Context structure used to pass back and forth information to the tunnel
+ * filter threads. */
+typedef struct _OVS_TUNFLT_INIT_CONTEXT {
+    POVS_SWITCH_CONTEXT switchContext;
+    UINT32 outputLength;
+    PVOID outputBuffer;
+    PVOID inputBuffer;
+    POVS_VPORT_ENTRY vport;
+    BOOLEAN hvSwitchPort;
+    BOOLEAN hvDelete;
+    BOOLEAN ovsDelete;
+} OVS_TUNFLT_INIT_CONTEXT, *POVS_TUNFLT_INIT_CONTEXT;
+
+
 extern POVS_SWITCH_CONTEXT gOvsSwitchContext;
-extern PNDIS_SPIN_LOCK gOvsCtrlLock;
 
 static VOID OvsInitVportWithPortParam(POVS_VPORT_ENTRY vport,
                 PNDIS_SWITCH_PORT_PARAMETERS portParam);
@@ -70,6 +84,18 @@ static POVS_VPORT_ENTRY OvsFindVportByHvNameW(POVS_SWITCH_CONTEXT switchContext,
 static NDIS_STATUS InitHvVportCommon(POVS_SWITCH_CONTEXT switchContext,
                                      POVS_VPORT_ENTRY vport,
                                      BOOLEAN newPort);
+static NTSTATUS OvsRemoveTunnelVport(POVS_USER_PARAMS_CONTEXT usrParamsCtx,
+                                     POVS_SWITCH_CONTEXT switchContext,
+                                     POVS_VPORT_ENTRY vport,
+                                     BOOLEAN hvDelete,
+                                     BOOLEAN ovsDelete);
+static VOID OvsTunnelVportPendingInit(PVOID context,
+                                      NTSTATUS status,
+                                      UINT32 *replyLen);
+static VOID OvsTunnelVportPendingRemove(PVOID context,
+                                        NTSTATUS status,
+                                        UINT32 *replyLen);
+
 
 /*
  * Functions implemented in relaton to NDIS port manipulation.
@@ -103,7 +129,7 @@ HvCreatePort(POVS_SWITCH_CONTEXT switchContext,
     vport = OvsFindVportByHvNameW(gOvsSwitchContext,
                                   portParam->PortFriendlyName.String,
                                   portParam->PortFriendlyName.Length);
-    if (vport && vport->isPresentOnHv == FALSE) {
+    if (vport && vport->isAbsentOnHv == FALSE) {
         OVS_LOG_ERROR("Port add failed since a port already exists on "
                       "the specified port Id: %u, ovsName: %s",
                       portParam->PortId, vport->ovsName);
@@ -112,7 +138,7 @@ HvCreatePort(POVS_SWITCH_CONTEXT switchContext,
     }
 
     if (vport != NULL) {
-        ASSERT(vport->isPresentOnHv);
+        ASSERT(vport->isAbsentOnHv);
         ASSERT(vport->portNo != OVS_DPPORT_NUMBER_INVALID);
 
         /*
@@ -127,7 +153,7 @@ HvCreatePort(POVS_SWITCH_CONTEXT switchContext,
             status = STATUS_DATA_NOT_ACCEPTED;
             goto create_port_done;
         }
-        vport->isPresentOnHv = FALSE;
+        vport->isAbsentOnHv = FALSE;
     } else {
         vport = (POVS_VPORT_ENTRY)OvsAllocateVport();
         if (vport == NULL) {
@@ -167,15 +193,15 @@ HvUpdatePort(POVS_SWITCH_CONTEXT switchContext,
      * Update properties only for NETDEV ports for supprting PS script
      * We don't allow changing the names of the internal or external ports
      */
-    if (vport == NULL || ( vport->portType != NdisSwitchPortTypeSynthetic) || 
-        ( vport->portType != NdisSwitchPortTypeEmulated)) {
+    if (vport == NULL || (( vport->portType != NdisSwitchPortTypeSynthetic) &&
+        ( vport->portType != NdisSwitchPortTypeEmulated))) {
         goto update_port_done;
     }
 
     /* Store the nic and the OVS states as Nic Create won't be called */
     ovsState = vport->ovsState;
     nicState = vport->nicState;
-    
+
     /*
      * Currently only the port friendly name is being updated
      * Make sure that no other properties are changed
@@ -247,7 +273,7 @@ HvDeletePort(POVS_SWITCH_CONTEXT switchContext,
      * delete will delete the vport.
     */
     if (vport) {
-        OvsRemoveAndDeleteVport(switchContext, vport, TRUE, FALSE, NULL);
+        OvsRemoveAndDeleteVport(NULL, switchContext, vport, TRUE, FALSE);
     } else {
         OVS_LOG_WARN("Vport not present.");
     }
@@ -306,7 +332,7 @@ HvCreateNic(POVS_SWITCH_CONTEXT switchContext,
         OvsInitPhysNicVport(vport, virtExtVport, nicParam->NicIndex);
         status = InitHvVportCommon(switchContext, vport, TRUE);
         if (status != NDIS_STATUS_SUCCESS) {
-            OvsFreeMemory(vport);
+            OvsFreeMemoryWithTag(vport, OVS_VPORT_POOL_TAG);
             goto add_nic_done;
         }
     }
@@ -404,6 +430,7 @@ HvUpdateNic(POVS_SWITCH_CONTEXT switchContext,
                                             nicParam->PortId,
                                             nicParam->NicIndex);
     if (vport == NULL) {
+        NdisReleaseRWLock(switchContext->dispatchLock, &lockState);
         OVS_LOG_WARN("Vport search failed.");
         goto update_nic_done;
     }
@@ -534,13 +561,14 @@ HvDeleteNic(POVS_SWITCH_CONTEXT switchContext,
         goto done;
     }
 
+    vport->nicState = NdisSwitchNicStateUnknown;
+    vport->ovsState = OVS_STATE_PORT_CREATED;
+
     portNo = vport->portNo;
     if (vport->portType == NdisSwitchPortTypeExternal &&
         vport->nicIndex != 0) {
-        OvsRemoveAndDeleteVport(switchContext, vport, TRUE, FALSE, NULL);
+        OvsRemoveAndDeleteVport(NULL, switchContext, vport, TRUE, FALSE);
     }
-    vport->nicState = NdisSwitchNicStateUnknown;
-    vport->ovsState = OVS_STATE_PORT_CREATED;
 
     NdisReleaseRWLock(switchContext->dispatchLock, &lockState);
     /* XXX if portNo != INVALID or always? */
@@ -566,6 +594,27 @@ OvsFindVportByPortNo(POVS_SWITCH_CONTEXT switchContext,
     LIST_FORALL(head, link) {
         vport = CONTAINING_RECORD(link, OVS_VPORT_ENTRY, portNoLink);
         if (vport->portNo == portNo) {
+            return vport;
+        }
+    }
+    return NULL;
+}
+
+
+POVS_VPORT_ENTRY
+OvsFindTunnelVportByDstPort(POVS_SWITCH_CONTEXT switchContext,
+                            UINT16 dstPort,
+                            OVS_VPORT_TYPE ovsPortType)
+{
+    POVS_VPORT_ENTRY vport;
+    PLIST_ENTRY head, link;
+    UINT32 hash = OvsJhashBytes((const VOID *)&dstPort, sizeof(dstPort),
+                                OVS_HASH_BASIS);
+    head = &(switchContext->tunnelVportsArray[hash & OVS_VPORT_MASK]);
+    LIST_FORALL(head, link) {
+        vport = CONTAINING_RECORD(link, OVS_VPORT_ENTRY, tunnelVportLink);
+        if (GetPortFromPriv(vport) == dstPort &&
+            vport->ovsType == ovsPortType) {
             return vport;
         }
     }
@@ -658,7 +707,7 @@ OvsFindVportByHvNameA(POVS_SWITCH_CONTEXT switchContext,
     SIZE_T wstrSize = length * sizeof(WCHAR);
     UINT i;
 
-    PWSTR wsName = OvsAllocateMemory(wstrSize);
+    PWSTR wsName = OvsAllocateMemoryWithTag(wstrSize, OVS_VPORT_POOL_TAG);
     if (!wsName) {
         return NULL;
     }
@@ -666,7 +715,7 @@ OvsFindVportByHvNameA(POVS_SWITCH_CONTEXT switchContext,
         wsName[i] = name[i];
     }
     vport = OvsFindVportByHvNameW(switchContext, wsName, wstrSize);
-    OvsFreeMemory(wsName);
+    OvsFreeMemoryWithTag(wsName, OVS_VPORT_POOL_TAG);
     return vport;
 }
 
@@ -703,13 +752,14 @@ POVS_VPORT_ENTRY
 OvsAllocateVport(VOID)
 {
     POVS_VPORT_ENTRY vport;
-    vport = (POVS_VPORT_ENTRY)OvsAllocateMemory(sizeof (OVS_VPORT_ENTRY));
+    vport = (POVS_VPORT_ENTRY)OvsAllocateMemoryWithTag(
+        sizeof(OVS_VPORT_ENTRY), OVS_VPORT_POOL_TAG);
     if (vport == NULL) {
         return NULL;
     }
     RtlZeroMemory(vport, sizeof (OVS_VPORT_ENTRY));
     vport->ovsState = OVS_STATE_UNKNOWN;
-    vport->isPresentOnHv = FALSE;
+    vport->isAbsentOnHv = FALSE;
     vport->portNo = OVS_DPPORT_NUMBER_INVALID;
 
     InitializeListHead(&vport->ovsNameLink);
@@ -849,11 +899,14 @@ OvsInitPhysNicVport(POVS_VPORT_ENTRY physExtVport,
  * --------------------------------------------------------------------------
  */
 NTSTATUS
-OvsInitTunnelVport(POVS_VPORT_ENTRY vport,
+OvsInitTunnelVport(PVOID userContext,
+                   POVS_VPORT_ENTRY vport,
                    OVS_VPORT_TYPE ovsType,
                    UINT16 dstPort)
 {
     NTSTATUS status = STATUS_SUCCESS;
+    POVS_USER_PARAMS_CONTEXT usrParamsCtx =
+        (POVS_USER_PARAMS_CONTEXT)userContext;
 
     vport->isBridgeInternal = FALSE;
     vport->ovsType = ovsType;
@@ -861,10 +914,34 @@ OvsInitTunnelVport(POVS_VPORT_ENTRY vport,
     switch (ovsType) {
     case OVS_VPORT_TYPE_GRE:
         break;
-    case OVS_VPORT_TYPE_GRE64:
-        break;
     case OVS_VPORT_TYPE_VXLAN:
-        status = OvsInitVxlanTunnel(vport, dstPort);
+    {
+        POVS_TUNFLT_INIT_CONTEXT tunnelContext = NULL;
+
+        tunnelContext = OvsAllocateMemoryWithTag(sizeof(*tunnelContext),
+                                                 OVS_VPORT_POOL_TAG);
+        if (tunnelContext == NULL) {
+            status = STATUS_INSUFFICIENT_RESOURCES;
+            break;
+        }
+        tunnelContext->inputBuffer = usrParamsCtx->inputBuffer;
+        tunnelContext->outputBuffer = usrParamsCtx->outputBuffer;
+        tunnelContext->outputLength = usrParamsCtx->outputLength;
+        tunnelContext->vport = vport;
+
+        status = OvsInitVxlanTunnel(usrParamsCtx->irp,
+                                    vport,
+                                    dstPort,
+                                    OvsTunnelVportPendingInit,
+                                    (PVOID)tunnelContext);
+        if (status != STATUS_PENDING) {
+            OvsFreeMemoryWithTag(tunnelContext, OVS_VPORT_POOL_TAG);
+            tunnelContext = NULL;
+        }
+        break;
+    }
+    case OVS_VPORT_TYPE_STT:
+        status = OvsInitSttTunnel(vport, dstPort);
         break;
     default:
         ASSERT(0);
@@ -999,8 +1076,8 @@ InitHvVportCommon(POVS_SWITCH_CONTEXT switchContext,
  * --------------------------------------------------------------------------
  * Functionality common to any port added from OVS userspace.
  *
- * Inserts the port into 'portIdHashArray', 'ovsPortNameHashArray' and caches
- * the pointer in the 'switchContext' if needed.
+ * Inserts the port into 'portNoHashArray', 'ovsPortNameHashArray' and in
+ * 'tunnelVportsArray' if appropriate.
  * --------------------------------------------------------------------------
  */
 NDIS_STATUS
@@ -1011,10 +1088,18 @@ InitOvsVportCommon(POVS_SWITCH_CONTEXT switchContext,
 
     switch(vport->ovsType) {
     case OVS_VPORT_TYPE_VXLAN:
-        ASSERT(switchContext->vxlanVport == NULL);
-        switchContext->vxlanVport = vport;
+    case OVS_VPORT_TYPE_STT:
+    {
+        UINT16 dstPort = GetPortFromPriv(vport);
+        hash = OvsJhashBytes(&dstPort,
+                             sizeof(dstPort),
+                             OVS_HASH_BASIS);
+        InsertHeadList(
+            &gOvsSwitchContext->tunnelVportsArray[hash & OVS_VPORT_MASK],
+            &vport->tunnelVportLink);
         switchContext->numNonHvVports++;
         break;
+    }
     case OVS_VPORT_TYPE_INTERNAL:
         if (vport->isBridgeInternal) {
             switchContext->numNonHvVports++;
@@ -1054,54 +1139,57 @@ InitOvsVportCommon(POVS_SWITCH_CONTEXT switchContext,
  * port being removed from OVS userspace.
  * --------------------------------------------------------------------------
  */
-VOID
-OvsRemoveAndDeleteVport(POVS_SWITCH_CONTEXT switchContext,
+NTSTATUS
+OvsRemoveAndDeleteVport(PVOID usrParamsContext,
+                        POVS_SWITCH_CONTEXT switchContext,
                         POVS_VPORT_ENTRY vport,
                         BOOLEAN hvDelete,
-                        BOOLEAN ovsDelete,
-                        BOOLEAN *vportDeallocated)
+                        BOOLEAN ovsDelete)
 {
+    POVS_USER_PARAMS_CONTEXT usrParamsCtx =
+        (POVS_USER_PARAMS_CONTEXT)usrParamsContext;
     BOOLEAN hvSwitchPort = FALSE;
-    BOOLEAN deletedOnOvs = FALSE, deletedOnHv = FALSE;
-
-    if (vportDeallocated) {
-        *vportDeallocated = FALSE;
-    }
-
-    if (vport->isExternal) {
-        if (vport->nicIndex == 0) {
-            ASSERT(switchContext->numPhysicalNics == 0);
-            switchContext->virtualExternalPortId = 0;
-            switchContext->virtualExternalVport = NULL;
-            OvsFreeMemory(vport);
-            if (vportDeallocated) {
-                *vportDeallocated = TRUE;
-            }
-            return;
-        } else {
-            ASSERT(switchContext->numPhysicalNics);
-            switchContext->numPhysicalNics--;
-            hvSwitchPort = TRUE;
-        }
-    }
+    BOOLEAN deletedOnOvs = FALSE;
+    BOOLEAN deletedOnHv = FALSE;
 
     switch (vport->ovsType) {
     case OVS_VPORT_TYPE_INTERNAL:
         if (!vport->isBridgeInternal) {
-            switchContext->internalPortId = 0;
-            switchContext->internalVport = NULL;
-            OvsInternalAdapterDown();
+            if (hvDelete && vport->isAbsentOnHv == FALSE) {
+                switchContext->internalPortId = 0;
+                switchContext->internalVport = NULL;
+                OvsInternalAdapterDown();
+            }
             hvSwitchPort = TRUE;
         }
         break;
     case OVS_VPORT_TYPE_VXLAN:
-        OvsCleanupVxlanTunnel(vport);
-        switchContext->vxlanVport = NULL;
+    {
+        NTSTATUS status;
+        status = OvsRemoveTunnelVport(usrParamsCtx, switchContext, vport,
+                                      hvDelete, ovsDelete);
+        if (status != STATUS_SUCCESS) {
+            return status;
+        }
+    }
+    case OVS_VPORT_TYPE_STT:
+        OvsCleanupSttTunnel(vport);
         break;
     case OVS_VPORT_TYPE_GRE:
-    case OVS_VPORT_TYPE_GRE64:
         break;
     case OVS_VPORT_TYPE_NETDEV:
+        if (vport->isExternal) {
+            if (vport->nicIndex == 0) {
+                /* Such a vport is not part of any of the hash tables, since it
+                 * is not exposed to userspace. See Vport.h for explanation. */
+                ASSERT(hvDelete == TRUE);
+                ASSERT(switchContext->numPhysicalNics == 0);
+                switchContext->virtualExternalPortId = 0;
+                switchContext->virtualExternalVport = NULL;
+                OvsFreeMemoryWithTag(vport, OVS_VPORT_POOL_TAG);
+                return STATUS_SUCCESS;
+            }
+        }
         hvSwitchPort = TRUE;
     default:
         break;
@@ -1114,7 +1202,7 @@ OvsRemoveAndDeleteVport(POVS_SWITCH_CONTEXT switchContext,
      *
      * Both 'hvDelete' and 'ovsDelete' can be set to TRUE by the caller.
      */
-    if (vport->isPresentOnHv == TRUE) {
+    if (vport->isAbsentOnHv == TRUE) {
         deletedOnHv = TRUE;
     }
     if (vport->portNo == OVS_DPPORT_NUMBER_INVALID) {
@@ -1122,7 +1210,13 @@ OvsRemoveAndDeleteVport(POVS_SWITCH_CONTEXT switchContext,
     }
 
     if (hvDelete && !deletedOnHv) {
-        vport->isPresentOnHv = TRUE;
+        vport->isAbsentOnHv = TRUE;
+
+        if (vport->isExternal) {
+            ASSERT(vport->nicIndex != 0);
+            ASSERT(switchContext->numPhysicalNics);
+            switchContext->numPhysicalNics--;
+        }
 
         /* Remove the port from the relevant lists. */
         RemoveEntryList(&vport->portIdLink);
@@ -1138,6 +1232,12 @@ OvsRemoveAndDeleteVport(POVS_SWITCH_CONTEXT switchContext,
         InitializeListHead(&vport->ovsNameLink);
         RemoveEntryList(&vport->portNoLink);
         InitializeListHead(&vport->portNoLink);
+        if (OVS_VPORT_TYPE_VXLAN == vport->ovsType ||
+            OVS_VPORT_TYPE_STT == vport->ovsType) {
+            RemoveEntryList(&vport->tunnelVportLink);
+            InitializeListHead(&vport->tunnelVportLink);
+        }
+
         deletedOnOvs = TRUE;
     }
 
@@ -1151,12 +1251,47 @@ OvsRemoveAndDeleteVport(POVS_SWITCH_CONTEXT switchContext,
         } else {
             switchContext->numNonHvVports--;
         }
-        OvsFreeMemory(vport);
-        if (vportDeallocated) {
-            *vportDeallocated = TRUE;
-        }
+        OvsFreeMemoryWithTag(vport, OVS_VPORT_POOL_TAG);
     }
+
+    return STATUS_SUCCESS;
 }
+
+static NTSTATUS
+OvsRemoveTunnelVport(POVS_USER_PARAMS_CONTEXT usrParamsCtx,
+                     POVS_SWITCH_CONTEXT switchContext,
+                     POVS_VPORT_ENTRY vport,
+                     BOOLEAN hvDelete,
+                     BOOLEAN ovsDelete)
+{
+    POVS_TUNFLT_INIT_CONTEXT tunnelContext = NULL;
+    PIRP irp = NULL;
+
+    tunnelContext = OvsAllocateMemoryWithTag(sizeof(*tunnelContext),
+                                             OVS_VPORT_POOL_TAG);
+    if (tunnelContext == NULL) {
+        return STATUS_INSUFFICIENT_RESOURCES;
+    }
+    RtlZeroMemory(tunnelContext, sizeof(*tunnelContext));
+
+    tunnelContext->switchContext = switchContext;
+    tunnelContext->hvSwitchPort = FALSE;
+    tunnelContext->hvDelete = hvDelete;
+    tunnelContext->ovsDelete = ovsDelete;
+    tunnelContext->vport = vport;
+
+    if (usrParamsCtx) {
+        tunnelContext->inputBuffer = usrParamsCtx->inputBuffer;
+        tunnelContext->outputBuffer = usrParamsCtx->outputBuffer;
+        tunnelContext->outputLength = usrParamsCtx->outputLength;
+        irp = usrParamsCtx->irp;
+    }
+
+    return OvsCleanupVxlanTunnel(irp, vport, OvsTunnelVportPendingRemove,
+                                 tunnelContext);
+}
+
+
 
 NDIS_STATUS
 OvsAddConfiguredSwitchPorts(POVS_SWITCH_CONTEXT switchContext)
@@ -1189,19 +1324,20 @@ OvsAddConfiguredSwitchPorts(POVS_SWITCH_CONTEXT switchContext)
          OvsInitVportWithPortParam(vport, portParam);
          status = InitHvVportCommon(switchContext, vport, TRUE);
          if (status != NDIS_STATUS_SUCCESS) {
-             OvsFreeMemory(vport);
+             OvsFreeMemoryWithTag(vport, OVS_VPORT_POOL_TAG);
              goto cleanup;
          }
     }
+
 cleanup:
     if (status != NDIS_STATUS_SUCCESS) {
         OvsClearAllSwitchVports(switchContext);
     }
 
-    if (portArray != NULL) {
-        OvsFreeMemory(portArray);
-    }
+    OvsFreeSwitchPortsArray(portArray);
+
     OVS_LOG_TRACE("Exit: status: %x", status);
+
     return status;
 }
 
@@ -1248,7 +1384,7 @@ OvsInitConfiguredSwitchNics(POVS_SWITCH_CONTEXT switchContext)
                                     nicParam->NicIndex);
                 status = InitHvVportCommon(switchContext, vport, TRUE);
                 if (status != NDIS_STATUS_SUCCESS) {
-                    OvsFreeMemory(vport);
+                    OvsFreeMemoryWithTag(vport, OVS_VPORT_POOL_TAG);
                     vport = NULL;
                 }
             }
@@ -1268,9 +1404,8 @@ OvsInitConfiguredSwitchNics(POVS_SWITCH_CONTEXT switchContext)
     }
 cleanup:
 
-    if (nicArray != NULL) {
-        OvsFreeMemory(nicArray);
-    }
+    OvsFreeSwitchNicsArray(nicArray);
+
     OVS_LOG_TRACE("Exit: status: %x", status);
     return status;
 }
@@ -1280,7 +1415,7 @@ cleanup:
  * Deletes ports added from the Hyper-V switch as well as OVS usersapce. The
  * function deletes ports in 'portIdHashArray'. This will delete most of the
  * ports that are in the 'portNoHashArray' as well. Any remaining ports
- * are deleted by walking the the 'portNoHashArray'.
+ * are deleted by walking the 'portNoHashArray'.
  * --------------------------------------------------------------------------
  */
 VOID
@@ -1293,36 +1428,35 @@ OvsClearAllSwitchVports(POVS_SWITCH_CONTEXT switchContext)
         LIST_FORALL_SAFE(head, link, next) {
             POVS_VPORT_ENTRY vport;
             vport = CONTAINING_RECORD(link, OVS_VPORT_ENTRY, portIdLink);
-            OvsRemoveAndDeleteVport(switchContext, vport, TRUE, TRUE, NULL);
+            OvsRemoveAndDeleteVport(NULL, switchContext, vport, TRUE, TRUE);
         }
     }
+
     /*
      * Remove 'virtualExternalVport' as well. This port is not part of the
      * 'portIdHashArray'.
      */
     if (switchContext->virtualExternalVport) {
-        OvsRemoveAndDeleteVport(switchContext,
-            (POVS_VPORT_ENTRY)switchContext->virtualExternalVport, TRUE, TRUE,
-            NULL);
+        OvsRemoveAndDeleteVport(NULL, switchContext,
+            (POVS_VPORT_ENTRY)switchContext->virtualExternalVport, TRUE, TRUE);
     }
+
 
     for (UINT hash = 0; hash < OVS_MAX_VPORT_ARRAY_SIZE; hash++) {
         PLIST_ENTRY head, link, next;
-
         head = &(switchContext->portNoHashArray[hash & OVS_VPORT_MASK]);
         LIST_FORALL_SAFE(head, link, next) {
             POVS_VPORT_ENTRY vport;
             vport = CONTAINING_RECORD(link, OVS_VPORT_ENTRY, portNoLink);
             ASSERT(OvsIsTunnelVportType(vport->ovsType) ||
                    (vport->ovsType == OVS_VPORT_TYPE_INTERNAL &&
-                    vport->isBridgeInternal) || vport->isPresentOnHv == TRUE);
-            OvsRemoveAndDeleteVport(switchContext, vport, TRUE, TRUE, NULL);
+                    vport->isBridgeInternal) || vport->isAbsentOnHv == TRUE);
+            OvsRemoveAndDeleteVport(NULL, switchContext, vport, TRUE, TRUE);
         }
     }
 
     ASSERT(switchContext->virtualExternalVport == NULL);
     ASSERT(switchContext->internalVport == NULL);
-    ASSERT(switchContext->vxlanVport == NULL);
 }
 
 
@@ -1364,8 +1498,6 @@ OvsConvertIfCountedStrToAnsiStr(PIF_COUNTED_STRING wStr,
  * --------------------------------------------------------------------------
  * Utility function that populates a 'OVS_VPORT_EXT_INFO' structure for the
  * specified vport.
- *
- * Assumes that 'gOvsCtrlLock' is held.
  * --------------------------------------------------------------------------
  */
 NTSTATUS
@@ -1379,9 +1511,7 @@ OvsGetExtInfoIoctl(POVS_VPORT_GET vportGet,
     BOOLEAN doConvert = FALSE;
 
     RtlZeroMemory(extInfo, sizeof (POVS_VPORT_EXT_INFO));
-    ASSERT(KeGetCurrentIrql() == DISPATCH_LEVEL);
-    NdisAcquireRWLockRead(gOvsSwitchContext->dispatchLock, &lockState,
-                          NDIS_RWL_AT_DISPATCH_LEVEL);
+    NdisAcquireRWLockRead(gOvsSwitchContext->dispatchLock, &lockState, 0);
     if (vportGet->portNo == 0) {
         StringCbLengthA(vportGet->name, OVS_MAX_PORT_NAME_LENGTH - 1, &len);
         vport = OvsFindVportByHvNameA(gOvsSwitchContext, vportGet->name);
@@ -1505,11 +1635,10 @@ OvsGetNetdevCmdHandler(POVS_USER_PARAMS_CONTEXT usrParamsCtx,
     if (!NlAttrParse((PNL_MSG_HDR)msgIn,
         NLMSG_HDRLEN + GENL_HDRLEN + OVS_HDRLEN,
         NlMsgAttrsLen((PNL_MSG_HDR)msgIn),
-        ovsNetdevPolicy, netdevAttrs, ARRAY_SIZE(netdevAttrs))) {
+        ovsNetdevPolicy, ARRAY_SIZE(ovsNetdevPolicy),
+        netdevAttrs, ARRAY_SIZE(netdevAttrs))) {
         return STATUS_INVALID_PARAMETER;
     }
-
-    OvsAcquireCtrlLock();
 
     vportGet.portNo = 0;
     RtlCopyMemory(&vportGet.name, NlAttrGet(netdevAttrs[OVS_VPORT_ATTR_NAME]),
@@ -1518,7 +1647,6 @@ OvsGetNetdevCmdHandler(POVS_USER_PARAMS_CONTEXT usrParamsCtx,
     status = OvsGetExtInfoIoctl(&vportGet, &info);
     if (status == STATUS_DEVICE_DOES_NOT_EXIST) {
         nlError = NL_ERROR_NODEV;
-        OvsReleaseCtrlLock();
         goto cleanup;
     }
 
@@ -1528,7 +1656,6 @@ OvsGetNetdevCmdHandler(POVS_USER_PARAMS_CONTEXT usrParamsCtx,
     if (status == STATUS_SUCCESS) {
         *replyLen = msgOut->nlMsg.nlmsgLen;
     }
-    OvsReleaseCtrlLock();
 
 cleanup:
     if (nlError != NL_ERROR_SUCCESS) {
@@ -1735,17 +1862,13 @@ OvsGetVportDumpNext(POVS_USER_PARAMS_CONTEXT usrParamsCtx,
 
     msgIn = instance->dumpState.ovsMsg;
 
-    OvsAcquireCtrlLock();
-
     /*
      * XXX: when we implement OVS_DP_ATTR_USER_FEATURES in datapath,
      * we'll need to check the OVS_DP_F_VPORT_PIDS flag: if it is set,
      * it means we have an array of pids, instead of a single pid.
      * ATM we assume we have one pid only.
     */
-    ASSERT(KeGetCurrentIrql() == DISPATCH_LEVEL);
-    NdisAcquireRWLockRead(gOvsSwitchContext->dispatchLock, &lockState,
-                          NDIS_RWL_AT_DISPATCH_LEVEL);
+    NdisAcquireRWLockRead(gOvsSwitchContext->dispatchLock, &lockState, 0);
 
     if (gOvsSwitchContext->numHvVports > 0 ||
             gOvsSwitchContext->numNonHvVports > 0) {
@@ -1806,8 +1929,6 @@ OvsGetVportDumpNext(POVS_USER_PARAMS_CONTEXT usrParamsCtx,
 
     NdisReleaseRWLock(gOvsSwitchContext->dispatchLock, &lockState);
 
-    OvsReleaseCtrlLock();
-
     /* if i < OVS_MAX_VPORT_ARRAY_SIZE => vport was found */
     if (i < OVS_MAX_VPORT_ARRAY_SIZE) {
         POVS_MESSAGE msgOut = (POVS_MESSAGE)usrParamsCtx->outputBuffer;
@@ -1855,7 +1976,8 @@ OvsGetVport(POVS_USER_PARAMS_CONTEXT usrParamsCtx,
     if (!NlAttrParse((PNL_MSG_HDR)msgIn,
         NLMSG_HDRLEN + GENL_HDRLEN + OVS_HDRLEN,
         NlMsgAttrsLen((PNL_MSG_HDR)msgIn),
-        ovsVportPolicy, vportAttrs, ARRAY_SIZE(vportAttrs))) {
+        ovsVportPolicy, ARRAY_SIZE(ovsVportPolicy),
+        vportAttrs, ARRAY_SIZE(vportAttrs))) {
         return STATUS_INVALID_PARAMETER;
     }
 
@@ -1908,7 +2030,7 @@ Cleanup:
 
 /*
  * --------------------------------------------------------------------------
- *  Command Handler for 'OVS_VPORT_CMD_NEW'.
+ *  Command Handler for 'OVS_VPORT_CMD_GET'.
  *
  *  The function handles the initial call to setup the dump state, as well as
  *  subsequent calls to continue dumping data.
@@ -1996,7 +2118,8 @@ OvsNewVportCmdHandler(POVS_USER_PARAMS_CONTEXT usrParamsCtx,
     if (!NlAttrParse((PNL_MSG_HDR)msgIn,
         NLMSG_HDRLEN + GENL_HDRLEN + OVS_HDRLEN,
         NlMsgAttrsLen((PNL_MSG_HDR)msgIn),
-        ovsVportPolicy, vportAttrs, ARRAY_SIZE(vportAttrs))) {
+        ovsVportPolicy, ARRAY_SIZE(ovsVportPolicy),
+        vportAttrs, ARRAY_SIZE(vportAttrs))) {
         return STATUS_INVALID_PARAMETER;
     }
 
@@ -2033,8 +2156,6 @@ OvsNewVportCmdHandler(POVS_USER_PARAMS_CONTEXT usrParamsCtx,
     } else {
         ASSERT(OvsIsTunnelVportType(portType) ||
                (portType == OVS_VPORT_TYPE_INTERNAL && isBridgeInternal));
-        ASSERT(OvsGetTunnelVport(gOvsSwitchContext, portType) == NULL ||
-               !OvsIsTunnelVportType(portType));
 
         vport = (POVS_VPORT_ENTRY)OvsAllocateVport();
         if (vport == NULL) {
@@ -2044,11 +2165,37 @@ OvsNewVportCmdHandler(POVS_USER_PARAMS_CONTEXT usrParamsCtx,
         vportAllocated = TRUE;
 
         if (OvsIsTunnelVportType(portType)) {
-            status = OvsInitTunnelVport(vport, portType, VXLAN_UDP_PORT);
+            UINT16 transportPortDest = 0;
+
+            switch (portType) {
+            case OVS_VPORT_TYPE_VXLAN:
+                transportPortDest = VXLAN_UDP_PORT;
+                break;
+            case OVS_VPORT_TYPE_STT:
+                transportPortDest = STT_TCP_PORT;
+                break;
+            default:
+                break;
+            }
+
+            if (vportAttrs[OVS_VPORT_ATTR_OPTIONS]) {
+                PNL_ATTR attr = NlAttrFindNested(vportAttrs[OVS_VPORT_ATTR_OPTIONS],
+                                                 OVS_TUNNEL_ATTR_DST_PORT);
+                if (attr) {
+                    transportPortDest = NlAttrGetU16(attr);
+                }
+            }
+
+            status = OvsInitTunnelVport(usrParamsCtx,
+                                        vport,
+                                        portType,
+                                        transportPortDest);
+
             nlError = NlMapStatusToNlErr(status);
         } else {
             OvsInitBridgeInternalVport(vport);
         }
+
         vportInitialized = TRUE;
 
         if (nlError == NL_ERROR_SUCCESS) {
@@ -2059,7 +2206,9 @@ OvsNewVportCmdHandler(POVS_USER_PARAMS_CONTEXT usrParamsCtx,
              * Allow the vport to be deleted, because there is no
              * corresponding hyper-v switch part.
              */
-            vport->isPresentOnHv = TRUE;
+            vport->isAbsentOnHv = TRUE;
+        } else {
+            goto Cleanup;
         }
     }
 
@@ -2119,24 +2268,33 @@ OvsNewVportCmdHandler(POVS_USER_PARAMS_CONTEXT usrParamsCtx,
 Cleanup:
     NdisReleaseRWLock(gOvsSwitchContext->dispatchLock, &lockState);
 
-    if (nlError != NL_ERROR_SUCCESS) {
+    if ((nlError != NL_ERROR_SUCCESS) && (nlError != NL_ERROR_PENDING)) {
         POVS_MESSAGE_ERROR msgError = (POVS_MESSAGE_ERROR)
             usrParamsCtx->outputBuffer;
 
         if (vport && vportAllocated == TRUE) {
             if (vportInitialized == TRUE) {
                 if (OvsIsTunnelVportType(portType)) {
-                    OvsCleanupVxlanTunnel(vport);
+                    switch (vport->ovsType) {
+                    case OVS_VPORT_TYPE_VXLAN:
+                        OvsCleanupVxlanTunnel(NULL, vport, NULL, NULL);
+                        break;
+                    case OVS_VPORT_TYPE_STT:
+                        OvsCleanupSttTunnel(vport);
+                        break;
+                    default:
+                        ASSERT(!"Invalid tunnel port type");
+                    }
                 }
             }
-            OvsFreeMemory(vport);
+            OvsFreeMemoryWithTag(vport, OVS_VPORT_POOL_TAG);
         }
 
         NlBuildErrorMsg(msgIn, msgError, nlError);
         *replyLen = msgError->nlMsg.nlmsgLen;
     }
 
-    return STATUS_SUCCESS;
+    return (status == STATUS_PENDING) ? STATUS_PENDING : STATUS_SUCCESS;
 }
 
 
@@ -2177,14 +2335,13 @@ OvsSetVportCmdHandler(POVS_USER_PARAMS_CONTEXT usrParamsCtx,
     if (!NlAttrParse((PNL_MSG_HDR)msgIn,
         NLMSG_HDRLEN + GENL_HDRLEN + OVS_HDRLEN,
         NlMsgAttrsLen((PNL_MSG_HDR)msgIn),
-        ovsVportPolicy, vportAttrs, ARRAY_SIZE(vportAttrs))) {
+        ovsVportPolicy, ARRAY_SIZE(ovsVportPolicy),
+        vportAttrs, ARRAY_SIZE(vportAttrs))) {
         return STATUS_INVALID_PARAMETER;
     }
 
     /* Output buffer has been validated while validating transact dev op. */
     ASSERT(msgOut != NULL && usrParamsCtx->outputLength >= sizeof *msgOut);
-
-    OvsAcquireCtrlLock();
 
     NdisAcquireRWLockWrite(gOvsSwitchContext->dispatchLock, &lockState, 0);
     if (vportAttrs[OVS_VPORT_ATTR_NAME] != NULL) {
@@ -2238,7 +2395,6 @@ OvsSetVportCmdHandler(POVS_USER_PARAMS_CONTEXT usrParamsCtx,
 
 Cleanup:
     NdisReleaseRWLock(gOvsSwitchContext->dispatchLock, &lockState);
-    OvsReleaseCtrlLock();
 
     if (nlError != NL_ERROR_SUCCESS) {
         POVS_MESSAGE_ERROR msgError = (POVS_MESSAGE_ERROR)
@@ -2282,7 +2438,8 @@ OvsDeleteVportCmdHandler(POVS_USER_PARAMS_CONTEXT usrParamsCtx,
     if (!NlAttrParse((PNL_MSG_HDR)msgIn,
         NLMSG_HDRLEN + GENL_HDRLEN + OVS_HDRLEN,
         NlMsgAttrsLen((PNL_MSG_HDR)msgIn),
-        ovsVportPolicy, vportAttrs, ARRAY_SIZE(vportAttrs))) {
+        ovsVportPolicy, ARRAY_SIZE(ovsVportPolicy),
+        vportAttrs, ARRAY_SIZE(vportAttrs))) {
         return STATUS_INVALID_PARAMETER;
     }
 
@@ -2313,18 +2470,25 @@ OvsDeleteVportCmdHandler(POVS_USER_PARAMS_CONTEXT usrParamsCtx,
                                    usrParamsCtx->outputLength,
                                    gOvsSwitchContext->dpNo);
 
+    *replyLen = msgOut->nlMsg.nlmsgLen;
+
     /*
      * Mark the port as deleted from OVS userspace. If the port does not exist
      * on the Hyper-V switch, it gets deallocated. Otherwise, it stays.
      */
-    OvsRemoveAndDeleteVport(gOvsSwitchContext, vport, FALSE, TRUE, NULL);
-
-    *replyLen = msgOut->nlMsg.nlmsgLen;
+    status = OvsRemoveAndDeleteVport(usrParamsCtx,
+                                     gOvsSwitchContext,
+                                     vport,
+                                     FALSE,
+                                     TRUE);
+    if (status) {
+        nlError = NlMapStatusToNlErr(status);
+    }
 
 Cleanup:
     NdisReleaseRWLock(gOvsSwitchContext->dispatchLock, &lockState);
 
-    if (nlError != NL_ERROR_SUCCESS) {
+    if ((nlError != NL_ERROR_SUCCESS) && (nlError != NL_ERROR_PENDING)) {
         POVS_MESSAGE_ERROR msgError = (POVS_MESSAGE_ERROR)
             usrParamsCtx->outputBuffer;
 
@@ -2332,5 +2496,184 @@ Cleanup:
         *replyLen = msgError->nlMsg.nlmsgLen;
     }
 
-    return STATUS_SUCCESS;
+    return (status == STATUS_PENDING) ? STATUS_PENDING : STATUS_SUCCESS;
+}
+
+static VOID
+OvsTunnelVportPendingRemove(PVOID context,
+                            NTSTATUS status,
+                            UINT32 *replyLen)
+{
+    POVS_TUNFLT_INIT_CONTEXT tunnelContext =
+        (POVS_TUNFLT_INIT_CONTEXT) context;
+    POVS_SWITCH_CONTEXT switchContext = tunnelContext->switchContext;
+    POVS_VPORT_ENTRY vport = tunnelContext->vport;
+    POVS_MESSAGE msgIn = (POVS_MESSAGE)tunnelContext->inputBuffer;
+    POVS_MESSAGE msgOut = (POVS_MESSAGE)tunnelContext->outputBuffer;
+    NL_ERROR nlError = NlMapStatusToNlErr(status);
+    LOCK_STATE_EX lockState;
+
+    NdisAcquireRWLockWrite(switchContext->dispatchLock, &lockState, 0);
+
+    if (msgIn && msgOut) {
+        /* Check the received status to reply to the caller. */
+        if (STATUS_SUCCESS == status) {
+            OvsCreateMsgFromVport(vport,
+                                  msgIn,
+                                  msgOut,
+                                  tunnelContext->outputLength,
+                                  switchContext->dpNo);
+
+            *replyLen = msgOut->nlMsg.nlmsgLen;
+        } else {
+            POVS_MESSAGE_ERROR msgError = (POVS_MESSAGE_ERROR)msgOut;
+
+            NlBuildErrorMsg(msgIn, msgError, nlError);
+            *replyLen = msgError->nlMsg.nlmsgLen;
+        }
+    }
+
+    ASSERT(vport->isAbsentOnHv == TRUE);
+    ASSERT(vport->portNo != OVS_DPPORT_NUMBER_INVALID);
+
+    /* Remove the port from the relevant lists. */
+    switchContext->numNonHvVports--;
+    RemoveEntryList(&vport->ovsNameLink);
+    RemoveEntryList(&vport->portNoLink);
+    RemoveEntryList(&vport->tunnelVportLink);
+
+    if (vport->priv) {
+        OvsFreeMemoryWithTag(vport->priv, OVS_VXLAN_POOL_TAG);
+        vport->priv = NULL;
+    }
+
+    OvsFreeMemoryWithTag(vport, OVS_VPORT_POOL_TAG);
+
+    NdisReleaseRWLock(switchContext->dispatchLock, &lockState);
+}
+
+static VOID
+OvsTunnelVportPendingInit(PVOID context,
+                          NTSTATUS status,
+                          UINT32 *replyLen)
+{
+    POVS_TUNFLT_INIT_CONTEXT tunnelContext =
+        (POVS_TUNFLT_INIT_CONTEXT) context;
+    POVS_VPORT_ENTRY vport = tunnelContext->vport;
+    POVS_MESSAGE msgIn = (POVS_MESSAGE)tunnelContext->inputBuffer;
+    POVS_MESSAGE msgOut = (POVS_MESSAGE)tunnelContext->outputBuffer;
+    PCHAR portName;
+    ULONG portNameLen = 0;
+    UINT32 portType = 0;
+    NL_ERROR nlError = NL_ERROR_SUCCESS;
+    BOOLEAN error = TRUE;
+
+    do {
+        if (!NT_SUCCESS(status)) {
+            nlError = NlMapStatusToNlErr(status);
+            break;
+        }
+
+        static const NL_POLICY ovsVportPolicy[] = {
+            [OVS_VPORT_ATTR_PORT_NO] = { .type = NL_A_U32, .optional = TRUE },
+            [OVS_VPORT_ATTR_TYPE] = { .type = NL_A_U32, .optional = FALSE },
+            [OVS_VPORT_ATTR_NAME] = { .type = NL_A_STRING, .maxLen = IFNAMSIZ,
+            .optional = FALSE },
+            [OVS_VPORT_ATTR_UPCALL_PID] = { .type = NL_A_UNSPEC,
+            .optional = FALSE },
+            [OVS_VPORT_ATTR_OPTIONS] = { .type = NL_A_NESTED, .optional = TRUE },
+        };
+
+        PNL_ATTR vportAttrs[ARRAY_SIZE(ovsVportPolicy)];
+
+        /* input buffer has been validated while validating write dev op. */
+        ASSERT(msgIn != NULL);
+
+        /* Output buffer has been validated while validating transact dev op. */
+        ASSERT(msgOut != NULL && tunnelContext->outputLength >= sizeof *msgOut);
+
+        if (!NlAttrParse((PNL_MSG_HDR)msgIn,
+            NLMSG_HDRLEN + GENL_HDRLEN + OVS_HDRLEN,
+            NlMsgAttrsLen((PNL_MSG_HDR)msgIn),
+            ovsVportPolicy, ARRAY_SIZE(ovsVportPolicy),
+            vportAttrs, ARRAY_SIZE(vportAttrs))) {
+            nlError = NL_ERROR_INVAL;
+            break;
+        }
+
+        portName = NlAttrGet(vportAttrs[OVS_VPORT_ATTR_NAME]);
+        portNameLen = NlAttrGetSize(vportAttrs[OVS_VPORT_ATTR_NAME]);
+        portType = NlAttrGetU32(vportAttrs[OVS_VPORT_ATTR_TYPE]);
+
+        if (vport->portNo != OVS_DPPORT_NUMBER_INVALID) {
+            nlError = NL_ERROR_EXIST;
+            break;
+        }
+
+        vport->ovsState = OVS_STATE_CONNECTED;
+        vport->nicState = NdisSwitchNicStateConnected;
+
+        /*
+         * Allow the vport to be deleted, because there is no
+         * corresponding hyper-v switch part.
+         */
+        vport->isAbsentOnHv = TRUE;
+
+        if (vportAttrs[OVS_VPORT_ATTR_PORT_NO] != NULL) {
+            /*
+             * XXX: when we implement the limit for OVS port number to be
+             * MAXUINT16, we'll need to check the port number received from the
+             * userspace.
+             */
+            vport->portNo =
+                NlAttrGetU32(vportAttrs[OVS_VPORT_ATTR_PORT_NO]);
+        } else {
+            vport->portNo =
+                OvsComputeVportNo(gOvsSwitchContext);
+            if (vport->portNo == OVS_DPPORT_NUMBER_INVALID) {
+                nlError = NL_ERROR_NOMEM;
+                break;
+            }
+        }
+
+        /* The ovs port name must be uninitialized. */
+        ASSERT(vport->ovsName[0] == '\0');
+        ASSERT(portNameLen <= OVS_MAX_PORT_NAME_LENGTH);
+
+        RtlCopyMemory(vport->ovsName, portName, portNameLen);
+        /* if we don't have options, then vport->portOptions will be NULL */
+        vport->portOptions = vportAttrs[OVS_VPORT_ATTR_OPTIONS];
+
+        /*
+         * XXX: when we implement OVS_DP_ATTR_USER_FEATURES in datapath,
+         * we'll need to check the OVS_DP_F_VPORT_PIDS flag: if it is set,
+         * it means we have an array of pids, instead of a single pid.
+         * ATM we assume we have one pid only.
+         */
+        vport->upcallPid =
+            NlAttrGetU32(vportAttrs[OVS_VPORT_ATTR_UPCALL_PID]);
+
+        status = InitOvsVportCommon(gOvsSwitchContext, vport);
+        ASSERT(status == STATUS_SUCCESS);
+
+        OvsCreateMsgFromVport(vport,
+                              msgIn,
+                              msgOut,
+                              tunnelContext->outputLength,
+                              gOvsSwitchContext->dpNo);
+
+        *replyLen = msgOut->nlMsg.nlmsgLen;
+
+        error = FALSE;
+    } while (error);
+
+    if (error) {
+        POVS_MESSAGE_ERROR msgError = (POVS_MESSAGE_ERROR) msgOut;
+
+        OvsCleanupVxlanTunnel(NULL, vport, NULL, NULL);
+        OvsFreeMemory(vport);
+
+        NlBuildErrorMsg(msgIn, msgError, nlError);
+        *replyLen = msgError->nlMsg.nlmsgLen;
+    }
 }

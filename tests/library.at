@@ -7,7 +7,7 @@ AT_CHECK([ovstest test-flows flows pcap], [0], [checked 247 packets, 0 errors
 AT_CLEANUP
 
 AT_SETUP([test TCP/IP checksumming])
-AT_CHECK([ovstest test-csum], [0], [....#....#....###................................#................................#
+AT_CHECK([ovstest test-csum], [0], [....#....#....####................................#................................#
 ])
 AT_CLEANUP
 
@@ -38,7 +38,7 @@ AT_CHECK([ovstest test-atomic])
 AT_CLEANUP
 
 AT_SETUP([test linked lists])
-AT_CHECK([ovstest test-list], [0], [..
+AT_CHECK([ovstest test-list], [0], [...
 ])
 AT_CLEANUP
 
@@ -174,7 +174,6 @@ AT_CHECK([$PYTHON $abs_srcdir/test-unix-socket.py ../$longname/socket socket])
 AT_CLEANUP
 
 AT_SETUP([ovs_assert])
-OVS_LOGDIR=`pwd`; export OVS_LOGDIR
 if test "$IS_WIN32" = "yes"; then
   exit_status=9
 else
@@ -208,4 +207,8 @@ AT_CLEANUP
 
 AT_SETUP([use of public headers])
 AT_CHECK([test-lib], [0], [])
+AT_CLEANUP
+
+AT_SETUP([test ofpbuf module])
+AT_CHECK([ovstest test-ofpbuf], [0], [])
 AT_CLEANUP

@@ -48,6 +48,7 @@ OVS_USER_STATS ovsUserStats;
 static VOID _MapNlAttrToOvsPktExec(PNL_ATTR *nlAttrs, PNL_ATTR *keyAttrs,
                                    OvsPacketExecute  *execute);
 extern NL_POLICY nlFlowKeyPolicy[];
+extern UINT32 nlFlowKeyPolicyLen;
 
 static __inline VOID
 OvsAcquirePidHashLock()
@@ -85,7 +86,7 @@ OvsPurgePacketQueue(POVS_USER_PACKET_QUEUE queue,
     LIST_FORALL_SAFE(&tmp, link, next) {
         RemoveEntryList(link);
         elem = CONTAINING_RECORD(link, OVS_PACKET_QUEUE_ELEM, link);
-        OvsFreeMemory(elem);
+        OvsFreeMemoryWithTag(elem, OVS_USER_POOL_TAG);
     }
 }
 
@@ -132,24 +133,22 @@ OvsCleanupPacketQueue(POVS_OPEN_INSTANCE instance)
     LIST_FORALL_SAFE(&tmp, link, next) {
         RemoveEntryList(link);
         elem = CONTAINING_RECORD(link, OVS_PACKET_QUEUE_ELEM, link);
-        OvsFreeMemory(elem);
+        OvsFreeMemoryWithTag(elem, OVS_USER_POOL_TAG);
     }
     if (irp) {
         OvsCompleteIrpRequest(irp, 0, STATUS_SUCCESS);
     }
     if (queue) {
-        OvsFreeMemory(queue);
+        OvsFreeMemoryWithTag(queue, OVS_USER_POOL_TAG);
     }
 
     /* Verify if gOvsSwitchContext exists. */
-    OvsAcquireCtrlLock();
     if (gOvsSwitchContext) {
         /* Remove the instance from pidHashArray */
         OvsAcquirePidHashLock();
         OvsDelPidInstance(gOvsSwitchContext, instance->pid);
         OvsReleasePidHashLock();
     }
-    OvsReleaseCtrlLock();
 }
 
 NTSTATUS
@@ -163,14 +162,9 @@ OvsSubscribeDpIoctl(PVOID instanceP,
     if (instance->packetQueue && !join) {
         /* unsubscribe */
         OvsCleanupPacketQueue(instance);
-
-        OvsAcquirePidHashLock();
-        /* Remove the instance from pidHashArray */
-        OvsDelPidInstance(gOvsSwitchContext, pid);
-        OvsReleasePidHashLock();
-
     } else if (instance->packetQueue == NULL && join) {
-        queue = (POVS_USER_PACKET_QUEUE) OvsAllocateMemory(sizeof *queue);
+        queue = (POVS_USER_PACKET_QUEUE) OvsAllocateMemoryWithTag(
+            sizeof *queue, OVS_USER_POOL_TAG);
         if (queue == NULL) {
             return STATUS_NO_MEMORY;
         }
@@ -248,7 +242,7 @@ OvsReadDpIoctl(PFILE_OBJECT fileObject,
         }
 
         *replyLen = len;
-        OvsFreeMemory(elem);
+        OvsFreeMemoryWithTag(elem, OVS_USER_POOL_TAG);
     }
     return STATUS_SUCCESS;
 }
@@ -346,7 +340,8 @@ OvsNlExecuteCmdHandler(POVS_USER_PARAMS_CONTEXT usrParamsCtx,
 
     /* Get all the top level Flow attributes */
     if ((NlAttrParse(nlMsgHdr, attrOffset, NlMsgAttrsLen(nlMsgHdr),
-                     nlPktExecPolicy, nlAttrs, ARRAY_SIZE(nlAttrs)))
+                     nlPktExecPolicy, ARRAY_SIZE(nlPktExecPolicy),
+                     nlAttrs, ARRAY_SIZE(nlAttrs)))
                      != TRUE) {
         OVS_LOG_ERROR("Attr Parsing failed for msg: %p",
                        nlMsgHdr);
@@ -360,8 +355,8 @@ OvsNlExecuteCmdHandler(POVS_USER_PARAMS_CONTEXT usrParamsCtx,
     /* Get flow keys attributes */
     if ((NlAttrParseNested(nlMsgHdr, keyAttrOffset,
                            NlAttrLen(nlAttrs[OVS_PACKET_ATTR_KEY]),
-                           nlFlowKeyPolicy, keyAttrs,
-                           ARRAY_SIZE(keyAttrs))) != TRUE) {
+                           nlFlowKeyPolicy, nlFlowKeyPolicyLen,
+                           keyAttrs, ARRAY_SIZE(keyAttrs))) != TRUE) {
         OVS_LOG_ERROR("Key Attr Parsing failed for msg: %p", nlMsgHdr);
         status = STATUS_UNSUCCESSFUL;
         goto done;
@@ -446,11 +441,9 @@ OvsExecuteDpIoctl(OvsPacketExecute *execute)
     OVS_PACKET_HDR_INFO layers;
     POVS_VPORT_ENTRY vport;
 
-    NdisAcquireSpinLock(gOvsCtrlLock);
-
     if (execute->packetLen == 0) {
         status = STATUS_INVALID_PARAMETER;
-        goto unlock;
+        goto exit;
     }
 
     actions = execute->actions;
@@ -465,7 +458,7 @@ OvsExecuteDpIoctl(OvsPacketExecute *execute)
                                        execute->packetLen);
     if (pNbl == NULL) {
         status = STATUS_NO_MEMORY;
-        goto unlock;
+        goto exit;
     }
 
     fwdDetail = NET_BUFFER_LIST_SWITCH_FORWARDING_DETAIL(pNbl);
@@ -480,11 +473,9 @@ OvsExecuteDpIoctl(OvsPacketExecute *execute)
     // XXX: Figure out if any of the other members of fwdDetail need to be set.
 
     ndisStatus = OvsExtractFlow(pNbl, fwdDetail->SourcePortId, &key, &layers,
-                              NULL);
+                                NULL);
     if (ndisStatus == NDIS_STATUS_SUCCESS) {
-        ASSERT(KeGetCurrentIrql() == DISPATCH_LEVEL);
-        NdisAcquireRWLockRead(gOvsSwitchContext->dispatchLock, &lockState,
-                              NDIS_RWL_AT_DISPATCH_LEVEL);
+        NdisAcquireRWLockRead(gOvsSwitchContext->dispatchLock, &lockState, 0);
         ndisStatus = OvsActionsExecute(gOvsSwitchContext, NULL, pNbl,
                                        vport ? vport->portNo :
                                                OVS_DEFAULT_PORT_NO,
@@ -505,8 +496,7 @@ OvsExecuteDpIoctl(OvsPacketExecute *execute)
     if (pNbl) {
         OvsCompleteNBL(gOvsSwitchContext, pNbl, TRUE);
     }
-unlock:
-    NdisReleaseSpinLock(gOvsCtrlLock);
+exit:
     return status;
 }
 
@@ -629,7 +619,6 @@ OvsGetNextPacket(POVS_OPEN_INSTANCE instance)
 /*
  * ---------------------------------------------------------------------------
  * Given a pid, returns the corresponding USER_PACKET_QUEUE.
- * gOvsCtrlLock must be acquired before calling this API.
  * ---------------------------------------------------------------------------
  */
 POVS_USER_PACKET_QUEUE
@@ -762,7 +751,7 @@ OvsQueuePackets(PLIST_ENTRY packetList,
     while (!IsListEmpty(&dropPackets)) {
         link = RemoveHeadList(&dropPackets);
         elem = CONTAINING_RECORD(link, OVS_PACKET_QUEUE_ELEM, link);
-        OvsFreeMemory(elem);
+        OvsFreeMemoryWithTag(elem, OVS_USER_POOL_TAG);
         num++;
     }
 
@@ -849,7 +838,7 @@ OvsGetUpcallMsgSize(PVOID userData,
         size += NlAttrTotalSize(userDataLen);
     }
     /* OVS_PACKET_ATTR_EGRESS_TUN_KEY */
-    /* Is it included in the the flwo key attr XXX */
+    /* Is it included in the flow key attr XXX */
     if (tunnelKey) {
         size += NlAttrTotalSize(OvsTunKeyAttrSize());
     }
@@ -1060,7 +1049,8 @@ OvsCreateQueueNlPacket(PVOID userData,
                                     dataLen + extraLen);
 
     allocLen = sizeof (OVS_PACKET_QUEUE_ELEM) + nlMsgSize;
-    elem = (POVS_PACKET_QUEUE_ELEM)OvsAllocateMemory(allocLen);
+    elem = (POVS_PACKET_QUEUE_ELEM)OvsAllocateMemoryWithTag(allocLen,
+                                                            OVS_USER_POOL_TAG);
     if (elem == NULL) {
         ovsUserStats.dropDuetoResource++;
         return NULL;
@@ -1163,6 +1153,6 @@ OvsCreateQueueNlPacket(PVOID userData,
 
     return elem;
 fail:
-    OvsFreeMemory(elem);
+    OvsFreeMemoryWithTag(elem, OVS_USER_POOL_TAG);
     return NULL;
 }

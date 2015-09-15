@@ -20,6 +20,7 @@
 #define MCAST_SNOOPING_H 1
 
 #include <time.h>
+#include "dp-packet.h"
 #include "hmap.h"
 #include "list.h"
 #include "ovs-atomic.h"
@@ -44,8 +45,8 @@ struct mcast_group {
     /* Node in parent struct mcast_snooping hmap. */
     struct hmap_node hmap_node;
 
-    /* Multicast group IPv4 address. */
-    ovs_be32 ip4;
+    /* Multicast group IPv6/IPv4 address. */
+    struct in6_addr addr;
 
     /* VLAN tag. */
     uint16_t vlan;
@@ -87,17 +88,17 @@ struct mcast_mrouter_bundle {
     void *port OVS_GUARDED;
 };
 
-/* The bundle to be flooded with multicast traffic.
+/* The bundle to send multicast traffic or Reports.
  * Guarded by owning 'mcast_snooping''s rwlock */
-struct mcast_fport_bundle {
-    /* Node in parent struct mcast_snooping fport_list. */
-    struct ovs_list fport_node;
+struct mcast_port_bundle {
+    /* Node in parent struct mcast_snooping. */
+    struct ovs_list node;
 
     /* VLAN tag. */
     uint16_t vlan;
 
     /* Learned port. */
-    void *port OVS_GUARDED;
+    void *port;
 };
 
 /* Multicast snooping table. */
@@ -113,9 +114,13 @@ struct mcast_snooping {
      * front, most recently used at the back. */
     struct ovs_list mrouter_lru OVS_GUARDED;
 
-    /* Contains struct mcast_fport_bundle to be flooded with multicast
+    /* Contains struct mcast_port_bundle to be flooded with multicast
      * packets in no special order. */
     struct ovs_list fport_list OVS_GUARDED;
+
+    /* Contains struct mcast_port_bundle to forward Reports in
+     * no special order. */
+    struct ovs_list rport_list OVS_GUARDED;
 
     /* Secret for randomizing hash table. */
     uint32_t secret;
@@ -160,30 +165,49 @@ void mcast_snooping_set_max_entries(struct mcast_snooping *ms,
 bool
 mcast_snooping_set_flood_unreg(struct mcast_snooping *ms, bool enable)
     OVS_REQ_WRLOCK(ms->rwlock);
-void mcast_snooping_set_port_flood(struct mcast_snooping *ms, uint16_t vlan,
-                                   void *port, bool flood)
+void mcast_snooping_set_port_flood(struct mcast_snooping *ms, void *port,
+                                   bool flood)
+    OVS_REQ_WRLOCK(ms->rwlock);
+void mcast_snooping_set_port_flood_reports(struct mcast_snooping *ms,
+                                           void *port, bool flood)
     OVS_REQ_WRLOCK(ms->rwlock);
 
 /* Lookup. */
 struct mcast_group *
-mcast_snooping_lookup(const struct mcast_snooping *ms, ovs_be32 dip,
-                      uint16_t vlan)
+mcast_snooping_lookup(const struct mcast_snooping *ms,
+                      const struct in6_addr *dip, uint16_t vlan)
+    OVS_REQ_RDLOCK(ms->rwlock);
+struct mcast_group *
+mcast_snooping_lookup4(const struct mcast_snooping *ms, ovs_be32 ip4,
+                       uint16_t vlan)
     OVS_REQ_RDLOCK(ms->rwlock);
 
 /* Learning. */
-bool mcast_snooping_add_group(struct mcast_snooping *ms, ovs_be32 ip4,
+bool mcast_snooping_add_group(struct mcast_snooping *ms,
+                              const struct in6_addr *addr,
                               uint16_t vlan, void *port)
     OVS_REQ_WRLOCK(ms->rwlock);
-bool mcast_snooping_leave_group(struct mcast_snooping *ms, ovs_be32 ip4,
+bool mcast_snooping_add_group4(struct mcast_snooping *ms, ovs_be32 ip4,
+                               uint16_t vlan, void *port)
+    OVS_REQ_WRLOCK(ms->rwlock);
+int mcast_snooping_add_report(struct mcast_snooping *ms,
+                              const struct dp_packet *p,
+                              uint16_t vlan, void *port)
+    OVS_REQ_WRLOCK(ms->rwlock);
+int mcast_snooping_add_mld(struct mcast_snooping *ms,
+                           const struct dp_packet *p,
+                           uint16_t vlan, void *port)
+    OVS_REQ_WRLOCK(ms->rwlock);
+bool mcast_snooping_leave_group(struct mcast_snooping *ms,
+                                const struct in6_addr *addr,
                                 uint16_t vlan, void *port)
+    OVS_REQ_WRLOCK(ms->rwlock);
+bool mcast_snooping_leave_group4(struct mcast_snooping *ms, ovs_be32 ip4,
+                                 uint16_t vlan, void *port)
     OVS_REQ_WRLOCK(ms->rwlock);
 bool mcast_snooping_add_mrouter(struct mcast_snooping *ms, uint16_t vlan,
                                 void *port)
     OVS_REQ_WRLOCK(ms->rwlock);
-struct mcast_fport_bundle *
-mcast_snooping_fport_lookup(struct mcast_snooping *ms, uint16_t vlan,
-                            void *port)
-    OVS_REQ_RDLOCK(ms->rwlock);
 bool mcast_snooping_is_query(ovs_be16 igmp_type);
 bool mcast_snooping_is_membership(ovs_be16 igmp_type);
 

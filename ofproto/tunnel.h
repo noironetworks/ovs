@@ -1,4 +1,4 @@
-/* Copyright (c) 2013 Nicira, Inc.
+/* Copyright (c) 2013, 2015 Nicira, Inc.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -33,13 +33,13 @@ void ofproto_tunnel_init(void);
 bool tnl_port_reconfigure(const struct ofport_dpif *, const struct netdev *,
                           odp_port_t, bool native_tnl, const char name[]);
 
-void tnl_port_add(const struct ofport_dpif *, const struct netdev *,
-                  odp_port_t odp_port, bool native_tnl, const char name[]);
+int tnl_port_add(const struct ofport_dpif *, const struct netdev *,
+                 odp_port_t odp_port, bool native_tnl, const char name[]);
 void tnl_port_del(const struct ofport_dpif *);
 
 const struct ofport_dpif *tnl_port_receive(const struct flow *);
-bool tnl_xlate_init(const struct flow *base_flow, struct flow *flow,
-                    struct flow_wildcards *);
+void tnl_wc_init(struct flow *, struct flow_wildcards *);
+bool tnl_process_ecn(struct flow *);
 odp_port_t tnl_port_send(const struct ofport_dpif *, struct flow *,
                          struct flow_wildcards *wc);
 
@@ -52,8 +52,8 @@ tnl_port_should_receive(const struct flow *flow)
 
 int tnl_port_build_header(const struct ofport_dpif *ofport,
                           const struct flow *tnl_flow,
-                          uint8_t dmac[ETH_ADDR_LEN],
-                          uint8_t smac[ETH_ADDR_LEN],
+                          const struct eth_addr dmac,
+                          const struct eth_addr smac,
                           ovs_be32 ip_src, struct ovs_action_push_tnl *data);
 
 #endif /* tunnel.h */

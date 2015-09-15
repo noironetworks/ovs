@@ -52,6 +52,42 @@ static inline struct sk_buff *rpl_vlan_insert_tag_set_proto(struct sk_buff *skb,
 }
 #endif
 
+#if LINUX_VERSION_CODE < KERNEL_VERSION(3,19,0)
+/*
+ * __vlan_hwaccel_push_inside - pushes vlan tag to the payload
+ * @skb: skbuff to tag
+ *
+ * Pushes the VLAN tag from @skb->vlan_tci inside to the payload.
+ *
+ * Following the skb_unshare() example, in case of error, the calling function
+ * doesn't have to worry about freeing the original skb.
+ */
+static inline struct sk_buff *__vlan_hwaccel_push_inside(struct sk_buff *skb)
+{
+	skb = vlan_insert_tag_set_proto(skb, skb->vlan_proto,
+					vlan_tx_tag_get(skb));
+	if (likely(skb))
+		skb->vlan_tci = 0;
+	return skb;
+}
+/*
+ * vlan_hwaccel_push_inside - pushes vlan tag to the payload
+ * @skb: skbuff to tag
+ *
+ * Checks is tag is present in @skb->vlan_tci and if it is, it pushes the
+ * VLAN tag from @skb->vlan_tci inside to the payload.
+ *
+ * Following the skb_unshare() example, in case of error, the calling function
+ * doesn't have to worry about freeing the original skb.
+ */
+static inline struct sk_buff *vlan_hwaccel_push_inside(struct sk_buff *skb)
+{
+	if (vlan_tx_tag_present(skb))
+		skb = __vlan_hwaccel_push_inside(skb);
+	return skb;
+}
+#endif
+
 #if LINUX_VERSION_CODE < KERNEL_VERSION(3,10,0)
 static inline struct sk_buff *rpl___vlan_hwaccel_put_tag(struct sk_buff *skb,
 						     __be16 vlan_proto,
@@ -129,10 +165,15 @@ static inline int rpl_vlan_insert_tag(struct sk_buff *skb, u16 vlan_tci)
 	veth->h_vlan_proto = htons(ETH_P_8021Q);
 
 	/* now, the TCI */
-	veth->h_vlan_TCI = htons(ETH_P_8021Q);
+	veth->h_vlan_TCI = htons(vlan_tci);
 
 	return 0;
 }
+#endif
+
+#ifndef skb_vlan_tag_present
+#define skb_vlan_tag_present(skb) vlan_tx_tag_present(skb)
+#define skb_vlan_tag_get(skb) vlan_tx_tag_get(skb)
 #endif
 
 #endif	/* linux/if_vlan.h wrapper */

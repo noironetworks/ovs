@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2008, 2009, 2010, 2011, 2013, 2014 Nicira, Inc.
+ * Copyright (c) 2008, 2009, 2010, 2011, 2013, 2014, 2015 Nicira, Inc.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -90,7 +90,7 @@ static void netflow_expire__(struct netflow *, struct netflow_flow *)
 static void netflow_run__(struct netflow *) OVS_REQUIRES(mutex);
 
 void
-netflow_mask_wc(struct flow *flow, struct flow_wildcards *wc)
+netflow_mask_wc(const struct flow *flow, struct flow_wildcards *wc)
 {
     if (flow->dl_type != htons(ETH_TYPE_IP)) {
         return;
@@ -110,7 +110,7 @@ gen_netflow_rec(struct netflow *nf, struct netflow_flow *nf_flow,
     struct netflow_v5_header *nf_hdr;
     struct netflow_v5_record *nf_rec;
 
-    if (!ofpbuf_size(&nf->packet)) {
+    if (!nf->packet.size) {
         struct timespec now;
 
         time_wall_timespec(&now);
@@ -126,7 +126,7 @@ gen_netflow_rec(struct netflow *nf, struct netflow_flow *nf_flow,
         nf_hdr->sampling_interval = htons(0);
     }
 
-    nf_hdr = ofpbuf_data(&nf->packet);
+    nf_hdr = nf->packet.data;
     nf_hdr->count = htons(ntohs(nf_hdr->count) + 1);
     nf_hdr->flow_seq = htonl(nf->netflow_cnt++);
 
@@ -276,7 +276,8 @@ netflow_expire__(struct netflow *nf, struct netflow_flow *nf_flow)
 }
 
 void
-netflow_flow_clear(struct netflow *nf, struct flow *flow) OVS_EXCLUDED(mutex)
+netflow_flow_clear(struct netflow *nf, const struct flow *flow)
+    OVS_EXCLUDED(mutex)
 {
     struct netflow_flow *nf_flow;
 
@@ -298,9 +299,9 @@ netflow_run__(struct netflow *nf) OVS_REQUIRES(mutex)
     long long int now = time_msec();
     struct netflow_flow *nf_flow, *next;
 
-    if (ofpbuf_size(&nf->packet)) {
-        collectors_send(nf->collectors, ofpbuf_data(&nf->packet), ofpbuf_size(&nf->packet));
-        ofpbuf_set_size(&nf->packet, 0);
+    if (nf->packet.size) {
+        collectors_send(nf->collectors, nf->packet.data, nf->packet.size);
+        nf->packet.size = 0;
     }
 
     if (!nf->active_timeout || now < nf->next_timeout) {
@@ -339,7 +340,7 @@ netflow_wait(struct netflow *nf) OVS_EXCLUDED(mutex)
     if (nf->active_timeout) {
         poll_timer_wait_until(nf->next_timeout);
     }
-    if (ofpbuf_size(&nf->packet)) {
+    if (nf->packet.size) {
         poll_immediate_wake();
     }
     ovs_mutex_unlock(&mutex);

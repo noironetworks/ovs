@@ -10,6 +10,8 @@
 /test-dpdkr
 /ovs-pki.log
 /pki/
+/system-kmod-testsuite
+/system-userspace-testsuite
 /test-aes128
 /test-atomic
 /test-bundle
@@ -28,6 +30,7 @@
 /test-multipath
 /test-netflow
 /test-odp
+/test-ofpbuf
 /test-ovsdb
 /test-packets
 /test-random
@@ -47,3 +50,4 @@
 /testsuite.dir/
 /testsuite.log
 /test-lib
+/testsuite.tmp.orig

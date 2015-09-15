@@ -1,12 +1,25 @@
 EXTRA_DIST += \
+	$(COMMON_MACROS_AT) \
 	$(TESTSUITE_AT) \
+	$(SYSTEM_TESTSUITE_AT) \
+	$(SYSTEM_KMOD_TESTSUITE_AT) \
+	$(SYSTEM_USERSPACE_TESTSUITE_AT) \
 	$(TESTSUITE) \
+	$(SYSTEM_KMOD_TESTSUITE) \
+	$(SYSTEM_USERSPACE_TESTSUITE) \
 	tests/atlocal.in \
 	$(srcdir)/package.m4 \
-	$(srcdir)/tests/testsuite
+	$(srcdir)/tests/testsuite \
+	$(srcdir)/tests/testsuite.patch
+
+COMMON_MACROS_AT = \
+	tests/ovsdb-macros.at \
+	tests/ovs-macros.at \
+	tests/ofproto-macros.at
+
 TESTSUITE_AT = \
 	tests/testsuite.at \
-	tests/ovsdb-macros.at \
+	tests/completion.at \
 	tests/library.at \
 	tests/heap.at \
 	tests/bundle.at \
@@ -41,10 +54,10 @@ TESTSUITE_AT = \
 	tests/reconnect.at \
 	tests/ovs-vswitchd.at \
 	tests/dpif-netdev.at \
+	tests/dpctl.at \
 	tests/ofproto-dpif.at \
 	tests/bridge.at \
 	tests/vlan-splinters.at \
-	tests/ofproto-macros.at \
 	tests/ofproto.at \
 	tests/ovsdb.at \
 	tests/ovsdb-log.at \
@@ -71,11 +84,33 @@ TESTSUITE_AT = \
 	tests/rstp.at \
 	tests/interface-reconfigure.at \
 	tests/vlog.at \
-	tests/vtep-ctl.at
+	tests/vtep-ctl.at \
+	tests/auto-attach.at \
+	tests/ovn.at \
+	tests/ovn-nbctl.at \
+	tests/ovn-sbctl.at \
+	tests/ovn-controller-vtep.at
+
+SYSTEM_KMOD_TESTSUITE_AT = \
+	tests/system-common-macros.at \
+	tests/system-kmod-testsuite.at \
+	tests/system-kmod-macros.at
+
+SYSTEM_USERSPACE_TESTSUITE_AT = \
+	tests/system-userspace-testsuite.at \
+	tests/system-userspace-macros.at
+
+SYSTEM_TESTSUITE_AT = \
+	tests/system-common-macros.at \
+	tests/system-traffic.at
+
 TESTSUITE = $(srcdir)/tests/testsuite
+TESTSUITE_PATCH = $(srcdir)/tests/testsuite.patch
+SYSTEM_KMOD_TESTSUITE = $(srcdir)/tests/system-kmod-testsuite
+SYSTEM_USERSPACE_TESTSUITE = $(srcdir)/tests/system-userspace-testsuite
 DISTCLEANFILES += tests/atconfig tests/atlocal
 
-AUTOTEST_PATH = utilities:vswitchd:ovsdb:vtep:tests
+AUTOTEST_PATH = utilities:vswitchd:ovsdb:vtep:tests:$(PTHREAD_WIN32_DIR_DLL):ovn:ovn/controller-vtep:ovn/northd:ovn/utilities
 
 check-local: tests/atconfig tests/atlocal $(TESTSUITE)
 	$(SHELL) '$(TESTSUITE)' -C tests AUTOTEST_PATH=$(AUTOTEST_PATH) $(TESTSUITEFLAGS)
@@ -123,6 +158,7 @@ valgrind_wrappers = \
 	tests/valgrind/test-lockfile \
 	tests/valgrind/test-multipath \
 	tests/valgrind/test-odp \
+	tests/valgrind/test-ofpbuf \
 	tests/valgrind/test-ovsdb \
 	tests/valgrind/test-packets \
 	tests/valgrind/test-random \
@@ -167,11 +203,40 @@ check-ryu: all
 	$(AM_V_at)srcdir='$(srcdir)' $(SHELL) $(srcdir)/tests/run-ryu
 EXTRA_DIST += tests/run-ryu
 
+# Run kmod tests. Assume kernel modules has been installed or linked into the kernel
+check-kernel: all tests/atconfig tests/atlocal $(SYSTEM_KMOD_TESTSUITE)
+	$(SHELL) '$(SYSTEM_KMOD_TESTSUITE)' -C tests  AUTOTEST_PATH='$(AUTOTEST_PATH)' -d $(TESTSUITEFLAGS)
+
+# Testing the out of tree Kernel module
+check-kmod: all tests/atconfig tests/atlocal $(SYSTEM_KMOD_TESTSUITE)
+	$(MAKE) modules_install
+	modprobe -r openvswitch
+	$(MAKE) check-kernel
+
+check-system-userspace: all tests/atconfig tests/atlocal $(SYSTEM_USERSPACE_TESTSUITE)
+	$(SHELL) '$(SYSTEM_USERSPACE_TESTSUITE)' -C tests  AUTOTEST_PATH='$(AUTOTEST_PATH)' $(TESTSUITEFLAGS)
+
 clean-local:
 	test ! -f '$(TESTSUITE)' || $(SHELL) '$(TESTSUITE)' -C tests --clean
 
 AUTOTEST = $(AUTOM4TE) --language=autotest
-$(TESTSUITE): package.m4 $(TESTSUITE_AT)
+
+if WIN32
+$(TESTSUITE): package.m4 $(TESTSUITE_AT) $(COMMON_MACROS_AT) $(TESTSUITE_PATCH)
+	$(AM_V_GEN)$(AUTOTEST) -I '$(srcdir)' -o testsuite.tmp $@.at
+	patch -p0 testsuite.tmp $(TESTSUITE_PATCH)
+	$(AM_V_at)mv testsuite.tmp $@
+else
+$(TESTSUITE): package.m4 $(TESTSUITE_AT) $(COMMON_MACROS_AT)
+	$(AM_V_GEN)$(AUTOTEST) -I '$(srcdir)' -o $@.tmp $@.at
+	$(AM_V_at)mv $@.tmp $@
+endif
+
+$(SYSTEM_KMOD_TESTSUITE): package.m4 $(SYSTEM_TESTSUITE_AT) $(SYSTEM_KMOD_TESTSUITE_AT) $(COMMON_MACROS_AT)
+	$(AM_V_GEN)$(AUTOTEST) -I '$(srcdir)' -o $@.tmp $@.at
+	$(AM_V_at)mv $@.tmp $@
+
+$(SYSTEM_USERSPACE_TESTSUITE): package.m4 $(SYSTEM_TESTSUITE_AT) $(SYSTEM_USERSPACE_TESTSUITE_AT) $(COMMON_MACROS_AT)
 	$(AM_V_GEN)$(AUTOTEST) -I '$(srcdir)' -o $@.tmp $@.at
 	$(AM_V_at)mv $@.tmp $@
 
@@ -187,10 +252,8 @@ $(srcdir)/package.m4: $(top_srcdir)/configure.ac
 	} >'$(srcdir)/package.m4'
 
 noinst_PROGRAMS += tests/test-ovsdb
-tests_test_ovsdb_SOURCES = \
-	tests/test-ovsdb.c \
-	tests/idltest.c \
-	tests/idltest.h
+tests_test_ovsdb_SOURCES = tests/test-ovsdb.c
+nodist_tests_test_ovsdb_SOURCES = tests/idltest.c tests/idltest.h
 EXTRA_DIST += tests/uuidfilt.pl tests/ovsdb-monitor-sort.pl
 tests_test_ovsdb_LDADD = ovsdb/libovsdb.la lib/libopenvswitch.la
 
@@ -202,7 +265,7 @@ tests_test_lib_LDADD = lib/libopenvswitch.la
 # idltest schema and IDL
 OVSIDL_BUILT += tests/idltest.c tests/idltest.h tests/idltest.ovsidl
 IDLTEST_IDL_FILES = tests/idltest.ovsschema tests/idltest.ann
-EXTRA_DIST += $(IDLTEST_IDL_FILES)
+EXTRA_DIST += $(IDLTEST_IDL_FILES) tests/idltest2.ovsschema
 tests/idltest.ovsidl: $(IDLTEST_IDL_FILES)
 	$(AM_V_GEN)$(OVSDB_IDLC) -C $(srcdir) annotate $(IDLTEST_IDL_FILES) > $@.tmp && \
 	mv $@.tmp $@
@@ -239,6 +302,8 @@ tests_ovstest_SOURCES = \
 	tests/test-multipath.c \
 	tests/test-netflow.c \
 	tests/test-odp.c \
+	tests/test-ofpbuf.c \
+	tests/test-ovn.c \
 	tests/test-packets.c \
 	tests/test-random.c \
 	tests/test-reconnect.c \
@@ -249,14 +314,15 @@ tests_ovstest_SOURCES = \
 	tests/test-util.c \
 	tests/test-uuid.c \
 	tests/test-bitmap.c \
-	tests/test-vconn.c
+	tests/test-vconn.c \
+	tests/test-aa.c
 
 if !WIN32
 tests_ovstest_SOURCES += \
 	tests/test-unix-socket.c
 endif
 
-tests_ovstest_LDADD = lib/libopenvswitch.la
+tests_ovstest_LDADD = lib/libopenvswitch.la ovn/lib/libovn.la
 dist_check_SCRIPTS = tests/flowgen.pl
 
 noinst_PROGRAMS += tests/test-strtok_r

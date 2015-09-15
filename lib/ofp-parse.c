@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2010, 2011, 2012, 2013, 2014 Nicira, Inc.
+ * Copyright (c) 2010, 2011, 2012, 2013, 2014, 2015 Nicira, Inc.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -144,9 +144,9 @@ str_to_be64(const char *str, ovs_be64 *valuep)
  * Returns NULL if successful, otherwise a malloc()'d string describing the
  * error.  The caller is responsible for freeing the returned string. */
 char * OVS_WARN_UNUSED_RESULT
-str_to_mac(const char *str, uint8_t mac[ETH_ADDR_LEN])
+str_to_mac(const char *str, struct eth_addr *mac)
 {
-    if (!ovs_scan(str, ETH_ADDR_SCAN_FMT, ETH_ADDR_SCAN_ARGS(mac))) {
+    if (!ovs_scan(str, ETH_ADDR_SCAN_FMT, ETH_ADDR_SCAN_ARGS(*mac))) {
         return xasprintf("invalid mac address %s", str);
     }
     return NULL;
@@ -179,6 +179,8 @@ parse_protocol(const char *name, const struct protocol **p_out)
 {
     static const struct protocol protocols[] = {
         { "ip", ETH_TYPE_IP, 0 },
+        { "ipv4", ETH_TYPE_IP, 0 },
+        { "ip4", ETH_TYPE_IP, 0 },
         { "arp", ETH_TYPE_ARP, 0 },
         { "icmp", ETH_TYPE_IP, IPPROTO_ICMP },
         { "tcp", ETH_TYPE_IP, IPPROTO_TCP },
@@ -219,9 +221,15 @@ parse_field(const struct mf_field *mf, const char *s, struct match *match,
     union mf_value value, mask;
     char *error;
 
+    if (!*s) {
+        /* If there's no string, we're just trying to match on the
+         * existence of the field, so use a no-op value. */
+        s = "0/0";
+    }
+
     error = mf_parse(mf, s, &value, &mask);
     if (!error) {
-        *usable_protocols &= mf_set(mf, &value, &mask, match);
+        *usable_protocols &= mf_set(mf, &value, &mask, match, &error);
     }
     return error;
 }
@@ -252,11 +260,33 @@ parse_ofp_str__(struct ofputil_flow_mod *fm, int command, char *string,
         F_PRIORITY = 1 << 4,
         F_FLAGS = 1 << 5,
     } fields;
-    char *save_ptr = NULL;
     char *act_str = NULL;
-    char *name;
+    char *name, *value;
 
     *usable_protocols = OFPUTIL_P_ANY;
+
+    if (command == -2) {
+        size_t len;
+
+        string += strspn(string, " \t\r\n");   /* Skip white space. */
+        len = strcspn(string, ", \t\r\n"); /* Get length of the first token. */
+
+        if (!strncmp(string, "add", len)) {
+            command = OFPFC_ADD;
+        } else if (!strncmp(string, "delete", len)) {
+            command = OFPFC_DELETE;
+        } else if (!strncmp(string, "delete_strict", len)) {
+            command = OFPFC_DELETE_STRICT;
+        } else if (!strncmp(string, "modify", len)) {
+            command = OFPFC_MODIFY;
+        } else if (!strncmp(string, "modify_strict", len)) {
+            command = OFPFC_MODIFY_STRICT;
+        } else {
+            len = 0;
+            command = OFPFC_ADD;
+        }
+        string += len;
+    }
 
     switch (command) {
     case -1:
@@ -314,8 +344,8 @@ parse_ofp_str__(struct ofputil_flow_mod *fm, int command, char *string,
             return xstrdup("must specify an action");
         }
     }
-    for (name = strtok_r(string, "=, \t\r\n", &save_ptr); name;
-         name = strtok_r(NULL, "=, \t\r\n", &save_ptr)) {
+
+    while (ofputil_parse_key_value(&string, &name, &value)) {
         const struct protocol *p;
         char *error = NULL;
 
@@ -340,11 +370,11 @@ parse_ofp_str__(struct ofputil_flow_mod *fm, int command, char *string,
         } else if (!strcmp(name, "no_readonly_table")
                    || !strcmp(name, "allow_hidden_fields")) {
              /* ignore these fields. */
+        } else if (mf_from_name(name)) {
+            error = parse_field(mf_from_name(name), value, &fm->match,
+                                usable_protocols);
         } else {
-            char *value;
-
-            value = strtok_r(NULL, ", \t\r\n", &save_ptr);
-            if (!value) {
+            if (!*value) {
                 return xasprintf("field %s missing value", name);
             }
 
@@ -353,7 +383,7 @@ parse_ofp_str__(struct ofputil_flow_mod *fm, int command, char *string,
                 if (fm->table_id != 0xff) {
                     *usable_protocols &= OFPUTIL_P_TID;
                 }
-            } else if (!strcmp(name, "out_port")) {
+            } else if (fields & F_OUT_PORT && !strcmp(name, "out_port")) {
                 if (!ofputil_port_from_string(value, &fm->out_port)) {
                     error = xasprintf("%s is not a valid OpenFlow port",
                                       value);
@@ -399,9 +429,6 @@ parse_ofp_str__(struct ofputil_flow_mod *fm, int command, char *string,
                     error = str_to_be64(value, &fm->new_cookie);
                     fm->modify_cookie = true;
                 }
-            } else if (mf_from_name(name)) {
-                error = parse_field(mf_from_name(name), value, &fm->match,
-                                    usable_protocols);
             } else if (!strcmp(name, "duration")
                        || !strcmp(name, "n_packets")
                        || !strcmp(name, "n_bytes")
@@ -413,10 +440,10 @@ parse_ofp_str__(struct ofputil_flow_mod *fm, int command, char *string,
             } else {
                 error = xasprintf("unknown keyword %s", name);
             }
+        }
 
-            if (error) {
-                return error;
-            }
+        if (error) {
+            return error;
         }
     }
     /* Check for usable protocol interdependencies between match fields. */
@@ -452,9 +479,9 @@ parse_ofp_str__(struct ofputil_flow_mod *fm, int command, char *string,
         if (!error) {
             enum ofperr err;
 
-            err = ofpacts_check(ofpbuf_data(&ofpacts), ofpbuf_size(&ofpacts), &fm->match.flow,
+            err = ofpacts_check(ofpacts.data, ofpacts.size, &fm->match.flow,
                                 OFPP_MAX, fm->table_id, 255, usable_protocols);
-            if (!err && !usable_protocols) {
+            if (!err && !*usable_protocols) {
                 err = OFPERR_OFPBAC_MATCH_INCONSISTENT;
             }
             if (err) {
@@ -468,7 +495,7 @@ parse_ofp_str__(struct ofputil_flow_mod *fm, int command, char *string,
             return error;
         }
 
-        fm->ofpacts_len = ofpbuf_size(&ofpacts);
+        fm->ofpacts_len = ofpacts.size;
         fm->ofpacts = ofpbuf_steal_data(&ofpacts);
     } else {
         fm->ofpacts_len = 0;
@@ -485,6 +512,10 @@ parse_ofp_str__(struct ofputil_flow_mod *fm, int command, char *string,
  * To parse syntax for an OFPT_FLOW_MOD (or NXT_FLOW_MOD), use an OFPFC_*
  * constant for 'command'.  To parse syntax for an OFPST_FLOW or
  * OFPST_AGGREGATE (or NXST_FLOW or NXST_AGGREGATE), use -1 for 'command'.
+ *
+ * If 'command' is given as -2, 'str_' may begin with a command name ("add",
+ * "modify", "delete", "modify_strict", or "delete_strict").  A missing command
+ * name is treated as "add".
  *
  * Returns NULL if successful, otherwise a malloc()'d string describing the
  * error.  The caller is responsible for freeing the returned string. */
@@ -735,8 +766,7 @@ parse_flow_monitor_request__(struct ofputil_flow_monitor_request *fmr,
                              enum ofputil_protocol *usable_protocols)
 {
     static atomic_count id = ATOMIC_COUNT_INIT(0);
-    char *save_ptr = NULL;
-    char *name;
+    char *name, *value;
 
     fmr->id = atomic_count_inc(&id);
 
@@ -746,9 +776,9 @@ parse_flow_monitor_request__(struct ofputil_flow_monitor_request *fmr,
     fmr->table_id = 0xff;
     match_init_catchall(&fmr->match);
 
-    for (name = strtok_r(string, "=, \t\r\n", &save_ptr); name;
-         name = strtok_r(NULL, "=, \t\r\n", &save_ptr)) {
+    while (ofputil_parse_key_value(&string, &name, &value)) {
         const struct protocol *p;
+        char *error = NULL;
 
         if (!strcmp(name, "!initial")) {
             fmr->flags &= ~NXFMF_INITIAL;
@@ -767,32 +797,25 @@ parse_flow_monitor_request__(struct ofputil_flow_monitor_request *fmr,
             if (p->nw_proto) {
                 match_set_nw_proto(&fmr->match, p->nw_proto);
             }
+        } else if (mf_from_name(name)) {
+            error = parse_field(mf_from_name(name), value, &fmr->match,
+                                usable_protocols);
         } else {
-            char *value;
-
-            value = strtok_r(NULL, ", \t\r\n", &save_ptr);
-            if (!value) {
+            if (!*value) {
                 return xasprintf("%s: field %s missing value", str_, name);
             }
 
             if (!strcmp(name, "table")) {
-                char *error = str_to_u8(value, "table", &fmr->table_id);
-                if (error) {
-                    return error;
-                }
+                error = str_to_u8(value, "table", &fmr->table_id);
             } else if (!strcmp(name, "out_port")) {
                 fmr->out_port = u16_to_ofp(atoi(value));
-            } else if (mf_from_name(name)) {
-                char *error;
-
-                error = parse_field(mf_from_name(name), value, &fmr->match,
-                                    usable_protocols);
-                if (error) {
-                    return error;
-                }
             } else {
                 return xasprintf("%s: unknown keyword %s", str_, name);
             }
+        }
+
+        if (error) {
+            return error;
         }
     }
     return NULL;
@@ -818,14 +841,19 @@ parse_flow_monitor_request(struct ofputil_flow_monitor_request *fmr,
 /* Parses 'string' as an OFPT_FLOW_MOD or NXT_FLOW_MOD with command 'command'
  * (one of OFPFC_*) into 'fm'.
  *
+ * If 'command' is given as -2, 'string' may begin with a command name ("add",
+ * "modify", "delete", "modify_strict", or "delete_strict").  A missing command
+ * name is treated as "add".
+ *
  * Returns NULL if successful, otherwise a malloc()'d string describing the
  * error.  The caller is responsible for freeing the returned string. */
 char * OVS_WARN_UNUSED_RESULT
 parse_ofp_flow_mod_str(struct ofputil_flow_mod *fm, const char *string,
-                       uint16_t command,
+                       int command,
                        enum ofputil_protocol *usable_protocols)
 {
     char *error = parse_ofp_str(fm, command, string, usable_protocols);
+
     if (!error) {
         /* Normalize a copy of the match.  This ensures that non-normalized
          * flows get logged but doesn't affect what gets sent to the switch, so
@@ -837,20 +865,20 @@ parse_ofp_flow_mod_str(struct ofputil_flow_mod *fm, const char *string,
     return error;
 }
 
-/* Convert 'table_id' and 'flow_miss_handling' (as described for the
- * "mod-table" command in the ovs-ofctl man page) into 'tm' for sending the
- * specified table_mod 'command' to a switch.
+/* Convert 'table_id' and 'setting' (as described for the "mod-table" command
+ * in the ovs-ofctl man page) into 'tm' for sending a table_mod command to a
+ * switch.
+ *
+ * Stores a bitmap of the OpenFlow versions that are usable for 'tm' into
+ * '*usable_versions'.
  *
  * Returns NULL if successful, otherwise a malloc()'d string describing the
  * error.  The caller is responsible for freeing the returned string. */
 char * OVS_WARN_UNUSED_RESULT
 parse_ofp_table_mod(struct ofputil_table_mod *tm, const char *table_id,
-                    const char *flow_miss_handling,
-                    enum ofputil_protocol *usable_protocols)
+                    const char *setting, uint32_t *usable_versions)
 {
-    /* Table mod requires at least OF 1.1. */
-    *usable_protocols = OFPUTIL_P_OF11_UP;
-
+    *usable_versions = 0;
     if (!strcasecmp(table_id, "all")) {
         tm->table_id = OFPTT_ALL;
     } else {
@@ -860,18 +888,38 @@ parse_ofp_table_mod(struct ofputil_table_mod *tm, const char *table_id,
         }
     }
 
-    if (strcmp(flow_miss_handling, "controller") == 0) {
-        tm->miss_config = OFPUTIL_TABLE_MISS_CONTROLLER;
-    } else if (strcmp(flow_miss_handling, "continue") == 0) {
-        tm->miss_config = OFPUTIL_TABLE_MISS_CONTINUE;
-    } else if (strcmp(flow_miss_handling, "drop") == 0) {
-        tm->miss_config = OFPUTIL_TABLE_MISS_DROP;
+    tm->miss = OFPUTIL_TABLE_MISS_DEFAULT;
+    tm->eviction = OFPUTIL_TABLE_EVICTION_DEFAULT;
+    tm->eviction_flags = UINT32_MAX;
+
+    /* Only OpenFlow 1.1 and 1.2 can configure table-miss via table_mod.
+     * Only OpenFlow 1.4+ can configure eviction via table_mod.
+     *
+     * (OpenFlow 1.4+ can also configure vacancy events via table_mod, but OVS
+     * doesn't support those yet and they're also logically a per-OpenFlow
+     * session setting so it wouldn't make sense to support them here anyway.)
+     */
+    if (!strcmp(setting, "controller")) {
+        tm->miss = OFPUTIL_TABLE_MISS_CONTROLLER;
+        *usable_versions = (1u << OFP11_VERSION) | (1u << OFP12_VERSION);
+    } else if (!strcmp(setting, "continue")) {
+        tm->miss = OFPUTIL_TABLE_MISS_CONTINUE;
+        *usable_versions = (1u << OFP11_VERSION) | (1u << OFP12_VERSION);
+    } else if (!strcmp(setting, "drop")) {
+        tm->miss = OFPUTIL_TABLE_MISS_DROP;
+        *usable_versions = (1u << OFP11_VERSION) | (1u << OFP12_VERSION);
+    } else if (!strcmp(setting, "evict")) {
+        tm->eviction = OFPUTIL_TABLE_EVICTION_ON;
+        *usable_versions = (1 << OFP14_VERSION) | (1u << OFP15_VERSION);
+    } else if (!strcmp(setting, "noevict")) {
+        tm->eviction = OFPUTIL_TABLE_EVICTION_OFF;
+        *usable_versions = (1 << OFP14_VERSION) | (1u << OFP15_VERSION);
     } else {
-        return xasprintf("invalid flow_miss_handling %s", flow_miss_handling);
+        return xasprintf("invalid table_mod setting %s", setting);
     }
 
     if (tm->table_id == 0xfe
-        && tm->miss_config == OFPUTIL_TABLE_MISS_CONTINUE) {
+        && tm->miss == OFPUTIL_TABLE_MISS_CONTINUE) {
         return xstrdup("last table's flow miss handling can not be continue");
     }
 
@@ -883,10 +931,14 @@ parse_ofp_table_mod(struct ofputil_table_mod *tm, const char *table_id,
  * type (one of OFPFC_*).  Stores each flow_mod in '*fm', an array allocated
  * on the caller's behalf, and the number of flow_mods in '*n_fms'.
  *
+ * If 'command' is given as -2, each line may start with a command name
+ * ("add", "modify", "delete", "modify_strict", or "delete_strict").  A missing
+ * command name is treated as "add".
+ *
  * Returns NULL if successful, otherwise a malloc()'d string describing the
  * error.  The caller is responsible for freeing the returned string. */
 char * OVS_WARN_UNUSED_RESULT
-parse_ofp_flow_mod_file(const char *file_name, uint16_t command,
+parse_ofp_flow_mod_file(const char *file_name, int command,
                         struct ofputil_flow_mod **fms, size_t *n_fms,
                         enum ofputil_protocol *usable_protocols)
 {
@@ -1040,7 +1092,7 @@ parse_ofp_exact_flow(struct flow *flow, struct flow *mask, const char *s,
                 goto exit;
             }
 
-            if (!mf_is_zero(mf, flow)) {
+            if (mf_is_set(mf, flow)) {
                 error = xasprintf("%s: field %s set multiple times", s, key);
                 goto exit;
             }
@@ -1087,7 +1139,7 @@ exit:
 }
 
 static char * OVS_WARN_UNUSED_RESULT
-parse_bucket_str(struct ofputil_bucket *bucket, char *str_,
+parse_bucket_str(struct ofputil_bucket *bucket, char *str_, uint8_t group_type,
                   enum ofputil_protocol *usable_protocols)
 {
     char *pos, *key, *value;
@@ -1095,7 +1147,7 @@ parse_bucket_str(struct ofputil_bucket *bucket, char *str_,
     struct ds actions;
     char *error;
 
-    bucket->weight = 1;
+    bucket->weight = group_type == OFPGT11_SELECT ? 1 : 0;
     bucket->bucket_id = OFPG15_BUCKET_ALL;
     bucket->watch_port = OFPP_ANY;
     bucket->watch_group = OFPG11_ANY;
@@ -1151,8 +1203,70 @@ parse_bucket_str(struct ofputil_bucket *bucket, char *str_,
         ofpbuf_uninit(&ofpacts);
         return error;
     }
-    bucket->ofpacts = ofpbuf_data(&ofpacts);
-    bucket->ofpacts_len = ofpbuf_size(&ofpacts);
+    bucket->ofpacts = ofpacts.data;
+    bucket->ofpacts_len = ofpacts.size;
+
+    return NULL;
+}
+
+static char * OVS_WARN_UNUSED_RESULT
+parse_select_group_field(char *s, struct field_array *fa,
+                         enum ofputil_protocol *usable_protocols)
+{
+    char *save_ptr = NULL;
+    char *name;
+
+    for (name = strtok_r(s, "=, \t\r\n", &save_ptr); name;
+         name = strtok_r(NULL, "=, \t\r\n", &save_ptr)) {
+        const struct mf_field *mf = mf_from_name(name);
+
+        if (mf) {
+            char *error;
+            const char *value_str;
+            union mf_value value;
+
+            if (bitmap_is_set(fa->used.bm, mf->id)) {
+                return xasprintf("%s: duplicate field", name);
+            }
+
+            value_str = strtok_r(NULL, ", \t\r\n", &save_ptr);
+            if (value_str) {
+                error = mf_parse_value(mf, value_str, &value);
+                if (error) {
+                    return error;
+                }
+
+                /* The mask cannot be all-zeros */
+                if (!mf_is_tun_metadata(mf) &&
+                    is_all_zeros(&value, mf->n_bytes)) {
+                    return xasprintf("%s: values are wildcards here "
+                                     "and must not be all-zeros", s);
+                }
+
+                /* The values parsed are masks for fields used
+                 * by the selection method */
+                if (!mf_is_mask_valid(mf, &value)) {
+                    return xasprintf("%s: invalid mask for field %s",
+                                     value_str, mf->name);
+                }
+            } else {
+                memset(&value, 0xff, mf->n_bytes);
+            }
+
+            field_array_set(mf->id, &value, fa);
+
+            if (is_all_ones(&value, mf->n_bytes)) {
+                *usable_protocols &= mf->usable_protocols_exact;
+            } else if (mf->usable_protocols_bitwise == mf->usable_protocols_cidr
+                       || ip_is_cidr(value.be32)) {
+                *usable_protocols &= mf->usable_protocols_cidr;
+            } else {
+                *usable_protocols &= mf->usable_protocols_bitwise;
+            }
+        } else {
+            return xasprintf("%s: unknown field %s", s, name);
+        }
+    }
 
     return NULL;
 }
@@ -1216,40 +1330,19 @@ parse_ofp_group_mod_str__(struct ofputil_group_mod *gm, uint16_t command,
 
     *usable_protocols = OFPUTIL_P_OF11_UP;
 
-    if (fields & F_BUCKETS) {
-        char *bkt_str = strstr(string, "bucket=");
-
-        if (bkt_str) {
-            *bkt_str = '\0';
+    /* Strip the buckets off the end of 'string', if there are any, saving a
+     * pointer for later.  We want to parse the buckets last because the bucket
+     * type influences bucket defaults. */
+    char *bkt_str = strstr(string, "bucket=");
+    if (bkt_str) {
+        if (!(fields & F_BUCKETS)) {
+            error = xstrdup("bucket is not needed");
+            goto out;
         }
-
-        while (bkt_str) {
-            char *next_bkt_str;
-
-            bkt_str = strchr(bkt_str + 1, '=');
-            if (!bkt_str) {
-                error = xstrdup("must specify bucket content");
-                goto out;
-            }
-            bkt_str++;
-
-            next_bkt_str = strstr(bkt_str, "bucket=");
-            if (next_bkt_str) {
-                *next_bkt_str = '\0';
-            }
-
-            bucket = xzalloc(sizeof(struct ofputil_bucket));
-            error = parse_bucket_str(bucket, bkt_str, usable_protocols);
-            if (error) {
-                free(bucket);
-                goto out;
-            }
-            list_push_back(&gm->buckets, &bucket->list_node);
-
-            bkt_str = next_bkt_str;
-        }
+        *bkt_str = '\0';
     }
 
+    /* Parse everything before the buckets. */
     for (name = strtok_r(string, "=, \t\r\n", &save_ptr); name;
          name = strtok_r(NULL, "=, \t\r\n", &save_ptr)) {
         char *value;
@@ -1272,7 +1365,7 @@ parse_ofp_group_mod_str__(struct ofputil_group_mod *gm, uint16_t command,
             } else if (!strcmp(value, "last")) {
                 gm->command_bucket_id = OFPG15_BUCKET_LAST;
             } else {
-                char *error = str_to_u32(value, &gm->command_bucket_id);
+                error = str_to_u32(value, &gm->command_bucket_id);
                 if (error) {
                     goto out;
                 }
@@ -1295,7 +1388,7 @@ parse_ofp_group_mod_str__(struct ofputil_group_mod *gm, uint16_t command,
             if(!strcmp(value, "all")) {
                 gm->group_id = OFPG_ALL;
             } else {
-                char *error = str_to_u32(value, &gm->group_id);
+                error = str_to_u32(value, &gm->group_id);
                 if (error) {
                     goto out;
                 }
@@ -1324,9 +1417,42 @@ parse_ofp_group_mod_str__(struct ofputil_group_mod *gm, uint16_t command,
                 goto out;
             }
             had_type = true;
-        } else if (!strcmp(name, "bucket")) {
-            error = xstrdup("bucket is not needed");
-            goto out;
+        } else if (!strcmp(name, "selection_method")) {
+            if (!(fields & F_GROUP_TYPE)) {
+                error = xstrdup("selection method is not needed");
+                goto out;
+            }
+            if (strlen(value) >= NTR_MAX_SELECTION_METHOD_LEN) {
+                error = xasprintf("selection method is longer than %u"
+                                  " bytes long",
+                                  NTR_MAX_SELECTION_METHOD_LEN - 1);
+                goto out;
+            }
+            memset(gm->props.selection_method, '\0',
+                   NTR_MAX_SELECTION_METHOD_LEN);
+            strcpy(gm->props.selection_method, value);
+            *usable_protocols &= OFPUTIL_P_OF15_UP;
+        } else if (!strcmp(name, "selection_method_param")) {
+            if (!(fields & F_GROUP_TYPE)) {
+                error = xstrdup("selection method param is not needed");
+                goto out;
+            }
+            error = str_to_u64(value, &gm->props.selection_method_param);
+            if (error) {
+                goto out;
+            }
+            *usable_protocols &= OFPUTIL_P_OF15_UP;
+        } else if (!strcmp(name, "fields")) {
+            if (!(fields & F_GROUP_TYPE)) {
+                error = xstrdup("fields are not needed");
+                goto out;
+            }
+            error = parse_select_group_field(value, &gm->props.fields,
+                                             usable_protocols);
+            if (error) {
+                goto out;
+            }
+            *usable_protocols &= OFPUTIL_P_OF15_UP;
         } else {
             error = xasprintf("unknown keyword %s", name);
             goto out;
@@ -1351,12 +1477,36 @@ parse_ofp_group_mod_str__(struct ofputil_group_mod *gm, uint16_t command,
         goto out;
     }
 
-    /* Validate buckets. */
-    LIST_FOR_EACH (bucket, list_node, &gm->buckets) {
-        if (bucket->weight != 1 && gm->type != OFPGT11_SELECT) {
+    /* Now parse the buckets, if any. */
+    while (bkt_str) {
+        char *next_bkt_str;
+
+        bkt_str = strchr(bkt_str + 1, '=');
+        if (!bkt_str) {
+            error = xstrdup("must specify bucket content");
+            goto out;
+        }
+        bkt_str++;
+
+        next_bkt_str = strstr(bkt_str, "bucket=");
+        if (next_bkt_str) {
+            *next_bkt_str = '\0';
+        }
+
+        bucket = xzalloc(sizeof(struct ofputil_bucket));
+        error = parse_bucket_str(bucket, bkt_str, gm->type, usable_protocols);
+        if (error) {
+            free(bucket);
+            goto out;
+        }
+        list_push_back(&gm->buckets, &bucket->list_node);
+
+        if (gm->type != OFPGT11_SELECT && bucket->weight) {
             error = xstrdup("Only select groups can have bucket weights.");
             goto out;
         }
+
+        bkt_str = next_bkt_str;
     }
     if (gm->type == OFPGT11_INDIRECT && !list_is_short(&gm->buckets)) {
         error = xstrdup("Indirect groups can have at most one bucket.");
@@ -1413,12 +1563,14 @@ parse_ofp_group_mod_file(const char *file_name, uint16_t command,
         char *error;
 
         if (*n_gms >= allocated_gms) {
+            struct ofputil_group_mod *new_gms;
             size_t i;
 
-            *gms = x2nrealloc(*gms, &allocated_gms, sizeof **gms);
+            new_gms = x2nrealloc(*gms, &allocated_gms, sizeof **gms);
             for (i = 0; i < *n_gms; i++) {
-                list_moved(&(*gms)[i].buckets);
+                list_moved(&new_gms[i].buckets, &(*gms)[i].buckets);
             }
+            *gms = new_gms;
         }
         error = parse_ofp_group_mod_str(&(*gms)[*n_gms], command, ds_cstr(&s),
                                         &usable);
@@ -1447,5 +1599,38 @@ parse_ofp_group_mod_file(const char *file_name, uint16_t command,
     if (stream != stdin) {
         fclose(stream);
     }
+    return NULL;
+}
+
+char * OVS_WARN_UNUSED_RESULT
+parse_ofp_geneve_table_mod_str(struct ofputil_geneve_table_mod *gtm,
+                               uint16_t command, const char *s,
+                               enum ofputil_protocol *usable_protocols)
+{
+    *usable_protocols = OFPUTIL_P_NXM_OXM_ANY;
+
+    gtm->command = command;
+    list_init(&gtm->mappings);
+
+    while (*s) {
+        struct ofputil_geneve_map *map = xmalloc(sizeof *map);
+        int n;
+
+        if (*s == ',') {
+            s++;
+        }
+
+        list_push_back(&gtm->mappings, &map->list_node);
+
+        if (!ovs_scan(s, "{class=%"SCNi16",type=%"SCNi8",len=%"SCNi8"}->tun_metadata%"SCNi16"%n",
+                      &map->option_class, &map->option_type, &map->option_len,
+                      &map->index, &n)) {
+            ofputil_uninit_geneve_table(&gtm->mappings);
+            return xstrdup("invalid geneve mapping");
+        }
+
+        s += n;
+    }
+
     return NULL;
 }

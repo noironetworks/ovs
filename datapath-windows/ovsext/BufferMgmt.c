@@ -433,14 +433,14 @@ OvsAllocateMDLAndData(NDIS_HANDLE ndisHandle,
     PMDL mdl;
     PVOID data;
 
-    data = OvsAllocateMemory(dataSize);
+    data = OvsAllocateMemoryWithTag(dataSize, OVS_MDL_POOL_TAG);
     if (data == NULL) {
         return NULL;
     }
 
     mdl = NdisAllocateMdl(ndisHandle, data, dataSize);
     if (mdl == NULL) {
-        OvsFreeMemory(data);
+        OvsFreeMemoryWithTag(data, OVS_MDL_POOL_TAG);
     }
 
     return mdl;
@@ -454,7 +454,7 @@ OvsFreeMDLAndData(PMDL mdl)
 
     data = MmGetMdlVirtualAddress(mdl);
     NdisFreeMdl(mdl);
-    OvsFreeMemory(data);
+    OvsFreeMemoryWithTag(data, OVS_MDL_POOL_TAG);
 }
 
 
@@ -560,7 +560,8 @@ OvsInitExternalNBLContext(PVOID ovsContext,
 
     poolHandle = NdisGetPoolFromNetBufferList(nbl);
 
-    if (poolHandle == context->ovsPool.ndisHandle) {
+    if (poolHandle == context->ovsPool.ndisHandle ||
+        nbl->SourceHandle == context->ovsPool.ndisHandle) {
         return (POVS_BUFFER_CONTEXT)NET_BUFFER_LIST_CONTEXT_DATA_START(nbl);
     }
     status = NdisAllocateNetBufferListContext(nbl, sizeof (OVS_BUFFER_CONTEXT),
@@ -801,6 +802,7 @@ OvsPartialCopyNBL(PVOID ovsContext,
                       OVS_DEFAULT_PORT_NO);
 
     InterlockedIncrement((LONG volatile *)&srcCtx->refCount);
+
 #ifdef DBG
     OvsDumpNetBufferList(nbl);
     OvsDumpForwardingDetails(nbl);
@@ -808,6 +810,7 @@ OvsPartialCopyNBL(PVOID ovsContext,
     OvsDumpNetBufferList(newNbl);
     OvsDumpForwardingDetails(newNbl);
 #endif
+
     OVS_LOG_LOUD("Partial Copy new NBL: %p", newNbl);
     return newNbl;
 
@@ -863,7 +866,7 @@ OvsPartialCopyToMultipleNBLs(PVOID ovsContext,
         if (prevNbl == NULL) {
             firstNbl = newNbl;
         } else {
-            NET_BUFFER_LIST_NEXT_NBL(prevNbl) = nbl;
+            NET_BUFFER_LIST_NEXT_NBL(prevNbl) = newNbl;
             NET_BUFFER_NEXT_NB(prevNb) = nb;
         }
         prevNbl = newNbl;
@@ -881,7 +884,7 @@ cleanup:
     newNbl = firstNbl;
     while (newNbl) {
         firstNbl = NET_BUFFER_LIST_NEXT_NBL(newNbl);
-        NET_BUFFER_LIST_NEXT_NBL(firstNbl) = NULL;
+        NET_BUFFER_LIST_NEXT_NBL(newNbl) = NULL;
         OvsCompleteNBL(context, newNbl, TRUE);
         newNbl = firstNbl;
     }

@@ -26,6 +26,7 @@
 
 #include "coverage.h"
 #include "dpif.h"
+#include "dp-packet.h"
 #include "dynamic-string.h"
 #include "fatal-signal.h"
 #include "hash.h"
@@ -33,7 +34,7 @@
 #include "netdev-dpdk.h"
 #include "netdev-provider.h"
 #include "netdev-vport.h"
-#include "ofpbuf.h"
+#include "odp-netlink.h"
 #include "openflow/openflow.h"
 #include "packets.h"
 #include "poll-loop.h"
@@ -43,6 +44,7 @@
 #include "sset.h"
 #include "svec.h"
 #include "openvswitch/vlog.h"
+#include "flow.h"
 
 VLOG_DEFINE_THIS_MODULE(netdev);
 
@@ -108,7 +110,9 @@ bool
 netdev_is_pmd(const struct netdev *netdev)
 {
     return (!strcmp(netdev->netdev_class->type, "dpdk") ||
-            !strcmp(netdev->netdev_class->type, "dpdkr"));
+            !strcmp(netdev->netdev_class->type, "dpdkr") ||
+            !strcmp(netdev->netdev_class->type, "dpdkvhostcuse") ||
+            !strcmp(netdev->netdev_class->type, "dpdkvhostuser"));
 }
 
 static void
@@ -253,6 +257,8 @@ netdev_unregister_provider(const char *type)
 {
     struct netdev_registered_class *rc;
     int error;
+
+    netdev_initialize();
 
     ovs_mutex_lock(&netdev_class_mutex);
     rc = netdev_lookup_class(type);
@@ -631,7 +637,7 @@ netdev_rxq_close(struct netdev_rxq *rx)
  * Returns EAGAIN immediately if no packet is ready to be received.
  *
  * Returns EMSGSIZE, and discards the packet, if the received packet is longer
- * than 'ofpbuf_tailroom(buffer)'.
+ * than 'dp_packet_tailroom(buffer)'.
  *
  * It is advised that the tailroom of 'buffer' should be
  * VLAN_HEADER_LEN bytes longer than the MTU to allow space for an
@@ -641,7 +647,7 @@ netdev_rxq_close(struct netdev_rxq *rx)
  * This function may be set to null if it would always return EOPNOTSUPP
  * anyhow. */
 int
-netdev_rxq_recv(struct netdev_rxq *rx, struct dpif_packet **buffers, int *cnt)
+netdev_rxq_recv(struct netdev_rxq *rx, struct dp_packet **buffers, int *cnt)
 {
     int retval;
 
@@ -671,6 +677,16 @@ netdev_rxq_drain(struct netdev_rxq *rx)
 
 /* Configures the number of tx queues and rx queues of 'netdev'.
  * Return 0 if successful, otherwise a positive errno value.
+ *
+ * 'n_rxq' specifies the maximum number of receive queues to create.
+ * The netdev provider might choose to create less (e.g. if the hardware
+ * supports only a smaller number).  The caller can check how many have been
+ * actually created by calling 'netdev_n_rxq()'
+ *
+ * 'n_txq' specifies the exact number of transmission queues to create.
+ * If this function returns successfully, the caller can make 'n_txq'
+ * concurrent calls to netdev_send() (each one with a different 'qid' in the
+ * range [0..'n_txq'-1]).
  *
  * On error, the tx queue and rx queue configuration is indeterminant.
  * Caller should make decision on whether to restore the previous or
@@ -716,7 +732,7 @@ netdev_set_multiq(struct netdev *netdev, unsigned int n_txq,
  * Some network devices may not implement support for this function.  In such
  * cases this function will always return EOPNOTSUPP. */
 int
-netdev_send(struct netdev *netdev, int qid, struct dpif_packet **buffers,
+netdev_send(struct netdev *netdev, int qid, struct dp_packet **buffers,
             int cnt, bool may_steal)
 {
     int error;
@@ -731,32 +747,53 @@ netdev_send(struct netdev *netdev, int qid, struct dpif_packet **buffers,
 }
 
 int
-netdev_pop_header(struct netdev *netdev, struct dpif_packet **buffers, int cnt)
+netdev_pop_header(struct netdev *netdev, struct dp_packet **buffers, int cnt)
 {
-    return (netdev->netdev_class->pop_header
-             ? netdev->netdev_class->pop_header(netdev, buffers, cnt)
-             : EOPNOTSUPP);
+    int i;
+
+    if (!netdev->netdev_class->pop_header) {
+        return EOPNOTSUPP;
+    }
+
+    for (i = 0; i < cnt; i++) {
+        int err;
+
+        err = netdev->netdev_class->pop_header(buffers[i]);
+        if (err) {
+            dp_packet_clear(buffers[i]);
+        }
+    }
+
+    return 0;
 }
 
 int
-netdev_build_header(const struct netdev *netdev, struct ovs_action_push_tnl *data)
+netdev_build_header(const struct netdev *netdev, struct ovs_action_push_tnl *data,
+                    const struct flow *tnl_flow)
 {
     if (netdev->netdev_class->build_header) {
-        return netdev->netdev_class->build_header(netdev, data);
+        return netdev->netdev_class->build_header(netdev, data, tnl_flow);
     }
     return EOPNOTSUPP;
 }
 
 int
 netdev_push_header(const struct netdev *netdev,
-                   struct dpif_packet **buffers, int cnt,
+                   struct dp_packet **buffers, int cnt,
                    const struct ovs_action_push_tnl *data)
 {
-    if (netdev->netdev_class->push_header) {
-        return netdev->netdev_class->push_header(netdev, buffers, cnt, data);
-    } else {
+    int i;
+
+    if (!netdev->netdev_class->push_header) {
         return -EINVAL;
     }
+
+    for (i = 0; i < cnt; i++) {
+        netdev->netdev_class->push_header(buffers[i], data);
+        pkt_metadata_init(&buffers[i]->md, u32_to_odp(data->out_port));
+    }
+
+    return 0;
 }
 
 /* Registers with the poll loop to wake up from the next call to poll_block()
@@ -779,7 +816,7 @@ netdev_send_wait(struct netdev *netdev, int qid)
 /* Attempts to set 'netdev''s MAC address to 'mac'.  Returns 0 if successful,
  * otherwise a positive errno value. */
 int
-netdev_set_etheraddr(struct netdev *netdev, const uint8_t mac[ETH_ADDR_LEN])
+netdev_set_etheraddr(struct netdev *netdev, const struct eth_addr mac)
 {
     return netdev->netdev_class->set_etheraddr(netdev, mac);
 }
@@ -788,7 +825,7 @@ netdev_set_etheraddr(struct netdev *netdev, const uint8_t mac[ETH_ADDR_LEN])
  * the MAC address into 'mac'.  On failure, returns a positive errno value and
  * clears 'mac' to all-zeros. */
 int
-netdev_get_etheraddr(const struct netdev *netdev, uint8_t mac[ETH_ADDR_LEN])
+netdev_get_etheraddr(const struct netdev *netdev, struct eth_addr *mac)
 {
     return netdev->netdev_class->get_etheraddr(netdev, mac);
 }
@@ -1222,13 +1259,13 @@ netdev_restore_flags(struct netdev_saved_flags *sf)
  * ENXIO indicates that there is no ARP table entry for 'ip' on 'netdev'. */
 int
 netdev_arp_lookup(const struct netdev *netdev,
-                  ovs_be32 ip, uint8_t mac[ETH_ADDR_LEN])
+                  ovs_be32 ip, struct eth_addr *mac)
 {
     int error = (netdev->netdev_class->arp_lookup
                  ? netdev->netdev_class->arp_lookup(netdev, ip, mac)
                  : EOPNOTSUPP);
     if (error) {
-        memset(mac, 0, ETH_ADDR_LEN);
+        *mac = eth_addr_zero;
     }
     return error;
 }

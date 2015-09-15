@@ -48,7 +48,6 @@ vswitchd/ovs-vswitchd.conf.db.5: \
 	ovsdb/ovsdb-doc vswitchd/vswitch.xml vswitchd/vswitch.ovsschema \
 	$(VSWITCH_PIC)
 	$(AM_V_GEN)$(OVSDB_DOC) \
-		--title="ovs-vswitchd.conf.db" \
 		$(VSWITCH_DOT_DIAGRAM_ARG) \
 		--version=$(VERSION) \
 		$(srcdir)/vswitchd/vswitch.ovsschema \
@@ -64,7 +63,7 @@ vswitchd/vswitch.ovsschema.stamp: vswitchd/vswitch.ovsschema
 	  touch $@; \
 	else \
 	  ln=`sed -n '/"cksum":/=' $?`; \
-	  echo >&2 "$?:$$ln: checksum \"$$sum\" does not match (you should probably update the version number and fix the checksum)"; \
+	  echo >&2 "$?:$$ln: The checksum \"$$sum\" was calculated from the schema file and does not match cksum field in the schema file - you should probably update the version number and the checksum in the schema file with the value listed here."; \
 	  exit 1; \
 	fi
 CLEANFILES += vswitchd/vswitch.ovsschema.stamp

@@ -17,7 +17,6 @@
  */
 
 #include <linux/version.h>
-#if LINUX_VERSION_CODE < KERNEL_VERSION(3,16,0)
 
 #include <linux/module.h>
 #include <linux/if.h>
@@ -53,6 +52,7 @@ MODULE_PARM_DESC(vlan_tso, "Enable TSO for VLAN packets");
 #define vlan_tso true
 #endif
 
+#ifdef OVS_USE_COMPAT_GSO_SEGMENTATION
 static bool dev_supports_vlan_tx(struct net_device *dev)
 {
 #if LINUX_VERSION_CODE >= KERNEL_VERSION(2,6,37)
@@ -66,16 +66,16 @@ static bool dev_supports_vlan_tx(struct net_device *dev)
 }
 
 /* Strictly this is not needed and will be optimised out
- * as this code is guarded by if LINUX_VERSION_CODE < KERNEL_VERSION(3,16,0).
+ * as this code is guarded by if LINUX_VERSION_CODE < KERNEL_VERSION(3,19,0).
  * It is here to make things explicit should the compatibility
  * code be extended in some way prior extending its life-span
- * beyond v3.16.
+ * beyond v3.19.
  */
 static bool supports_mpls_gso(void)
 {
 /* MPLS GSO was introduced in v3.11, however it was not correctly
- * activated using mpls_features until v3.16. */
-#if LINUX_VERSION_CODE >= KERNEL_VERSION(3,16,0)
+ * activated using mpls_features until v3.19. */
+#ifdef OVS_USE_COMPAT_GSO_SEGMENTATION
 	return true;
 #else
 	return false;
@@ -97,7 +97,7 @@ int rpl_dev_queue_xmit(struct sk_buff *skb)
 	if (skb->mac_len != skb_network_offset(skb) && !supports_mpls_gso())
 		mpls = true;
 
-	if (vlan_tx_tag_present(skb) && !dev_supports_vlan_tx(skb->dev))
+	if (skb_vlan_tag_present(skb) && !dev_supports_vlan_tx(skb->dev))
 		vlan = true;
 
 	if (vlan || mpls) {
@@ -111,7 +111,7 @@ int rpl_dev_queue_xmit(struct sk_buff *skb)
 					      NETIF_F_UFO | NETIF_F_FSO);
 
 			skb = vlan_insert_tag_set_proto(skb, skb->vlan_proto,
-							vlan_tx_tag_get(skb));
+							skb_vlan_tag_get(skb));
 			if (unlikely(!skb))
 				return err;
 			vlan_set_tci(skb, 0);
@@ -120,17 +120,17 @@ int rpl_dev_queue_xmit(struct sk_buff *skb)
 		/* As of v3.11 the kernel provides an mpls_features field in
 		 * struct net_device which allows devices to advertise which
 		 * features its supports for MPLS. This value defaults to
-		 * NETIF_F_SG and as of v3.16.
+		 * NETIF_F_SG and as of v3.19.
 		 *
 		 * This compatibility code is intended for kernels older
-		 * than v3.16 that do not support MPLS GSO and do not
+		 * than v3.19 that do not support MPLS GSO and do not
 		 * use mpls_features. Thus this code uses NETIF_F_SG
 		 * directly in place of mpls_features.
 		 */
 		if (mpls)
 			features &= NETIF_F_SG;
 
-		if (netif_needs_gso(skb, features)) {
+		if (netif_needs_gso(skb->dev, skb, features)) {
 			struct sk_buff *nskb;
 
 			nskb = skb_gso_segment(skb, features);
@@ -167,7 +167,10 @@ drop:
 	kfree_skb(skb);
 	return err;
 }
+EXPORT_SYMBOL_GPL(rpl_dev_queue_xmit);
+#endif /* OVS_USE_COMPAT_GSO_SEGMENTATION */
 
+#if LINUX_VERSION_CODE < KERNEL_VERSION(3,18,0)
 static __be16 __skb_network_protocol(struct sk_buff *skb)
 {
 	__be16 type = skb->protocol;
@@ -189,16 +192,6 @@ static __be16 __skb_network_protocol(struct sk_buff *skb)
 
 	return type;
 }
-
-#if LINUX_VERSION_CODE < KERNEL_VERSION(3,12,0)
-static void tnl_fix_segment(struct sk_buff *skb)
-{
-	if (OVS_GSO_CB(skb)->fix_segment)
-		OVS_GSO_CB(skb)->fix_segment(skb);
-}
-#else
-static void tnl_fix_segment(struct sk_buff *skb) { }
-#endif
 
 static struct sk_buff *tnl_skb_gso_segment(struct sk_buff *skb,
 					   netdev_features_t features,
@@ -226,7 +219,17 @@ static struct sk_buff *tnl_skb_gso_segment(struct sk_buff *skb,
 	 * make copy of it to restore it back. */
 	memcpy(cb, skb->cb, sizeof(cb));
 
+	/* We are handling offloads by segmenting l3 packet, so
+	 * no need to call OVS compat segmentation function. */
+
+#ifdef HAVE___SKB_GSO_SEGMENT
+#undef __skb_gso_segment
 	segs = __skb_gso_segment(skb, 0, tx_path);
+#else
+#undef skb_gso_segment
+	segs = skb_gso_segment(skb, 0);
+#endif
+
 	if (!segs || IS_ERR(segs))
 		goto free;
 
@@ -240,7 +243,7 @@ static struct sk_buff *tnl_skb_gso_segment(struct sk_buff *skb,
 
 		memcpy(ip_hdr(skb), iph, pkt_hlen);
 		memcpy(skb->cb, cb, sizeof(cb));
-		tnl_fix_segment(skb);
+		OVS_GSO_CB(skb)->fix_segment(skb);
 
 		skb->protocol = proto;
 		skb = skb->next;
@@ -250,10 +253,28 @@ free:
 	return segs;
 }
 
+static int output_ip(struct sk_buff *skb)
+{
+	int ret = NETDEV_TX_OK;
+	int err;
+
+	memset(IPCB(skb), 0, sizeof(*IPCB(skb)));
+
+#undef ip_local_out
+	err = ip_local_out(skb);
+	if (unlikely(net_xmit_eval(err)))
+		ret = err;
+
+	return ret;
+}
+
 int rpl_ip_local_out(struct sk_buff *skb)
 {
 	int ret = NETDEV_TX_OK;
 	int id = -1;
+
+	if (!OVS_GSO_CB(skb)->fix_segment)
+		return output_ip(skb);
 
 	if (skb_is_gso(skb)) {
 		struct iphdr *iph;
@@ -274,7 +295,6 @@ int rpl_ip_local_out(struct sk_buff *skb)
 	while (skb) {
 		struct sk_buff *next_skb = skb->next;
 		struct iphdr *iph;
-		int err;
 
 		skb->next = NULL;
 
@@ -282,66 +302,11 @@ int rpl_ip_local_out(struct sk_buff *skb)
 		if (id >= 0)
 			iph->id = htons(id++);
 
-		memset(IPCB(skb), 0, sizeof(*IPCB(skb)));
-
-#undef ip_local_out
-		err = ip_local_out(skb);
-		if (unlikely(net_xmit_eval(err)))
-			ret = err;
-
+		ret = output_ip(skb);
 		skb = next_skb;
 	}
 	return ret;
 }
-#endif /* 3.16 */
+EXPORT_SYMBOL_GPL(rpl_ip_local_out);
 
-#if LINUX_VERSION_CODE < KERNEL_VERSION(3,12,0)
-struct sk_buff *ovs_iptunnel_handle_offloads(struct sk_buff *skb,
-                                             bool csum_help,
-					     void (*fix_segment)(struct sk_buff *))
-{
-	int err;
-
-	/* XXX: synchronize inner header reset for compat and non compat code
-	 * so that we can do it here.
-	 */
-	/*
-	 skb_reset_inner_headers(skb);
-	 */
-
-	/* OVS compat code does not maintain encapsulation bit.
-	 * skb->encapsulation = 1; */
-
-	if (skb_is_gso(skb)) {
-		if (skb_is_encapsulated(skb)) {
-			err = -ENOSYS;
-			goto error;
-		}
-
-		OVS_GSO_CB(skb)->fix_segment = fix_segment;
-		return skb;
-	}
-
-	/* If packet is not gso and we are resolving any partial checksum,
-	 * clear encapsulation flag. This allows setting CHECKSUM_PARTIAL
-	 * on the outer header without confusing devices that implement
-	 * NETIF_F_IP_CSUM with encapsulation.
-	 */
-	/*
-	if (csum_help)
-		skb->encapsulation = 0;
-	*/
-
-	if (skb->ip_summed == CHECKSUM_PARTIAL && csum_help) {
-		err = skb_checksum_help(skb);
-		if (unlikely(err))
-			goto error;
-	} else if (skb->ip_summed != CHECKSUM_PARTIAL)
-		skb->ip_summed = CHECKSUM_NONE;
-
-	return skb;
-error:
-	kfree_skb(skb);
-	return ERR_PTR(err);
-}
-#endif /* 3.12 */
+#endif /* 3.18 */

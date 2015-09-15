@@ -32,6 +32,10 @@ AM_CFLAGS = -Wstrict-prototypes
 AM_CFLAGS += $(WARNING_FLAGS)
 AM_CFLAGS += $(OVS_CFLAGS)
 
+if DPDK_NETDEV
+AM_CFLAGS += -D_FILE_OFFSET_BITS=64
+endif
+
 if NDEBUG
 AM_CPPFLAGS += -DNDEBUG
 AM_CFLAGS += -fomit-frame-pointer
@@ -47,13 +51,9 @@ endif
 # vSwitch, but it causes trouble if you switch from a version with
 # foo/__init__.py into an (older) version with plain foo.py, since
 # foo/__init__.pyc will cause Python to ignore foo.py.
-if INCLUDE_PYTHON_COMPAT
-run_python = PYTHONPATH=$(top_srcdir)/python$(psep)$(top_srcdir)/python/compat$(psep)$$PYTHONPATH
-else
-run_python = PYTHONPATH=$(top_srcdir)/python$(psep)$$PYTHONPATH
-endif
-run_python += PYTHONDONTWRITEBYTECODE=yes $(PYTHON)
-
+run_python = \
+	PYTHONPATH=$(top_srcdir)/python$(psep)$$PYTHONPATH \
+	PYTHONDONTWRITEBYTECODE=yes $(PYTHON)
 
 ALL_LOCAL =
 BUILT_SOURCES =
@@ -65,6 +65,7 @@ PYCOV_CLEAN_FILES = build-aux/check-structs,cover
 # A list of Markdown-formatted documentation that will automatically be
 # included in the "make dist-docs" output.
 docs = \
+	appveyor.yml \
 	CONTRIBUTING.md \
 	CodingStyle.md \
 	DESIGN.md \
@@ -103,6 +104,7 @@ EXTRA_DIST = \
 	build-aux/dist-docs \
 	build-aux/sodepends.pl \
 	build-aux/soexpand.pl \
+	build-aux/xml2nroff \
 	$(MAN_FRAGMENTS) \
 	$(MAN_ROOTS) \
 	Vagrantfile
@@ -131,12 +133,15 @@ OVSIDL_BUILT =
 pkgdata_DATA =
 sbin_SCRIPTS =
 scripts_SCRIPTS =
+completion_SCRIPTS =
 scripts_DATA =
 SUFFIXES =
 check_DATA =
+check_SCRIPTS =
 pkgconfig_DATA =
 
 scriptsdir = $(pkgdatadir)/scripts
+completiondir = $(sysconfdir)/bash_completion.d
 pkgconfigdir = $(libdir)/pkgconfig
 
 # This ensures that files added to EXTRA_DIST are always distributed,
@@ -164,12 +169,31 @@ SUFFIXES += .in
                 -e 's,[@]sysconfdir[@],$(sysconfdir),g' \
                 -e 's,[@]bindir[@],$(bindir),g' \
                 -e 's,[@]sbindir[@],$(sbindir),g' \
+                -e 's,[@]abs_builddir[@],$(abs_builddir),g' \
                 -e 's,[@]abs_top_srcdir[@],$(abs_top_srcdir),g' \
             > $@.tmp
 	@if head -n 1 $@.tmp | grep '#!' > /dev/null; then \
 	    chmod +x $@.tmp; \
 	fi
 	$(AM_V_at) mv $@.tmp $@
+
+SUFFIXES += .xml
+%: %.xml
+	$(AM_V_GEN)$(run_python) $(srcdir)/build-aux/xml2nroff $< > $@.tmp \
+		--version=$(VERSION) \
+		PKIDIR='$(PKIDIR)' \
+		LOGDIR='$(LOGDIR)' \
+		DBDIR='$(DBDIR)' \
+		PERL='$(PERL)' \
+		PYTHON='$(PYTHON)' \
+		RUNDIR='$(RUNDIR)' \
+		VERSION='$(VERSION)' \
+		localstatedir='$(localstatedir)' \
+		pkgdatadir='$(pkgdatadir)' \
+		sysconfdir='$(sysconfdir)' \
+		bindir='$(bindir)' \
+		sbindir='$(sbindir)'
+	$(AM_v_at)mv $@.tmp $@
 
 .PHONY: clean-pycov
 clean-pycov:
@@ -193,7 +217,7 @@ dist-hook-git: distfiles
 	    LC_ALL=C sort -u > all-gitfiles;				    \
 	  LC_ALL=C comm -1 -3 all-distfiles all-gitfiles > missing-distfiles; \
 	  if test -s missing-distfiles; then				    \
-	    echo "The distribution is missing the following files:";	    \
+	    echo "The following files are in git but not the distribution:"; \
 	    cat missing-distfiles;					    \
 	    exit 1;							    \
 	  fi;								    \
@@ -326,11 +350,13 @@ CLEANFILES += manpage-dep-check
 if VSTUDIO_DDK
 ALL_LOCAL += ovsext_make
 ovsext_make: datapath-windows/ovsext.sln
-	MSBuild.exe datapath-windows/ovsext.sln /target:Build /property:Configuration="$(VSTUDIO_CONFIG)"
+	MSBuild.exe datapath-windows/ovsext.sln /target:Build /property:Configuration="Win8$(VSTUDIO_CONFIG)"
+	MSBuild.exe datapath-windows/ovsext.sln /target:Build /property:Configuration="Win8.1$(VSTUDIO_CONFIG)"
 
 CLEAN_LOCAL += ovsext_clean
 ovsext_clean: datapath-windows/ovsext.sln
-	MSBuild.exe datapath-windows/ovsext.sln /target:Clean /property:Configuration="$(VSTUDIO_CONFIG)"
+	MSBuild.exe datapath-windows/ovsext.sln /target:Clean /property:Configuration="Win8$(VSTUDIO_CONFIG)"
+	MSBuild.exe datapath-windows/ovsext.sln /target:Clean /property:Configuration="Win8.1$(VSTUDIO_CONFIG)"
 endif
 
 dist-hook: $(DIST_HOOKS)
@@ -349,6 +375,7 @@ dist-docs:
 	VERSION=$(VERSION) $(srcdir)/build-aux/dist-docs $(srcdir) $(docs)
 .PHONY: dist-docs
 
+include Documentation/automake.mk
 include m4/automake.mk
 include lib/automake.mk
 include ofproto/automake.mk
@@ -362,8 +389,9 @@ include ovsdb/automake.mk
 include rhel/automake.mk
 include xenserver/automake.mk
 include python/automake.mk
-include python/compat/automake.mk
 include tutorial/automake.mk
 include vtep/automake.mk
 include datapath-windows/automake.mk
 include datapath-windows/include/automake.mk
+include windows/automake.mk
+include ovn/automake.mk

@@ -88,13 +88,6 @@ typedef union {
     } u64;
 } ovs_u128;
 
-/* Returns non-zero if the parameters have equal value. */
-static inline int
-ovs_u128_equal(const ovs_u128 *a, const ovs_u128 *b)
-{
-    return (a->u64.hi == b->u64.hi) && (a->u64.lo == b->u64.lo);
-}
-
 /* A 64-bit value, in network byte order, that is only aligned on a 32-bit
  * boundary. */
 typedef struct {
@@ -112,5 +105,15 @@ typedef uint32_t OVS_BITWISE ofp11_port_t;
 #define OFP_PORT_C(X) ((OVS_FORCE ofp_port_t) (X))
 #define ODP_PORT_C(X) ((OVS_FORCE odp_port_t) (X))
 #define OFP11_PORT_C(X) ((OVS_FORCE ofp11_port_t) (X))
+
+/* Using this stuct instead of a bare array makes an ethernet address field
+ * assignable.  The size of the array is also part of the type, so it is easier
+ * to deal with. */
+struct eth_addr {
+    union {
+        uint8_t ea[6];
+        ovs_be16 be16[3];
+    };
+};
 
 #endif /* openvswitch/types.h */

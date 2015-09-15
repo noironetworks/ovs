@@ -112,6 +112,9 @@ and adjusting log levels.
 .IP "\fBvlog/list\fR"
 Lists the known logging modules and their current levels.
 .
+.IP "\fBvlog/list-pattern\fR"
+Lists logging pattern used for each destination.
+.
 .IP "\fBvlog/set\fR [\fIspec\fR]"
 Sets logging levels.  Without any \fIspec\fR, sets the log level for
 every module and destination to \fBdbg\fR.  Otherwise, \fIspec\fR is a
@@ -253,6 +256,14 @@ The default pattern for console and file output is \fB%D{%Y-%m-%dT
 .IP
 Daemons written in Python (e.g. \fBovs\-xapi\-sync\fR,
 \fBovs\-monitor\-ipsec) do not allow control over the log pattern.
+.
+.IP "\fBvlog/set\fR FACILITY:\fIfacility\fR"
+Sets the RFC5424 facility of the log message. \fIfacility\fR can be one of
+\fBkern\fR, \fBuser\fR, \fBmail\fR, \fBdaemon\fR, \fBauth\fR, \fBsyslog\fR,
+\fBlpr\fR, \fBnews\fR, \fBuucp\fR, \fBclock\fR, \fBftp\fR, \fBntp\fR,
+\fBaudit\fR, \fBalert\fR, \fBclock2\fR, \fBlocal0\fR, \fBlocal1\fR,
+\fBlocal2\fR, \fBlocal3\fR, \fBlocal4\fR, \fBlocal5\fR, \fBlocal6\fR or
+\fBlocal7\fR.
 .
 .IP "\fBvlog/reopen\fR"
 Causes the daemon to close and reopen its log file.  (This

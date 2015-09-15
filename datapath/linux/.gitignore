@@ -18,6 +18,7 @@
 /flow_netlink.c
 /flow_table.c
 /genetlink-openvswitch.c
+/geneve.c
 /genl_exec.c
 /gre.c
 /gso.c
@@ -34,10 +35,13 @@
 /random32.c
 /reciprocal_div.c
 /skbuff-openvswitch.c
+/stt.c
 /table.c
 /time.c
 /tmp
 /tunnel.c
+/udp.c
+/udp_tunnel.c
 /utils.c
 /vlan.c
 /vport-generic.c
@@ -47,6 +51,7 @@
 /vport-lisp.c
 /vport-netdev.c
 /vport-patch.c
+/vport-stt.c
 /vport-vxlan.c
 /vport.c
 /vxlan.c

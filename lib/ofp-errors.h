@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2008, 2009, 2010, 2011, 2012, 2013, 2014 Nicira, Inc.
+ * Copyright (c) 2008, 2009, 2010, 2011, 2012, 2013, 2014, 2015 Nicira, Inc.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -45,7 +45,8 @@ struct ofpbuf;
 
 #define OFPERR_OFS (1 << 30)
 
-/* OpenFlow error codes.
+/* OpenFlow error codes
+ * --------------------
  *
  * The comments below are parsed by the extract-ofp-errors program at build
  * time and used to determine the mapping between "enum ofperr" constants and
@@ -71,12 +72,45 @@ struct ofpbuf;
  *   - Additional text is a human-readable description of the meaning of each
  *     error, used to explain the error to the user.  Any text enclosed in
  *     square brackets is omitted; this can be used to explain rationale for
- *     choice of error codes in the case where this is desirable. */
+ *     choice of error codes in the case where this is desirable.
+ *
+ *
+ * Expected duplications
+ * ---------------------
+ *
+ * Occasionally, in one version of OpenFlow a single named error can indicate
+ * two or more distinct errors, then a later version of OpenFlow splits those
+ * meanings into different error codes.  When that happens, both errors are
+ * assigned the same value in the earlier version.  That is ordinarily a
+ * mistake, so the build system reports an error.  When that happens, add the
+ * error message to the list of "Expected duplications" below to suppress the
+ * error.  In such a case, the named error defined earlier is how OVS
+ * interprets the earlier, merged form of the error.
+ *
+ * For example, OpenFlow 1.1 defined (3,5) as OFPBIC_UNSUP_EXP_INST, then
+ * OpenFlow 1.2 broke this error into OFPBIC_BAD_EXPERIMENTER as (3,5) and
+ * OFPBIC_BAD_EXT_TYPE as (3,6).  To allow the OVS code to report just a single
+ * error code, instead of protocol version dependent errors, this list of
+ * errors only lists the latter two errors, giving both of them the same code
+ * (3,5) for OpenFlow 1.1.  Then, when OVS serializes either error into
+ * OpenFlow 1.1, it uses the same code (3,5).  In the other direction, when OVS
+ * deserializes (3,5) from OpenFlow 1.1, it translates it into
+ * OFPBIC_BAD_EXPERIMENTER (because its definition precedes that of
+ * OFPBIC_BAD_EXT_TYPE below).  See the "encoding OFPBIC_* experimenter errors"
+ * and "decoding OFPBIC_* experimenter errors" tests in tests/ofp-errors.at for
+ * full details.
+ */
 enum ofperr {
 /* Expected duplications. */
 
     /* Expected: 0x0,3,5 in OF1.1 means both OFPBIC_BAD_EXPERIMENTER and
      * OFPBIC_BAD_EXP_TYPE. */
+
+    /* Expected: 0x0,1,5 in OF1.0 means both OFPBRC_EPERM and
+     * OFPBRC_IS_SLAVE. */
+
+    /* Expected: 0x0,1,5 in OF1.1 means both OFPBRC_EPERM and
+     * OFPBRC_IS_SLAVE. */
 
 /* ## ------------------ ## */
 /* ## OFPET_HELLO_FAILED ## */
@@ -126,7 +160,7 @@ enum ofperr {
      *   code defined the specification. ] */
     OFPERR_OFPBRC_BAD_TABLE_ID,
 
-    /* OF1.2+(1,10).  Denied because controller is slave. */
+    /* OF1.0-1.1(1,5), OF1.2+(1,10).  Denied because controller is slave. */
     OFPERR_OFPBRC_IS_SLAVE,
 
     /* NX1.0-1.1(1,514), OF1.2+(1,11).  Invalid port.  [ A non-standard error
@@ -230,6 +264,11 @@ enum ofperr {
      * value. */
     OFPERR_NXBAC_MUST_BE_ZERO,
 
+    /* NX1.0-1.1(2,526), NX1.2+(15).  Conjunction action must be only action
+     * present.  conjunction(id, k/n) must satisfy 1 <= k <= n and 2 <= n <=
+     * 64. */
+    OFPERR_NXBAC_BAD_CONJUNCTION,
+
 /* ## --------------------- ## */
 /* ## OFPET_BAD_INSTRUCTION ## */
 /* ## --------------------- ## */
@@ -290,7 +329,7 @@ enum ofperr {
      * match. */
     OFPERR_OFPBMC_BAD_WILDCARDS,
 
-    /* OF1.1+(4,6).  Unsupported field in the match. */
+    /* NX1.0(0,263), OF1.1+(4,6).  Unsupported field in the match. */
     OFPERR_OFPBMC_BAD_FIELD,
 
     /* NX1.0(1,258), OF1.1+(4,7).  Unsupported value in a match
@@ -636,6 +675,10 @@ enum ofperr {
     /* OF1.4+(17,15).  Bundle is locking the resource. */
     OFPERR_OFPBFC_BUNDLE_IN_PROGRESS,
 
+    /* NX1.4+(22).  In an OFPT_BUNDLE_ADD_MESSAGE, the OpenFlow version in the
+     * inner and outer messages differ. */
+    OFPERR_NXBFC_BAD_VERSION,
+
 /* ## ------------------------- ## */
 /* ## OFPET_FLOW_MONITOR_FAILED ## */
 /* ## ------------------------- ## */
@@ -667,6 +710,34 @@ enum ofperr {
 
     /* OF1.4+(16,7).  Error in output port/group. */
     OFPERR_OFPMOFC_BAD_OUT,
+
+/* ## ----------------------------- ## */
+/* ## OFPET_GENEVE_TABLE_MOD_FAILED ## */
+/* ## ----------------------------- ## */
+
+    /* NX1.0-1.1(1,527), NX1.2+(16).  The Geneve table mod command is not
+     * recognized as a valid operation. */
+    OFPERR_NXGTMFC_BAD_COMMAND,
+
+    /* NX1.0-1.1(1,528), NX1.2+(17).  The option length is not a valid
+     * option size for Geneve. */
+    OFPERR_NXGTMFC_BAD_OPT_LEN,
+
+    /* NX1.0-1.1(1,529), NX1.2+(18).  The field index is out of range for
+     * the supported NX_TUN_METADATA<n> match. */
+    OFPERR_NXGTMFC_BAD_FIELD_IDX,
+
+    /* NX1.0-1.1(1,530), NX1.2+(19).  The total set of configured options
+     * exceeds the maximum supported by the switch. */
+    OFPERR_NXGTMFC_TABLE_FULL,
+
+    /* NX1.0-1.1(1,531), NX1.2+(20).  The controller issued an NXGTMC_ADD
+     * command for a field index that is already mapped. */
+    OFPERR_NXGTMFC_ALREADY_MAPPED,
+
+    /* NX1.0-1.1(1,532), NX1.2+(21).  The Geneve option that is attempting
+     * to be mapped is the same as one assigned to a different field. */
+    OFPERR_NXGTMFC_DUP_ENTRY,
 
 /* ## ------------------ ## */
 /* ## OFPET_EXPERIMENTER ## */

@@ -90,6 +90,14 @@ struct dpif_class {
      * the type assumed if no type is specified when opening a dpif. */
     const char *type;
 
+    /* Called when the dpif provider is registered, typically at program
+     * startup.  Returning an error from this function will prevent any
+     * datapath with this class from being created.
+     *
+     * This function may be set to null if a datapath class needs no
+     * initialization at registration time. */
+    int (*init)(void);
+
     /* Enumerates the names of all known created datapaths (of class
      * 'dpif_class'), if possible, into 'all_dps'.  The caller has already
      * initialized 'all_dps' and other dpif classes might already have added
@@ -353,13 +361,22 @@ struct dpif_class {
      * return. */
     void (*recv_purge)(struct dpif *dpif);
 
+    /* When 'dpif' is about to purge the datapath, the higher layer may want
+     * to be notified so that it could try reacting accordingly (e.g. grabbing
+     * all flow stats before they are gone).
+     *
+     * Registers an upcall callback function with 'dpif'.  This is only used
+     * if 'dpif' needs to notify the purging of datapath.  'aux' is passed to
+     * the callback on invocation. */
+    void (*register_dp_purge_cb)(struct dpif *, dp_purge_callback *, void *aux);
+
     /* For datapaths that run in userspace (i.e. dpif-netdev), threads polling
      * for incoming packets can directly call upcall functions instead of
      * offloading packet processing to separate handler threads. Datapaths
      * that directly call upcall functions should use the functions below to
      * to register an upcall function and enable / disable upcalls.
      *
-     * Registers an upcall callback function with 'dpif'. This is only used if
+     * Registers an upcall callback function with 'dpif'. This is only used
      * if 'dpif' directly executes upcall functions. 'aux' is passed to the
      * callback on invocation. */
     void (*register_upcall_cb)(struct dpif *, upcall_callback *, void *aux);

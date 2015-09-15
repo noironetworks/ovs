@@ -22,28 +22,27 @@ Configure OVS bridges as follows.
    ovs-appctl ovs/route/show
    Add tunnel route if not present in OVS route table.
    ovs-appctl ovs/route/add 172.168.1.1/24 br-eth1
-3. Add integration brdge int-br and add tunnel port using standard syntax.
+3. Add integration bridge int-br and add tunnel port using standard syntax.
    ovs-vsctl add-port int-br vxlan0 -- set interface vxlan0 type=vxlan  options:remote_ip=172.168.1.2
 4. Assign IP address to int-br, So final topology looks like:
 
+                 192.168.1.1/24
+                +--------------+
+                |    int-br    |                                    192.168.1.2/24
+                +--------------+                                   +--------------+
+                |    vxlan0    |                                   |    vxlan0    |
+                +--------------+                                   +--------------+
+                       |                                                  |
+                       |                                                  |
+                       |                                                  |
+                 172.168.1.1/24                                           |
+                +--------------+                                          |
+                |    br-eth1   |                                   172.168.1.2/24
+                +--------------+                                  +---------------+
+                |    eth1      |----------------------------------|      eth1     |
+                +--------------+                                  +---------------+
 
-       192.168.1.1/24
-       +--------------+
-       |    int-br    |                                   192.168.1.2/24
-       +--------------+                                  +--------------+
-       |    vxlan0    |                                  |    vxlan0    |
-       +--------------+                                  +--------------+
-             |                                                 |
-             |                                                 |
-             |                                                 |
-        172.168.1.1/24                                         |
-       +--------------+                                        |
-       |    br-eth1   |                                  172.168.1.2/24
-       +--------------+                                  +---------------+
-       |    eth1      |----------------------------------|    eth1       |
-       +--------------+                                  +----------------
-
-       Host A with OVS.                                      Remote host.
+                Host A with OVS.                                      Remote host.
 
 With this setup, ping to VXLAN target device (192.168.1.2) should work
 There are following commands that shows internal tables:

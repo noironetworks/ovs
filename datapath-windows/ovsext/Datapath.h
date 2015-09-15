@@ -32,8 +32,6 @@
 #define OVS_READ_DEV_OP          (1 << 0)
 #define OVS_WRITE_DEV_OP         (1 << 1)
 #define OVS_TRANSACTION_DEV_OP   (1 << 2)
-#define OVS_READ_EVENT_DEV_OP    (1 << 3)
-#define OVS_READ_PACKET_DEV_OP   (1 << 4)
 
 typedef struct _OVS_DEVICE_EXTENSION {
     INT numberOpenInstance;
@@ -54,20 +52,6 @@ typedef struct _OVS_OPEN_INSTANCE {
     POVS_USER_PACKET_QUEUE packetQueue;
     UINT32 pid;
 
-    /*
-     * On platforms that support netlink natively, there's generally some form of
-     * serialization between concurrent calls to netlink sockets. However, OVS
-     * userspace guarantees that a given netlink handle is not concurrently used.
-     * Despite this, we do want to have some basic checks in the kernel to make
-     * sure that things don't break if there are concurrent calls.
-     *
-     * This is generally not an issue since kernel data structure access should
-     * be sychronized anyway. Only reason to have this safeguared is to protect
-     * the state in "state-aware" read calls which rely on previous state. This
-     * restriction might go away as the userspace code gets implemented.
-     */
-     INT inUse;
-
     struct {
         POVS_MESSAGE ovsMsg;    /* OVS message passed during dump start. */
         UINT32 index[2];        /* markers to continue dump from. One or more
@@ -81,6 +65,8 @@ typedef struct _OVS_OPEN_INSTANCE {
 
 NDIS_STATUS OvsCreateDeviceObject(NDIS_HANDLE ovsExtDriverHandle);
 VOID OvsDeleteDeviceObject();
+VOID OvsInit();
+VOID OvsCleanup();
 
 POVS_OPEN_INSTANCE OvsGetOpenInstance(PFILE_OBJECT fileObject,
                                       UINT32 dpNo);
@@ -127,35 +113,10 @@ InitUserParamsCtx(PIRP irp,
     usrParamsCtx->outputLength = outputLength;
 }
 
-static __inline NTSTATUS
-InitUserDumpState(POVS_OPEN_INSTANCE instance,
-                  POVS_MESSAGE ovsMsg)
-{
-    /* Clear the dumpState from a previous dump sequence. */
-    ASSERT(instance->dumpState.ovsMsg == NULL);
-    ASSERT(ovsMsg);
+NTSTATUS InitUserDumpState(POVS_OPEN_INSTANCE instance,
+                           POVS_MESSAGE ovsMsg);
 
-    instance->dumpState.ovsMsg =
-        (POVS_MESSAGE) OvsAllocateMemory(sizeof (OVS_MESSAGE));
-    if (instance->dumpState.ovsMsg == NULL) {
-        return STATUS_NO_MEMORY;
-    }
-    RtlCopyMemory(instance->dumpState.ovsMsg, ovsMsg,
-                  sizeof *instance->dumpState.ovsMsg);
-    RtlZeroMemory(instance->dumpState.index,
-                  sizeof instance->dumpState.index);
-
-    return STATUS_SUCCESS;
-}
-
-static __inline VOID
-FreeUserDumpState(POVS_OPEN_INSTANCE instance)
-{
-    if (instance->dumpState.ovsMsg != NULL) {
-        OvsFreeMemory(instance->dumpState.ovsMsg);
-        RtlZeroMemory(&instance->dumpState, sizeof instance->dumpState);
-    }
-}
+VOID FreeUserDumpState(POVS_OPEN_INSTANCE instance);
 
 NTSTATUS OvsSetupDumpStart(POVS_USER_PARAMS_CONTEXT usrParamsCtx);
 

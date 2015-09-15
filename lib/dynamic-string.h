@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2008, 2009, 2010, 2011, 2012, 2013 Nicira, Inc.
+ * Copyright (c) 2008, 2009, 2010, 2011, 2012, 2013, 2015 Nicira, Inc.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -55,6 +55,7 @@ void ds_put_format(struct ds *, const char *, ...) OVS_PRINTF_FORMAT(2, 3);
 void ds_put_format_valist(struct ds *, const char *, va_list)
     OVS_PRINTF_FORMAT(2, 0);
 void ds_put_printable(struct ds *, const char *, size_t);
+void ds_put_hex(struct ds *ds, const void *buf, size_t size);
 void ds_put_hex_dump(struct ds *ds, const void *buf_, size_t size,
                      uintptr_t ofs, bool ascii);
 int ds_get_line(struct ds *, FILE *);
@@ -62,7 +63,7 @@ int ds_get_preprocessed_line(struct ds *, FILE *, int *line_number);
 int ds_get_test_line(struct ds *, FILE *);
 
 void ds_put_strftime_msec(struct ds *, const char *format, long long int when,
-			  bool utc);
+                          bool utc);
 char *xastrftime_msec(const char *format, long long int when, bool utc);
 
 char *ds_cstr(struct ds *);

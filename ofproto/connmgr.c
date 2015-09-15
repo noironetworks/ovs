@@ -417,7 +417,7 @@ connmgr_get_memory_usage(const struct connmgr *mgr, struct simap *usage)
             struct pinsched_stats stats;
 
             pinsched_get_stats(ofconn->schedulers[i], &stats);
-            packets += stats.n_queued;;
+            packets += stats.n_queued;
         }
         packets += pktbuf_count_packets(ofconn->pktbuf);
     }
@@ -740,8 +740,7 @@ update_in_band_remotes(struct connmgr *mgr)
         } sa;
 
         if (ofconn->band == OFPROTO_IN_BAND
-            && stream_parse_target_with_default_port(target, OFP_OLD_PORT,
-                                                     &sa.ss)
+            && stream_parse_target_with_default_port(target, OFP_PORT, &sa.ss)
             && sa.ss.ss_family == AF_INET) {
             addrs[n_addrs++] = sa.in;
         }
@@ -1000,9 +999,29 @@ ofconn_set_protocol(struct ofconn *ofconn, enum ofputil_protocol protocol)
         uint32_t *master = ofconn->master_async_config;
         uint32_t *slave = ofconn->slave_async_config;
 
+        /* OFPR_ACTION_SET is not supported before OF1.4 */
+        master[OAM_PACKET_IN] &= ~(1u << OFPR_ACTION_SET);
+        slave [OAM_PACKET_IN] &= ~(1u << OFPR_ACTION_SET);
+
         /* OFPR_GROUP is not supported before OF1.4 */
         master[OAM_PACKET_IN] &= ~(1u << OFPR_GROUP);
         slave [OAM_PACKET_IN] &= ~(1u << OFPR_GROUP);
+
+        /* OFPR_PACKET_OUT is not supported before OF1.4 */
+        master[OAM_PACKET_IN] &= ~(1u << OFPR_PACKET_OUT);
+        slave [OAM_PACKET_IN] &= ~(1u << OFPR_PACKET_OUT);
+
+        /* OFPRR_GROUP_DELETE is not supported before OF1.4 */
+        master[OAM_FLOW_REMOVED] &= ~(1u << OFPRR_GROUP_DELETE);
+        slave [OAM_FLOW_REMOVED] &= ~(1u << OFPRR_GROUP_DELETE);
+
+        /* OFPRR_METER_DELETE is not supported before OF1.4 */
+        master[OAM_FLOW_REMOVED] &= ~(1u << OFPRR_METER_DELETE);
+        slave [OAM_FLOW_REMOVED] &= ~(1u << OFPRR_METER_DELETE);
+
+        /* OFPRR_EVICTION is not supported before OF1.4 */
+        master[OAM_FLOW_REMOVED] &= ~(1u << OFPRR_EVICTION);
+        slave [OAM_FLOW_REMOVED] &= ~(1u << OFPRR_EVICTION);
     }
 }
 
@@ -1090,10 +1109,9 @@ ofconn_send_reply(const struct ofconn *ofconn, struct ofpbuf *msg)
 void
 ofconn_send_replies(const struct ofconn *ofconn, struct ovs_list *replies)
 {
-    struct ofpbuf *reply, *next;
+    struct ofpbuf *reply;
 
-    LIST_FOR_EACH_SAFE (reply, next, list_node, replies) {
-        list_remove(&reply->list_node);
+    LIST_FOR_EACH_POP (reply, list_node, replies) {
         ofconn_send_reply(ofconn, reply);
     }
 }
@@ -1129,7 +1147,7 @@ ofconn_send_error(const struct ofconn *ofconn,
 /* Same as pktbuf_retrieve(), using the pktbuf owned by 'ofconn'. */
 enum ofperr
 ofconn_pktbuf_retrieve(struct ofconn *ofconn, uint32_t id,
-                       struct ofpbuf **bufferp, ofp_port_t *in_port)
+                       struct dp_packet **bufferp, ofp_port_t *in_port)
 {
     return pktbuf_retrieve(ofconn->pktbuf, id, bufferp, in_port);
 }
@@ -1166,13 +1184,56 @@ ofconn_report_flow_mod(struct ofconn *ofconn,
     }
     ofconn->last_op = now;
 }
+
+/* OpenFlow 1.4 bundles. */
 
-struct hmap *
-ofconn_get_bundles(struct ofconn *ofconn)
+static inline uint32_t
+bundle_hash(uint32_t id)
 {
-    return &ofconn->bundles;
+    return hash_int(id, 0);
 }
 
+struct ofp_bundle *
+ofconn_get_bundle(struct ofconn *ofconn, uint32_t id)
+{
+    struct ofp_bundle *bundle;
+
+    HMAP_FOR_EACH_IN_BUCKET(bundle, node, bundle_hash(id), &ofconn->bundles) {
+        if (bundle->id == id) {
+            return bundle;
+        }
+    }
+
+    return NULL;
+}
+
+enum ofperr
+ofconn_insert_bundle(struct ofconn *ofconn, struct ofp_bundle *bundle)
+{
+    /* XXX: Check the limit of open bundles */
+
+    hmap_insert(&ofconn->bundles, &bundle->node, bundle_hash(bundle->id));
+
+    return 0;
+}
+
+enum ofperr
+ofconn_remove_bundle(struct ofconn *ofconn, struct ofp_bundle *bundle)
+{
+    hmap_remove(&ofconn->bundles, &bundle->node);
+
+    return 0;
+}
+
+static void
+bundle_remove_all(struct ofconn *ofconn)
+{
+    struct ofp_bundle *b, *next;
+
+    HMAP_FOR_EACH_SAFE (b, next, node, &ofconn->bundles) {
+        ofp_bundle_remove__(ofconn, b, false);
+    }
+}
 
 /* Private ofconn functions. */
 
@@ -1252,20 +1313,30 @@ ofconn_flush(struct ofconn *ofconn)
          * reasons itself. */
         master[OAM_PACKET_IN] = ((1u << OFPR_NO_MATCH)
                                  | (1u << OFPR_ACTION)
-                                 | (1u << OFPR_GROUP));
+                                 | (1u << OFPR_ACTION_SET)
+                                 | (1u << OFPR_GROUP)
+                                 | (1u << OFPR_PACKET_OUT));
         master[OAM_PORT_STATUS] = ((1u << OFPPR_ADD)
                                    | (1u << OFPPR_DELETE)
                                    | (1u << OFPPR_MODIFY));
         master[OAM_FLOW_REMOVED] = ((1u << OFPRR_IDLE_TIMEOUT)
                                     | (1u << OFPRR_HARD_TIMEOUT)
-                                    | (1u << OFPRR_DELETE));
-
+                                    | (1u << OFPRR_DELETE)
+                                    | (1u << OFPRR_GROUP_DELETE)
+                                    | (1u << OFPRR_METER_DELETE)
+                                    | (1u << OFPRR_EVICTION));
+        master[OAM_ROLE_STATUS] = 0;
+        master[OAM_TABLE_STATUS] = 0;
+        master[OAM_REQUESTFORWARD] = 0;
         /* "slave" role gets port status updates by default. */
         slave[OAM_PACKET_IN] = 0;
         slave[OAM_PORT_STATUS] = ((1u << OFPPR_ADD)
                                   | (1u << OFPPR_DELETE)
                                   | (1u << OFPPR_MODIFY));
         slave[OAM_FLOW_REMOVED] = 0;
+        slave[OAM_ROLE_STATUS] = 0;
+        slave[OAM_TABLE_STATUS] = 0;
+        slave[OAM_REQUESTFORWARD] = 0;
     } else {
         memset(ofconn->master_async_config, 0,
                sizeof ofconn->master_async_config);
@@ -1297,7 +1368,7 @@ ofconn_destroy(struct ofconn *ofconn)
         hmap_remove(&ofconn->connmgr->controllers, &ofconn->hmap_node);
     }
 
-    ofp_bundle_remove_all(ofconn);
+    bundle_remove_all(ofconn);
     hmap_destroy(&ofconn->bundles);
 
     hmap_destroy(&ofconn->monitors);
@@ -1453,7 +1524,7 @@ ofconn_log_flow_mods(struct ofconn *ofconn)
  * 'ofconn'. */
 static bool
 ofconn_receives_async_msg(const struct ofconn *ofconn,
-                          enum ofconn_async_msg_type type,
+                          enum ofputil_async_msg_type type,
                           unsigned int reason)
 {
     const uint32_t *async_config;
@@ -1638,6 +1709,28 @@ connmgr_send_port_status(struct connmgr *mgr, struct ofconn *source,
     }
 }
 
+/* Sends an OFPT_REQUESTFORWARD message with 'request' and 'reason' to
+ * appropriate controllers managed by 'mgr'.  For messages caused by a
+ * controller OFPT_GROUP_MOD and OFPT_METER_MOD, specify 'source' as the
+ * controller connection that sent the request; otherwise, specify 'source'
+ * as NULL. */
+void
+connmgr_send_requestforward(struct connmgr *mgr, const struct ofconn *source,
+                            const struct ofputil_requestforward *rf)
+{
+    struct ofconn *ofconn;
+
+    LIST_FOR_EACH (ofconn, node, &mgr->all_conns) {
+        if (ofconn_receives_async_msg(ofconn, OAM_REQUESTFORWARD, rf->reason)
+            && rconn_get_version(ofconn->rconn) >= OFP14_VERSION
+            && ofconn != source) {
+            enum ofputil_protocol protocol = ofconn_get_protocol(ofconn);
+            ofconn_send(ofconn, ofputil_encode_requestforward(rf, protocol),
+                        NULL);
+        }
+    }
+}
+
 /* Sends an OFPT_FLOW_REMOVED or NXT_FLOW_REMOVED message based on 'fr' to
  * appropriate controllers managed by 'mgr'. */
 void
@@ -1720,11 +1813,9 @@ connmgr_send_packet_in(struct connmgr *mgr,
 static void
 do_send_packet_ins(struct ofconn *ofconn, struct ovs_list *txq)
 {
-    struct ofpbuf *pin, *next_pin;
+    struct ofpbuf *pin;
 
-    LIST_FOR_EACH_SAFE (pin, next_pin, list_node, txq) {
-        list_remove(&pin->list_node);
-
+    LIST_FOR_EACH_POP (pin, list_node, txq) {
         if (rconn_send_with_limit(ofconn->rconn, pin,
                                   ofconn->packet_in_counter, 100) == EAGAIN) {
             static struct vlog_rate_limit rl = VLOG_RATE_LIMIT_INIT(5, 5);
@@ -1766,7 +1857,7 @@ schedule_packet_in(struct ofconn *ofconn, struct ofproto_packet_in pin,
     } else {
         pin.up.buffer_id = pktbuf_save(ofconn->pktbuf,
                                        pin.up.packet, pin.up.packet_len,
-                                       pin.up.fmd.in_port);
+                                       pin.up.flow_metadata.flow.in_port.ofp_port);
     }
 
     /* Figure out how much of the packet to send.
@@ -1779,7 +1870,7 @@ schedule_packet_in(struct ofconn *ofconn, struct ofproto_packet_in pin,
 
     /* Make OFPT_PACKET_IN and hand over to packet scheduler. */
     pinsched_send(ofconn->schedulers[pin.up.reason == OFPR_NO_MATCH ? 0 : 1],
-                  pin.up.fmd.in_port,
+                  pin.up.flow_metadata.flow.in_port.ofp_port,
                   ofputil_encode_packet_in(&pin.up,
                                            ofconn_get_protocol(ofconn),
                                            ofconn->packet_in_format),
@@ -1974,8 +2065,8 @@ connmgr_flushed(struct connmgr *mgr)
         ofpact_pad(&ofpacts);
 
         match_init_catchall(&match);
-        ofproto_add_flow(mgr->ofproto, &match, 0, ofpbuf_data(&ofpacts),
-                                                  ofpbuf_size(&ofpacts));
+        ofproto_add_flow(mgr->ofproto, &match, 0, ofpacts.data,
+                                                  ofpacts.size);
 
         ofpbuf_uninit(&ofpacts);
     }
@@ -1983,7 +2074,7 @@ connmgr_flushed(struct connmgr *mgr)
 
 /* Returns the number of hidden rules created by the in-band and fail-open
  * implementations in table 0.  (Subtracting this count from the number of
- * rules in the table 0 classifier, as returned by classifier_count(), yields
+ * rules in the table 0 classifier, as maintained in struct oftable, yields
  * the number of flows that OVS should report via OpenFlow for table 0.) */
 int
 connmgr_count_hidden_rules(const struct connmgr *mgr)
@@ -2251,12 +2342,11 @@ ofmonitor_flush(struct connmgr *mgr)
     struct ofconn *ofconn;
 
     LIST_FOR_EACH (ofconn, node, &mgr->all_conns) {
-        struct ofpbuf *msg, *next;
+        struct ofpbuf *msg;
 
-        LIST_FOR_EACH_SAFE (msg, next, list_node, &ofconn->updates) {
+        LIST_FOR_EACH_POP (msg, list_node, &ofconn->updates) {
             unsigned int n_bytes;
 
-            list_remove(&msg->list_node);
             ofconn_send(ofconn, msg, ofconn->monitor_counter);
             n_bytes = rconn_packet_counter_n_bytes(ofconn->monitor_counter);
             if (!ofconn->monitor_paused && n_bytes > 128 * 1024) {

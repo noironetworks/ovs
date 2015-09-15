@@ -389,7 +389,7 @@
 #include <stddef.h>
 #include <stdint.h>
 #include "netdev.h"
-#include "ofpbuf.h"
+#include "dp-packet.h"
 #include "openflow/openflow.h"
 #include "ovs-numa.h"
 #include "packets.h"
@@ -505,7 +505,7 @@ struct dpif_flow_stats {
     uint16_t tcp_flags;
 };
 
-void dpif_flow_stats_extract(const struct flow *, const struct ofpbuf *packet,
+void dpif_flow_stats_extract(const struct flow *, const struct dp_packet *packet,
                              long long int used, struct dpif_flow_stats *);
 void dpif_flow_stats_format(const struct dpif_flow_stats *, struct ds *);
 
@@ -525,15 +525,15 @@ int dpif_flow_put(struct dpif *, enum dpif_flow_put_flags,
                   const struct nlattr *key, size_t key_len,
                   const struct nlattr *mask, size_t mask_len,
                   const struct nlattr *actions, size_t actions_len,
-                  const ovs_u128 *ufid, const int pmd_id,
+                  const ovs_u128 *ufid, const unsigned pmd_id,
                   struct dpif_flow_stats *);
 int dpif_flow_del(struct dpif *,
                   const struct nlattr *key, size_t key_len,
-                  const ovs_u128 *ufid, const int pmd_id,
+                  const ovs_u128 *ufid, const unsigned pmd_id,
                   struct dpif_flow_stats *);
 int dpif_flow_get(struct dpif *,
                   const struct nlattr *key, size_t key_len,
-                  const ovs_u128 *ufid, const int pmd_id,
+                  const ovs_u128 *ufid, const unsigned pmd_id,
                   struct ofpbuf *, struct dpif_flow *);
 
 /* Flow dumping interface
@@ -583,7 +583,7 @@ struct dpif_flow {
     size_t actions_len;           /* 'actions' length in bytes. */
     ovs_u128 ufid;                /* Unique flow identifier. */
     bool ufid_present;            /* True if 'ufid' was provided by datapath.*/
-    int pmd_id;                   /* Datapath poll mode dirver id. */
+    unsigned pmd_id;              /* Datapath poll mode driver id. */
     struct dpif_flow_stats stats; /* Flow statistics. */
 };
 int dpif_flow_dump_next(struct dpif_flow_dump_thread *,
@@ -640,7 +640,7 @@ struct dpif_flow_put {
     const struct nlattr *actions;   /* Actions to perform on flow. */
     size_t actions_len;             /* Length of 'actions' in bytes. */
     const ovs_u128 *ufid;           /* Optional unique flow identifier. */
-    int pmd_id;                     /* Datapath poll mode driver id. */
+    unsigned pmd_id;                /* Datapath poll mode driver id. */
 
     /* Output. */
     struct dpif_flow_stats *stats;  /* Optional flow statistics. */
@@ -671,7 +671,7 @@ struct dpif_flow_del {
     const ovs_u128 *ufid;           /* Unique identifier of flow to delete. */
     bool terse;                     /* OK to skip sending/receiving full flow
                                      * info? */
-    int pmd_id;                     /* Datapath poll mode driver id. */
+    unsigned pmd_id;                /* Datapath poll mode driver id. */
 
     /* Output. */
     struct dpif_flow_stats *stats;  /* Optional flow statistics. */
@@ -699,8 +699,7 @@ struct dpif_execute {
     bool probe;                     /* Suppress error messages. */
 
     /* Input, but possibly modified as a side effect of execution. */
-    struct ofpbuf *packet;          /* Packet to execute. */
-    struct pkt_metadata md;         /* Packet metadata. */
+    struct dp_packet *packet;          /* Packet to execute. */
 };
 
 /* Queries the dpif for a flow entry.
@@ -733,7 +732,7 @@ struct dpif_flow_get {
     const struct nlattr *key;       /* Flow to get. */
     size_t key_len;                 /* Length of 'key' in bytes. */
     const ovs_u128 *ufid;           /* Unique identifier of flow to get. */
-    int pmd_id;                     /* Datapath poll mode driver id. */
+    unsigned pmd_id;                /* Datapath poll mode driver id. */
     struct ofpbuf *buffer;          /* Storage for output parameters. */
 
     /* Output. */
@@ -777,7 +776,7 @@ const char *dpif_upcall_type_to_string(enum dpif_upcall_type);
 struct dpif_upcall {
     /* All types. */
     enum dpif_upcall_type type;
-    struct ofpbuf packet;       /* Packet data. */
+    struct dp_packet packet;       /* Packet data. */
     struct nlattr *key;         /* Flow key. */
     size_t key_len;             /* Length of 'key' in bytes. */
     ovs_u128 ufid;              /* Unique flow identifier for 'key'. */
@@ -785,7 +784,21 @@ struct dpif_upcall {
     /* DPIF_UC_ACTION only. */
     struct nlattr *userdata;    /* Argument to OVS_ACTION_ATTR_USERSPACE. */
     struct nlattr *out_tun_key;    /* Output tunnel key. */
+    struct nlattr *actions;    /* Argument to OVS_ACTION_ATTR_USERSPACE. */
 };
+
+/* A callback to notify higher layer of dpif about to be purged, so that
+ * higher layer could try reacting to this (e.g. grabbing all flow stats
+ * before they are gone).  This function is currently implemented only by
+ * dpif-netdev.
+ *
+ * The caller needs to provide the 'aux' pointer passed down by higher
+ * layer from the dpif_register_notify_cb() function and the 'pmd_id' of
+ * the polling thread.
+ */
+    typedef void dp_purge_callback(void *aux, unsigned pmd_id);
+
+void dpif_register_dp_purge_cb(struct dpif *, dp_purge_callback *, void *aux);
 
 /* A callback to process an upcall, currently implemented only by dpif-netdev.
  *
@@ -805,10 +818,10 @@ struct dpif_upcall {
  *
  * Returns 0 if successful, ENOSPC if the flow limit has been reached and no
  * flow should be installed, or some otherwise a positive errno value. */
-typedef int upcall_callback(const struct ofpbuf *packet,
+typedef int upcall_callback(const struct dp_packet *packet,
                             const struct flow *flow,
                             ovs_u128 *ufid,
-                            int pmd_id,
+                            unsigned pmd_id,
                             enum dpif_upcall_type type,
                             const struct nlattr *userdata,
                             struct ofpbuf *actions,
