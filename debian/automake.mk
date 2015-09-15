@@ -50,6 +50,8 @@ EXTRA_DIST += \
 	debian/openvswitch-vtep.init \
 	debian/openvswitch-vtep.install \
 	debian/openvswitch-vtep.manpages \
+	debian/openvswitch-lib.install \
+	debian/openvswitch-lib-dev.install \
 	debian/ovs-monitor-ipsec \
 	debian/python-openvswitch.dirs \
 	debian/python-openvswitch.install \
