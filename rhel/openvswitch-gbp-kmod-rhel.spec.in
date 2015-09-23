@@ -38,7 +38,7 @@ traffic. This package contains the kernel modules.
 %setup -q -n openvswitch-%{version}
 cat > openvswitch.conf <<EOF
 override openvswitch * extra/openvswitch
-override openvswitch * weak-updates/openvswitch
+override openvswitch * weak-updates
 EOF
 
 %build
