@@ -7,8 +7,7 @@
 # notice and this notice are preserved.  This file is offered as-is,
 # without warranty of any kind.
 
-%{!?kmoddir:%define kmoddir %(/bin/ls -tr /lib/modules | tail -1)}
-%{!?ksrcdir:%define ksrcdir %(/bin/ls -tr /usr/src/kernels | tail -1)}
+%{!?kversion:%define kversion %(/bin/ls -tr /usr/src/kernels | tail -1)}
 %{!?buildversion:%define buildversion 1}
 
 %define _unpackaged_files_terminate_build 0 
@@ -26,6 +25,7 @@ Release: %{buildversion}%{?dist}
 Source: openvswitch-%{version}.tar.gz
 BuildRequires: %kernel_module_package_buildreqs
 BuildRequires: openssl-devel
+BuildRequires: kernel-devel = 3.10.0-229.1.2.el7
 Provides: openvswitch-gbp-kmod
 Obsoletes: openvswitch-kmod
 
@@ -42,13 +42,13 @@ override openvswitch * weak-updates
 EOF
 
 %build
-./configure --prefix=/usr --sysconfdir=/etc --localstatedir=%{_localstatedir} --with-linux=/lib/modules/%{kmoddir}/build --enable-ssl
+./configure --prefix=/usr --sysconfdir=/etc --localstatedir=%{_localstatedir} --with-linux=/usr/src/kernels/%{kversion} --enable-ssl
 make %{_smp_mflags} -C datapath/linux
 
 %install
 export INSTALL_MOD_PATH=$RPM_BUILD_ROOT
 export INSTALL_MOD_DIR=extra/openvswitch
-make -C /usr/src/kernels/%{ksrcdir} modules_install M="`pwd`"/datapath/linux
+make -C /usr/src/kernels/%{kversion} modules_install M="`pwd`"/datapath/linux
 
 install -d %{buildroot}%{_sysconfdir}/depmod.d/
 install -m 644 openvswitch.conf %{buildroot}%{_sysconfdir}/depmod.d/
@@ -57,22 +57,22 @@ install -m 644 openvswitch.conf %{buildroot}%{_sysconfdir}/depmod.d/
 rm -rf $RPM_BUILD_ROOT
 
 %post
-if [ -e "/boot/System.map-%{kmoddir}" ]; then
-    /sbin/depmod -aeF /boot/System.map-%{kmoddir} %{kmoddir} > /dev/null || :
+if [ -e "/boot/System.map-%{kversion}" ]; then
+    /sbin/depmod -aeF /boot/System.map-%{kversion} %{kversion} > /dev/null || :
 fi
 
-modules=( $(find /lib/modules/%{kmoddir}/extra/openvswitch/ -name '*.ko') )
+modules=( $(find /lib/modules/%{kversion}/extra/openvswitch/ -name '*.ko') )
 if [ -x "/sbin/weak-modules" ]; then
     printf '%s\n' "${modules[@]}"     | /sbin/weak-modules --add-modules
 fi
 
 
 %preun
-find /lib/modules/%{kmoddir}/extra/openvswitch/ -name '*.ko' > /var/run/rpm-kmod-%{name}-modules
+find /lib/modules/%{kversion}/extra/openvswitch/ -name '*.ko' > /var/run/rpm-kmod-%{name}-modules
 
 %postun
-if [ -e "/boot/System.map-%{kmoddir}" ]; then
-    /sbin/depmod -aF /boot/System.map-%{kmoddir} %{kmoddir} > /dev/null || :
+if [ -e "/boot/System.map-%{kversion}" ]; then
+    /sbin/depmod -aF /boot/System.map-%{kversion} %{kversion} > /dev/null || :
 fi
 if [ "$1" = 0 ];then
     modules=( $(cat /var/run/rpm-kmod-%{name}-modules) )
@@ -83,7 +83,11 @@ fi
 
 %files
 %defattr(-,root,root)
-/lib/modules/%{kmoddir}/extra/openvswitch/openvswitch.ko
+/lib/modules/%{kversion}/extra/openvswitch/openvswitch.ko
+/lib/modules/%{kversion}/extra/openvswitch/vport-geneve.ko
+/lib/modules/%{kversion}/extra/openvswitch/vport-gre.ko
+/lib/modules/%{kversion}/extra/openvswitch/vport-lisp.ko
+/lib/modules/%{kversion}/extra/openvswitch/vport-stt.ko
 %config %{_sysconfdir}/depmod.d/openvswitch.conf
 
 %changelog
