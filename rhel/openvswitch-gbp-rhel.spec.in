@@ -44,8 +44,8 @@ Requires(post): systemd-units
 Requires(preun): systemd-units
 Requires(postun): systemd-units
 Obsoletes: openvswitch-controller <= 0:2.1.0-1
-Obsoletes: openvswitch
 Provides: openvswitch-gbp
+Provides: openvswitch
 Requires: openvswitch-gbp-kmod
 
 %bcond_without check
