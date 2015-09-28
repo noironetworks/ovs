@@ -25,7 +25,8 @@ Release: %{buildversion}%{?dist}
 Source: openvswitch-%{version}.tar.gz
 BuildRequires: %kernel_module_package_buildreqs
 BuildRequires: openssl-devel
-BuildRequires: kernel-devel = 3.10.0-229.1.2.el7
+BuildRequires: kernel-devel = 3.10.0-229.14.1.el7
+Requires: kernel >= 3.10.0-229.14.1.el7
 Provides: openvswitch-gbp-kmod
 Obsoletes: openvswitch-kmod
 
@@ -38,6 +39,7 @@ traffic. This package contains the kernel modules.
 %setup -q -n openvswitch-%{version}
 cat > openvswitch.conf <<EOF
 override openvswitch * extra/openvswitch
+override openvswitch * weak-updates/openvswitch
 override openvswitch * weak-updates
 EOF
 
