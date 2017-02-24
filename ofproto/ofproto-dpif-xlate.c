@@ -483,7 +483,7 @@ static void do_xlate_actions(const struct ofpact *, size_t ofpacts_len,
 static void xlate_normal(struct xlate_ctx *);
 static void xlate_table_action(struct xlate_ctx *, ofp_port_t in_port,
                                uint8_t table_id, bool may_packet_in,
-                               bool honor_table_miss);
+                               bool honor_table_miss, bool with_ct_orig);
 static bool input_vid_is_valid(const struct xlate_ctx *,
                                uint16_t vid, struct xbundle *);
 static uint16_t input_vid_to_vlan(const struct xbundle *, uint16_t vid);
@@ -3196,7 +3196,8 @@ compose_output_action__(struct xlate_ctx *ctx, ofp_port_t ofp_port,
 
         if (!process_special(ctx, peer) && may_receive(peer, ctx)) {
             if (xport_stp_forward_state(peer) && xport_rstp_forward_state(peer)) {
-                xlate_table_action(ctx, flow->in_port.ofp_port, 0, true, true);
+                xlate_table_action(ctx, flow->in_port.ofp_port, 0, true, true,
+                                   false);
                 if (!ctx->freezing) {
                     xlate_action_set(ctx);
                 }
@@ -3210,7 +3211,8 @@ compose_output_action__(struct xlate_ctx *ctx, ofp_port_t ofp_port,
                 size_t old_size = ctx->odp_actions->size;
                 mirror_mask_t old_mirrors2 = ctx->mirrors;
 
-                xlate_table_action(ctx, flow->in_port.ofp_port, 0, true, true);
+                xlate_table_action(ctx, flow->in_port.ofp_port, 0, true, true,
+                                   false);
                 ctx->mirrors = old_mirrors2;
                 ctx->base_flow = old_base_flow;
                 ctx->odp_actions->size = old_size;
@@ -3465,8 +3467,50 @@ xlate_resubmit_resource_check(struct xlate_ctx *ctx)
 }
 
 static void
+tuple_swap(struct flow *flow, const struct flow *key)
+{
+    /* Do not swap if there is no CT tuple. */
+    if (flow == key && flow->ct_nw_proto == 0) {
+        OVS_NOT_REACHED();   /* Prerequisite check should take care of this! */
+    }
+
+    uint8_t nw_proto = flow->nw_proto;
+    flow->nw_proto = flow->ct_nw_proto;
+    flow->ct_nw_proto = nw_proto;
+
+    if (key->dl_type == htons(ETH_TYPE_IP)) {
+        ovs_be32 nw_src = flow->nw_src;
+        flow->nw_src = flow->ct_nw_src;
+        flow->ct_nw_src = nw_src;
+
+        ovs_be32 nw_dst = flow->nw_dst;
+        flow->nw_dst = flow->ct_nw_dst;
+        flow->ct_nw_dst = nw_dst;
+    } else if (key->dl_type == htons(ETH_TYPE_IPV6)) {
+        struct in6_addr ipv6_src = flow->ipv6_src;
+        flow->ipv6_src = flow->ct_ipv6_src;
+        flow->ct_ipv6_src = ipv6_src;
+
+        struct in6_addr ipv6_dst = flow->ipv6_dst;
+        flow->ipv6_dst = flow->ct_ipv6_dst;
+        flow->ct_ipv6_dst = ipv6_dst;
+    } else {
+        OVS_NOT_REACHED();
+    }
+
+    ovs_be16 tp_src = flow->tp_src;
+    flow->tp_src = flow->ct_tp_src;
+    flow->ct_tp_src = tp_src;
+
+    ovs_be16 tp_dst = flow->tp_dst;
+    flow->tp_dst = flow->ct_tp_dst;
+    flow->ct_tp_dst = tp_dst;
+}
+
+static void
 xlate_table_action(struct xlate_ctx *ctx, ofp_port_t in_port, uint8_t table_id,
-                   bool may_packet_in, bool honor_table_miss)
+                   bool may_packet_in, bool honor_table_miss,
+                   bool with_ct_orig)
 {
     /* Check if we need to recirculate before matching in a table. */
     if (ctx->was_mpls) {
@@ -3479,6 +3523,11 @@ xlate_table_action(struct xlate_ctx *ctx, ofp_port_t in_port, uint8_t table_id,
 
         ctx->table_id = table_id;
 
+        /* Swap packet fields with CT 5-tuple if requested. */
+        if (with_ct_orig) {
+            tuple_swap(&ctx->xin->flow, &ctx->xin->flow);
+            tuple_swap(&ctx->wc->masks, &ctx->xin->flow);
+        }
         rule = rule_dpif_lookup_from_table(ctx->xbridge->ofproto,
                                            ctx->xin->tables_version,
                                            &ctx->xin->flow, ctx->wc,
@@ -3486,6 +3535,11 @@ xlate_table_action(struct xlate_ctx *ctx, ofp_port_t in_port, uint8_t table_id,
                                            &ctx->table_id, in_port,
                                            may_packet_in, honor_table_miss,
                                            ctx->xin->xcache);
+        /* Swap back. */
+        if (with_ct_orig) {
+            tuple_swap(&ctx->xin->flow, &ctx->xin->flow);
+            tuple_swap(&ctx->wc->masks, &ctx->xin->flow);
+        }
 
         if (rule) {
             /* Fill in the cache entry here instead of xlate_recursively
@@ -3793,7 +3847,7 @@ xlate_ofpact_resubmit(struct xlate_ctx *ctx,
     }
 
     xlate_table_action(ctx, in_port, table_id, may_packet_in,
-                       honor_table_miss);
+                       honor_table_miss, resubmit->with_ct_orig);
 }
 
 static void
@@ -4153,7 +4207,7 @@ xlate_output_action(struct xlate_ctx *ctx,
         break;
     case OFPP_TABLE:
         xlate_table_action(ctx, ctx->xin->flow.in_port.ofp_port,
-                           0, may_packet_in, true);
+                           0, may_packet_in, true, false);
         break;
     case OFPP_NORMAL:
         xlate_normal(ctx);
@@ -5408,7 +5462,7 @@ do_xlate_actions(const struct ofpact *ofpacts, size_t ofpacts_len,
             ovs_assert(ctx->table_id < ogt->table_id);
 
             xlate_table_action(ctx, ctx->xin->flow.in_port.ofp_port,
-                               ogt->table_id, true, true);
+                               ogt->table_id, true, true, false);
             break;
         }
 
