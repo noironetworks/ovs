@@ -696,6 +696,8 @@ int ovs_flow_key_update(struct sk_buff *skb, struct sw_flow_key *key)
 int ovs_flow_key_extract(const struct ip_tunnel_info *tun_info,
 			 struct sk_buff *skb, struct sw_flow_key *key)
 {
+	int err;
+
 	/* Extract metadata from packet. */
 	if (tun_info) {
 		key->tun_proto = ip_tunnel_info_af(tun_info);
@@ -719,25 +721,49 @@ int ovs_flow_key_extract(const struct ip_tunnel_info *tun_info,
 	key->phy.priority = skb->priority;
 	key->phy.in_port = OVS_CB(skb)->input_vport->port_no;
 	key->phy.skb_mark = skb->mark;
-	ovs_ct_fill_key(skb, key);
 	key->ovs_flow_hash = 0;
 	key->recirc_id = 0;
 
-	return key_extract(skb, key);
+	err = key_extract(skb, key);
+	if (!err)
+		ovs_ct_fill_key(skb, key);   /* Must be after key_extract(). */
+	return err;
 }
 
 int ovs_flow_key_extract_userspace(struct net *net, const struct nlattr *attr,
 				   struct sk_buff *skb,
 				   struct sw_flow_key *key, bool log)
 {
+	const struct nlattr *a[OVS_KEY_ATTR_MAX + 1];
+	u64 attrs = 0;
 	int err;
+
+	err = parse_flow_nlattrs(attr, a, &attrs, log);
+	if (err)
+		return -EINVAL;
 
 	memset(key, 0, OVS_SW_FLOW_KEY_METADATA_SIZE);
 
 	/* Extract metadata from netlink attributes. */
-	err = ovs_nla_get_flow_metadata(net, attr, key, log);
+	err = ovs_nla_get_flow_metadata(net, a, attrs, key, log);
 	if (err)
 		return err;
 
-	return key_extract(skb, key);
+	err = key_extract(skb, key);
+	if (err)
+		return err;
+
+	/* Check that we have conntrack original direction tuple metadata only
+	 * for packets for which it makes sense.  Otherwise the key may be
+	 * corrupted due to overlapping key fields.
+	 */
+	if (attrs & (1 << OVS_KEY_ATTR_CT_ORIG_TUPLE_IPV4) &&
+	    key->eth.type != htons(ETH_P_IP))
+		return -EINVAL;
+	if (attrs & (1 << OVS_KEY_ATTR_CT_ORIG_TUPLE_IPV6) &&
+	    (key->eth.type != htons(ETH_P_IPV6) ||
+	     sw_flow_key_is_nd(key)))
+		return -EINVAL;
+
+	return 0;
 }
