@@ -67,4 +67,14 @@ static inline bool rpl_nf_ct_get_tuple(const struct sk_buff *skb,
 #define nf_ct_get_tuple rpl_nf_ct_get_tuple
 #endif /* HAVE_NF_CT_GET_TUPLEPR_TAKES_STRUCT_NET */
 
+#ifdef HAVE_NF_CONN_TIMER
+static inline bool rpl_nf_ct_delete(struct nf_conn *ct, u32 portid, int report)
+{
+	if (del_timer(&ct->timeout))
+		return nf_ct_delete(ct, portid, report);
+	return false;
+}
+#define nf_ct_delete rpl_nf_ct_delete
+#endif /* HAVE_NF_CONN_TIMER */
+
 #endif /* _NF_CONNTRACK_CORE_WRAPPER_H */
